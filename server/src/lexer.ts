@@ -1,5 +1,5 @@
 import * as moo from "moo"
-export{ mylexer as lexer}
+export{ lexer ,Token,TokenList}
 type TokenType=
      "end"
     |"line_number_directive"
@@ -25,7 +25,7 @@ type TokenType=
 interface Token extends moo.Token{
     type:TokenType
 }
-const lexer = moo.compile({
+const moolexer = moo.compile({
     end: {
         /**
              EOF  $(?![\r\n])
@@ -144,9 +144,9 @@ type TokenList = {
     errors: Token[]
 }
 
-let mylexer = lexer as Lexer
+let lexer = moolexer as Lexer
 
-let MyLexerPrototype = mylexer.constructor.prototype
+let MyLexerPrototype = lexer.constructor.prototype
 MyLexerPrototype.getTokens = function () {
     let tokenList: TokenList = { tokens: [], end: undefined, errors: [] }
     let tokens = tokenList.tokens
