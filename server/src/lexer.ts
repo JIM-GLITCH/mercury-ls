@@ -1,4 +1,5 @@
 import * as moo from "moo"
+import { Range } from 'vscode-languageserver'
 export{ lexer ,Token,TokenList}
 type TokenType=
      "end"
@@ -21,6 +22,8 @@ type TokenType=
     |"open"
     |"open_ct"
     |"implementation_defined"
+    |"backquoted"
+    |"EOF"
 
 interface Token extends moo.Token{
     type:TokenType
@@ -127,12 +130,15 @@ const moolexer = moo.compile({
     close_curly: "}",
     ht_sep: "|",
     comma: ",",
+    backquoted:/`.*?`/,
     junk: { match: /\s+/, lineBreaks: true },
     error: /./,
 })
 
-interface Lexer extends moo.Lexer {
-    getTokens(): TokenList
+export interface Lexer extends moo.Lexer {
+    col: any
+    line: number 
+    getTokenList(): TokenList|undefined
     clone(): Lexer
     next():Token|undefined
     [Symbol.iterator](): Iterator<Token>;
@@ -151,13 +157,25 @@ MyLexerPrototype.getTokens = function () {
     let tokenList: TokenList = { tokens: [], end: undefined, errors: [] }
     let tokens = tokenList.tokens
     let errors = tokenList.errors
+    let self = this as Lexer;
     for (;;){
-        let token = (this as Lexer).next();
+        let token = self.next();
         // 遇到 end of file
         if(!token){
-            if(tokens.length>0)
+            if(tokens.length>0){
+                let EOF:Token = {
+                    type:"EOF",
+                    line:self.line,
+                    col:self.col,
+                    value:"",
+                    text:"",
+                    offset:-1,
+                    lineBreaks:0
+                }
+                tokens.push(EOF);
                 return tokenList;
-            break;
+            }
+            return undefined;
         }
 
         switch (token.type) {
@@ -172,10 +190,35 @@ MyLexerPrototype.getTokens = function () {
             // 遇到 end of clause 返回 tokenlist
             case "end":
                 tokenList.end = token;
+                let EOF:Token = {
+                    type:"EOF",
+                    line:self.line,
+                    col:self.col,
+                    value:"",
+                    text:"",
+                    offset:-1,
+                    lineBreaks:0
+                }
+                tokens.push(EOF);
                 return tokenList;
             // 遇到一般 token 添加到tokens里
             default:
                 tokens.push(token)
         }
     }
+}
+
+export function tokenRange( token:Token):Range{
+	return {
+		start:{
+			line:token.line-1,
+			character:token.col-1
+		},
+		end:{
+			line:token.line+token.lineBreaks-1,
+			character:token.lineBreaks
+				?	(token.text.length-token.text.lastIndexOf("\n")-1)
+				:	(token.col+token.text.length-1)
+		}
+	}
 }
