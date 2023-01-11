@@ -1,7 +1,7 @@
 import * as moo from "moo"
 import { Range } from 'vscode-languageserver'
 export{ lexer ,Token,TokenList}
-type TokenType=
+export type TokenType=
      "end"
     |"line_number_directive"
     |"comment"
@@ -46,54 +46,21 @@ const moolexer = moo.compile({
 
     ,
     string: {
-        match: /"(?:""|\\(?:.|\n)|(?!").)*"/, lineBreaks: true
+        match: /"(?:""|\\[\s\S]|[^"])*"/, lineBreaks: true
+    },
+    implementation_defined: {
+        match: /\$[a-z][_0-9a-zA-Z]*/
     },
     name: [
         { match: /[a-z][_0-9a-zA-Z]*/ },
-        { match: /'(?:''|\\(?:.|\n)|(?!').)*'/, lineBreaks: true },
+        { match: /'(?:''|\\(?:.|\n)|(?!').)*'/, lineBreaks: true,value:(x)=>x.slice(1,-1) },
+        { match: /\[\s*\]/, lineBreaks: true,value:(x)=>"[]"},
+        { match: /\{\s*\}/, lineBreaks: true,value:(x)=>"{}"},
         { match: /[#$&*+\-./:<=>?@^~\\]+/ },
+        { match: /;|![.:]?/ },
     ],
     variable: [
         { match: /[_A-Z][_0-9a-zA-Z]*/ },
-    ],
-    integer: [
-        /**
-             For decimal, binary, octal and hexadecimal literals, an arbitrary number of
-            underscores (‘_’) may be inserted between the digits. An arbitrary number of
-            underscores may also be inserted between the radix prefix (i.e. ‘0b’, ‘0o’ and
-            ‘0x’) and the initial digit. Similarly, an arbitrary number of underscores may
-            be inserted between the final digit and the signedness suffix. The purpose of
-            the underscores is to improve readability, and they do not affect the numeric
-            value of the literal.
-            
-            an arbitrary number of underscores (‘_’) may be inserted between the digits.
-                decimal         [0-9](?:[0-9_]*[0-9])?
-                binary          [01](?:[01_]*[01])?
-                octal           [0-7](?:[0-7_]*[0-7])?
-
-            An arbitrary number ofunderscores may also be inserted between the radix prefix 
-            (i.e. ‘0b’, ‘0o’ and‘0x’) and the initial digit.
-                binary          0b_*
-                octal           0o_*
-                hexadecimal     0x_*
-
-            an arbitrary number of underscores may be inserted between the final digit and
-            the signedness suffix.
-                _*(?:i(?:8|16|32|64)?|u(?:8|16|32|64)?)
-                or
-                _*(?:i8|i16|i32|i64|i|u8|u16|u32|u64|u)
-         */
-
-        // decimal 
-        { match: /[0-9](?:[0-9_]*[0-9])?(?:_*(?:i8|i16|i32|i64|i|u8|u16|u32|u64|u))?/ },
-        // binary
-        { match: /0b_*[01](?:[01_]*[01])?(?:_*(?:i8|i16|i32|i64|i|u8|u16|u32|u64|u))?/ },
-        // octal
-        { match: /0o_*[0-7]+(?:_*(?:i8|i16|i32|i64|i|u8|u16|u32|u64|u))?/ },
-        // hexadecimal
-        { match: /0x_*[0-9A-Fa-f]+(?:_*(?:i8|i16|i32|i64|i|u8|u16|u32|u64|u))?/ },
-        // character-code literal 
-        { match: /0'(?:""|\\(?:[abrftnv\\'"]|x[0-9A-Fa-f]+\\|[0-7][0-7]*\\|u[0-9A-Fa-f]{4}|U[0-9A-Fa-f]{8})|.)/ },
     ],
     float: {
         /* 	
@@ -111,9 +78,46 @@ const moolexer = moo.compile({
         */
         match: /[0-9](?:[0-9_]*[0-9])?(?:\.[0-9](?:[0-9_]*[0-9])?(?:[eE][+-]?[0-9](?:[0-9_]*[0-9])?)?|[eE][+-]?[0-9](?:[0-9_]*[0-9])?)/
     },
-    implementation_defined: {
-        match: /\$[a-z][_0-9a-zA-Z]*/
-    },
+    integer: [
+        /**
+             For decimal, binary, octal and hexadecimal literals, an arbitrary number of
+            underscores (‘_’) may be inserted between the digits. An arbitrary number of
+            underscores may also be inserted between the radix prefix (i.e. ‘0b’, ‘0o’ and
+            ‘0x’) and the initial digit. Similarly, an arbitrary number of underscores may
+            be inserted between the final digit and the signedness suffix. The purpose of
+            the underscores is to improve readability, and they do not affect the numeric
+            value of the literal.
+            
+            an arbitrary number of underscores (‘_’) may be inserted between the digits.
+                decimal         [0-9](?:[0-9_]*[0-9])?
+                binary          [01](?:[01_]*[01])?
+                octal           [0-7](?:[0-7_]*[0-7])?
+                hexadecimal     [0-9A-Fa-f](?:[0-9A-Fa-f_]*[0-9A-Fa-f])?
+
+            An arbitrary number ofunderscores may also be inserted between the radix prefix 
+            (i.e. ‘0b’, ‘0o’ and‘0x’) and the initial digit.
+                binary          0b_*
+                octal           0o_*
+                hexadecimal     0x_*
+
+            an arbitrary number of underscores may be inserted between the final digit and
+            the signedness suffix.
+                _*(?:i(?:8|16|32|64)?|u(?:8|16|32|64)?)
+                or
+                _*(?:i8|i16|i32|i64|i|u8|u16|u32|u64|u)
+                */
+
+        // binary
+        { match: /0b_*[01](?:[01_]*[01])?(?:_*(?:i8|i16|i32|i64|i|u8|u16|u32|u64|u))?/ },
+        // octal
+        { match: /0o_*[0-7](?:[0-7_]*[0-7])?(?:_*(?:i8|i16|i32|i64|i|u8|u16|u32|u64|u))?/ },
+        // hexadecimal
+        { match: /0x_*[0-9A-Fa-f](?:[0-9A-Fa-f_]*[0-9A-Fa-f])?(?:_*(?:i8|i16|i32|i64|i|u8|u16|u32|u64|u))?/ },
+        // character-code literal 
+        { match: /0'(?:""|\\(?:[abrftnv\\'"]|x[0-9A-Fa-f]+\\|[0-7][0-7]*\\|u[0-9A-Fa-f]{4}|U[0-9A-Fa-f]{8})|.)/ },
+        // decimal 
+        { match: /[0-9](?:[0-9_]*[0-9])?(?:_*(?:i8|i16|i32|i64|i|u8|u16|u32|u64|u))?/ },
+    ],
     open_ct: {
         /**
             A left parenthesis, ‘(’, that is not preceded by whitespace
@@ -136,7 +140,7 @@ const moolexer = moo.compile({
 })
 
 export interface Lexer extends moo.Lexer {
-    col: any
+    col: number
     line: number 
     getTokenList(): TokenList|undefined
     clone(): Lexer
@@ -153,7 +157,7 @@ type TokenList = {
 let lexer = moolexer as Lexer
 
 let MyLexerPrototype = lexer.constructor.prototype
-MyLexerPrototype.getTokens = function () {
+MyLexerPrototype.getTokenList = function () {
     let tokenList: TokenList = { tokens: [], end: undefined, errors: [] }
     let tokens = tokenList.tokens
     let errors = tokenList.errors

@@ -16,12 +16,20 @@ import {
 	TextDocumentSyncKind,
 	InitializeResult,
 	Range,
-	Position
+	Position,
+	URI,
+	Hover,
+	MarkupContent
 } from 'vscode-languageserver/node';
 
 import {
 	TextDocument
 } from 'vscode-languageserver-textdocument';
+import { lexer } from './lexer'
+import { ParserState, parse } from './parser'
+import { MultiMap } from './multimap'
+import { Document } from './document'
+import { termRange } from './term'
 
 // Create a connection for the server, using Node's IPC as a transport.
 // Also include all preview / proposed LSP features.
@@ -57,7 +65,10 @@ connection.onInitialize((params: InitializeParams) => {
 			// Tell the client that this server supports code completion.
 			completionProvider: {
 				resolveProvider: true
-			}
+			},
+			hoverProvider:true
+			
+			
 		}
 	};
 	if (hasWorkspaceFolderCapability) {
@@ -95,6 +106,14 @@ let globalSettings: ExampleSettings = defaultSettings;
 
 // Cache the settings of all open documents
 const documentSettings: Map<string, Thenable<ExampleSettings>> = new Map();
+
+// 
+let documentsMap = new Map<URI,Document>();
+
+
+
+
+
 
 connection.onDidChangeConfiguration(change => {
 	if (hasConfigurationCapability) {
@@ -138,18 +157,48 @@ documents.onDidChangeContent(change => {
 
 async function validateTextDocument(textDocument: TextDocument): Promise<void> {
 	// In this simple example we get the settings for every validate run.
-	
-	const diagnostics: Diagnostic[] = [];
-	let diagnostic= Diagnostic.create(
-		Range.create(Position.create(0,0),Position.create(0,0)),
-		"test"
-	)
-	diagnostics.push(diagnostic);
-	
- 
+	let ps:ParserState = {
+		textDocument,
+		errors:[],
+		varmap:new MultiMap()
+	}
+	let clauses = parse(ps);
+	let uri  =textDocument.uri;
+	let document = new Document(uri,clauses);
+	documentsMap.set(uri , document)
 	// Send the computed diagnostics to VSCode.
-	connection.sendDiagnostics({ uri: textDocument.uri, diagnostics });
+	connection.sendDiagnostics({ uri: textDocument.uri, diagnostics:ps.errors });
 }
+
+const sleep = (ms: number) => {
+	return new Promise(resolve => setTimeout(resolve, ms))
+}
+
+connection.onHover(async(params)=>{
+	let pos = params.position;
+	let uri = params.textDocument.uri;
+	let document ;
+	while( !(document = documentsMap.get(uri))){
+		await sleep(100);
+	}
+	let term = document.search(pos);
+	if(!term) return undefined
+	
+let message =`\`\`\`mercury
+${term.val}
+\`\`\`
+`
+	let hover :Hover={
+		contents:{
+			kind:"markdown",
+			value:message
+		} as MarkupContent,
+		range:termRange(term)
+	}
+	return hover
+})
+
+
 
 connection.onDidChangeWatchedFiles(_change => {
 	// Monitored files have change in VSCode

@@ -1,7 +1,9 @@
 import { Diagnostic, Position, URI } from 'vscode-languageserver'
-import { Lexer, Token, TokenList, lexer, tokenRange } from './lexer';
+import { Lexer, Token, TokenList, TokenType, lexer, tokenRange } from './lexer';
 import { Assoc, OpInfo, adjust_priority_for_assoc, lookup_infix_op, lookup_op, lookup_op_infos, lookup_operator_term, max_priority, opTable } from './ops'
-import { Term, applyTerm, atom, binPrefixCompound, float, functorCompound, implementation_defined, infixCompound, integer, negFloat, negInteger, prefixCompound, str, variable } from './term'
+import { Term, applyTerm, atom, backquotedapplyTerm, binPrefixCompound, clause, float, functorCompound, implementation_defined, infixCompound, integer, negFloat, negInteger, prefixCompound, str, variable } from './term'
+import { MultiMap } from './multimap'
+import { TextDocument } from 'vscode-languageserver-textdocument'
 
 type TermKind = "OrdinaryTerm"|"Argument"|"ListElem"
 class TokenIter {
@@ -18,17 +20,20 @@ class TokenIter {
 		return new TokenIter(this.tokens, this.idx + 1)
 	}
 }
-function parse(ps:ParserState){
-    let lexer = ps.lexer;
+export function parse(ps:ParserState){
+    let local_lexer =  lexer.clone().reset(ps.textDocument.getText());
     let clauses =[];
     for(;;){
-        let tokenList = lexer.getTokenList();
+        let tokenList = local_lexer.getTokenList();
         if(!tokenList){
             break;
         }
         let clause = read_clause_from_TokenList(tokenList,ps);
+        clause.varmap = ps.varmap;
+        ps.varmap = new MultiMap();
         clauses.push(clause);
     }
+    return clauses;
 
 }
 function read_clause_from_TokenList(tokenList:TokenList,ps:ParserState) {
@@ -41,7 +46,7 @@ function read_clause_from_TokenList(tokenList:TokenList,ps:ParserState) {
 
     // read term
 	let p = new TokenIter(tokens);
-    let r= read(max_priority+1,"OrdinaryTerm",p,ps);
+    let r=read(max_priority+1,"OrdinaryTerm",p,ps);
     // check tokens are left
     let lastToken  = r.p.val();
     if(lastToken.type!="EOF"){
@@ -49,10 +54,11 @@ function read_clause_from_TokenList(tokenList:TokenList,ps:ParserState) {
     }
     // check end_of_clause token
     if(!tokenList.end){
-        error("miss end of clause token",lastToken,ps);
+        error("missing end of clause token",lastToken,ps);
     }
-    let clause = new clause(r.term,tokenList.end,ps);
-    return clause;
+    let end  = tokenList.end?? tokenList.tokens[tokenList.tokens.length-1]
+    let  clauseItem= new clause(r.term,end);
+    return clauseItem;
 }
 function error(message:string,token:Token,ps:ParserState) {
 	let range = tokenRange(token);
@@ -61,12 +67,10 @@ function error(message:string,token:Token,ps:ParserState) {
         message
     })
 }
-interface ParserState{
-    lexer: Lexer
+export interface ParserState{
+    textDocument:TextDocument
     errors: Diagnostic[]
-	uri:URI
-	varset:Set<string>
-	varmap:Map<string,Term>
+	varmap:MultiMap<string,Token>
 
 }
 type readRes={
@@ -123,8 +127,9 @@ function could_start_term(nextToken: Token) {
 
 function add_var(token: Token, ps: ParserState) {
 	if(token.text[0]=="_"){
-
+        return ;
 	}
+    ps.varmap.add(token.value,token);
 }
 
 function conjuntion_to_list(term: any) {
@@ -168,7 +173,7 @@ function read(MaxPriority: number, termKind: TermKind,p1:TokenIter,ps:ParserStat
 
 	}
 	
-	else if(token1.type =="name" &&(opinfos=lookup_op_infos(token1.value))){
+	if(token1.type =="name" &&(opinfos=lookup_op_infos(token1.value))){
 		let BinOpinfo
         let prefixOPinfo
 		// % Check for binary prefix op.
@@ -220,7 +225,7 @@ function read(MaxPriority: number, termKind: TermKind,p1:TokenIter,ps:ParserStat
                 let r1=read_args(p3,ps);
                 let term = new functorCompound(token1,r1.args);
                 baseterm = term;
-                basep = p1;
+                basep = r1.p;
                 break;
             }
 			else{
@@ -270,9 +275,25 @@ function read(MaxPriority: number, termKind: TermKind,p1:TokenIter,ps:ParserStat
             basep= p2;
             break;       
         }
+        case "open":
+        case  "open_ct":{
+            let r1 = read(max_priority+1,"OrdinaryTerm",p2,ps);
+            let token = r1.p.val()
+            if(token.type == "close"){
+                baseterm = r1.term;
+                basep = r1.p.next()
+                break;
+            }
+            error("expecting `)' or operator",token,ps);
+            baseterm = r1.term;
+            basep = r1.p
+            break;
+
+
+        }
         case "open_list":{
             let r1 = read(max_priority+1,"ListElem",p2,ps);
-            let r2 = read_list(p2,ps);
+            let r2 = read_list(r1.p,ps);
             let term = new functorCompound(token1,[r1.term,r2.term],"[|]");
             baseterm = term;
             basep = r2.p;
@@ -309,7 +330,7 @@ function read(MaxPriority: number, termKind: TermKind,p1:TokenIter,ps:ParserStat
     let tt = baseterm;
     for(;;){
         let token = pp.val();
-        if (token?.type == "open_ct"){
+        if (token.type == "open_ct"){
             let r = read_args(pp.next(),ps);
             tt = new applyTerm(token,[tt,...r.args]);
             pp = r.p;
@@ -396,25 +417,30 @@ function read_list(p1: TokenIter, ps: ParserState):readRes {
             if(token.type == "close_list"){
                 return {term:r1.term,p:r1.p.next()};
             }else{
-                
+                error("unexpected token",token1,ps);
+                let r2  = skipUntil("close_list",r1.p,ps);
+                return {term:r1.term,p:r2.p}
             }
             
         }
         case "close_list":{
-
+            let term = new atom(token1,"[]");
+            return {term,p:p2};
         }
-            
-            break;
-    
-        default:
-            break;
+        default:{
+            error("missing comma",token1,ps);
+            let r1 = read(max_priority+1,"ListElem",p1,ps);
+            let r2 = read_list(r1.p,ps);
+            let term = new functorCompound(token1,[r1.term,r2.term],"[|]");
+            return {term,p:r2.p};
+        }
     }
 }
 function bottom_up(MaxPriority:number,termKind:TermKind,lpriority:number,lterm:Term,p1:TokenIter,ps:ParserState): readRes {
     let p2 = p1.next();
     let token1 = p1.val();
-    let token2 =p2.val();
-    if(!token1){
+    // let token2 =p2.val();
+    if(token1.type == "EOF"){
         return {term:lterm,p:p1};
     }
     // deal with term kind
@@ -432,12 +458,12 @@ function bottom_up(MaxPriority:number,termKind:TermKind,lpriority:number,lterm:T
         let r  = read(opinfo.rpriority,termKind,p2,ps);
         if(token1.type=="backquoted"){
             let opterm = read_term_from_backquoted(token1,ps);
-            let term  =  new applyTerm(token1,[opterm,lterm,r.term]);
-            return bottom_up(MaxPriority,termKind,opinfo.priority,term,p2,ps);
+            let term  =  new backquotedapplyTerm(token1,[opterm,lterm,r.term]);
+            return bottom_up(MaxPriority,termKind,opinfo.priority,term,r.p,ps);
         }
         //  name token
         let term = new infixCompound(token1,[lterm,r.term]);
-        return bottom_up(MaxPriority,termKind,opinfo.priority,term,p2,ps);
+        return bottom_up(MaxPriority,termKind,opinfo.priority,term,r.p,ps);
     }
     //    postfix  however mercury doesn't have opfix operator
     return {term:lterm,p:p1};
@@ -455,7 +481,7 @@ function isInfixOp(token:Token) {
             rpriority:119
         };
     }
-    else if(token.type == "name"){
+    else{
         let opinfo =  lookup_infix_op(token.value);
         if(!opinfo){
             return undefined;
@@ -472,10 +498,7 @@ function isInfixOp(token:Token) {
     return undefined;
 }
 
-interface LexerPositon{
-    line:number,
-    col:number
-}
+
 
 function read_term_from_backquoted(token:Token,ps:ParserState) {
     let text  = token.text.slice(1,-1);
@@ -504,5 +527,21 @@ function read_term_from_backquoted(token:Token,ps:ParserState) {
         error("need an infix operator ",lastToken,ps);
     }
     return r.term
+}
+
+function skipUntil(tokenType:TokenType, p1: TokenIter, ps: ParserState) {
+    let tmp_p = p1;
+    for(;;){
+        let tmp_token = tmp_p.val();
+        switch (tmp_token.type) {
+            case "EOF":
+                error(`missing ${tokenType}`,tmp_token,ps);
+                return {p:tmp_p} 
+            case tokenType:
+                return {p:tmp_p.next()}
+            default:
+                continue;
+        }
+    }
 }
 
