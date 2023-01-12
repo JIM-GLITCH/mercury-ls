@@ -7,6 +7,7 @@ import { MultiMap } from './multimap'
 export type TermKind =
     variable | atom | integer | str | float | negInteger | negFloat | implementation_defined | binPrefixCompound | prefixCompound | functorCompound
 export interface Term {
+    args: Term[]
     /**which token represents this term */
     token: Token
     /** which token has the smallest position */
@@ -18,18 +19,21 @@ export interface Term {
     /**
      *  for hover
      */
-    val:string
+    val: string
+    arity: number
 }
 export class variable implements Term {
     token
     startToken: Token
     endToken: Token
+    arity=0
     constructor(token: Token) {
         this.token = token
         this.startToken = token
         this.endToken = token
-        this.val = token.value;
+        this.val = token.value
     }
+    args: Term[]=[]
     val: string
     search(pos: Position) {
         return checkFunctorRange(pos, this, undefined, undefined)
@@ -39,12 +43,14 @@ export class variable implements Term {
 export class atom implements Term {
     token: Token
     val: string
+    arity=0
     constructor(token: Token, val: string = token.value) {
         this.token = token
         this.val = val
         this.startToken = token
         this.endToken = token
     }
+    args: Term[]=[]
     startToken: Token
     endToken: Token
     search(pos: Position) {
@@ -54,13 +60,15 @@ export class atom implements Term {
 }
 export class integer implements Term {
     token: Token
+    arity=0
     constructor(token: Token,) {
         this.token = token
         this.startToken = token
         this.endToken = token
-        this.val = token.value;
+        this.val = token.value
 
     }
+    args: Term[]=[]
     val: string
     startToken: Token
     endToken: Token
@@ -70,13 +78,15 @@ export class integer implements Term {
 }
 export class str implements Term {
     token: Token
+    arity=0
     constructor(token: Token,) {
         this.token = token
         this.startToken = token
         this.endToken = token
-        this.val = token.value;
+        this.val = token.value
 
     }
+    args: Term[]=[]
     val: string
     startToken: Token
     endToken: Token
@@ -86,13 +96,15 @@ export class str implements Term {
 }
 export class float implements Term {
     token: Token
+    arity=0
     constructor(token: Token) {
         this.token = token
         this.startToken = token
         this.endToken = token
-        this.val = token.value;
+        this.val = token.value
 
     }
+    args: Term[]=[]
     val: string
     startToken: Token
     endToken: Token
@@ -104,14 +116,16 @@ export class float implements Term {
 export class negInteger implements Term {
     sign: Token
     token: Token
+    arity=0
     constructor(token: Token, sign: Token) {
         this.token = token
         this.sign = sign
         this.startToken = sign
         this.endToken = token
-        this.val = token.value;
+        this.val = token.value
 
     }
+    args: Term[]=[]
     val: string
     startToken: Token
     endToken: Token
@@ -122,14 +136,16 @@ export class negInteger implements Term {
 export class negFloat implements Term {
     sign: Token
     token: Token
+    arity=0
     constructor(token: Token, sign: Token) {
         this.token = token
         this.sign = sign
         this.startToken = sign
         this.endToken = token
-        this.val = token.value;
+        this.val = token.value
 
     }
+    args: Term[]=[]
     val: string
     startToken: Token
     endToken: Token
@@ -139,13 +155,15 @@ export class negFloat implements Term {
 }
 export class implementation_defined implements Term {
     token: Token
+    arity=0
     constructor(token: Token,) {
         this.token = token
         this.startToken = token
         this.endToken = token
-        this.val = token.value;
+        this.val = token.value
 
     }
+    args: Term[]=[]
     val: string
     startToken: Token
     endToken: Token
@@ -155,13 +173,14 @@ export class implementation_defined implements Term {
 }
 export class binPrefixCompound implements Term {
     token: Token
-    childern: Term[]
-    constructor(token: Token, childern: Term[]) {
+    args: Term[]
+    arity=2
+    constructor(token: Token, children: Term[]) {
         this.token = token
-        this.childern = childern
+        this.args = children
         this.startToken = token
-        this.endToken = childern[1].endToken
-        this.val = token.value;
+        this.endToken = children[1].endToken
+        this.val = token.value
 
     }
     val: string
@@ -169,27 +188,29 @@ export class binPrefixCompound implements Term {
     endToken: Token
     search(pos: Position) {
         return checkFunctorRange(pos, this, undefined, undefined)
-                ??binearySearch(pos,this.childern);
+            ?? binearySearch(pos, this.args)
     }
 }
 
 export class prefixCompound implements Term {
     token: Token
-    childern: Term[]
-    constructor(token: Token, childern: Term[]) {
+    arity: number
+    constructor(token: Token, children: Term[]) {
         this.token = token
-        this.childern = childern
+        this.args = children
         this.startToken = token
-        this.endToken = childern[0].endToken
-        this.val = token.value;
+        this.endToken = children[0].endToken
+        this.val = token.value
+        this.arity = children.length
 
     }
+    args: Term[]=[]
     val: string
     startToken: Token
     endToken: Token
     search(pos: Position) {
         return checkFunctorRange(pos, this, undefined, undefined)
-        ??binearySearch(pos,this.childern);
+            ?? binearySearch(pos, this.args)
     }
 }
 
@@ -197,79 +218,90 @@ export class prefixCompound implements Term {
 export class functorCompound implements Term {
     token: Token
     val: string
-    childern: Term[]
-    constructor(token: Token, childern: Term[], val: string = token.value) {
+    args: Term[]
+    arity:number 
+    constructor(token: Token, children: Term[], val: string = token.value) {
         this.token = token
-        this.childern = childern
+        this.args = children
         this.val = val
         this.startToken = token
-        this.endToken = childern[childern.length - 1].endToken
+        this.endToken = children[children.length - 1].endToken
+        this.arity = children.length;
     }
     startToken: Token
     endToken: Token
     search(pos: Position) {
         return checkFunctorRange(pos, this, undefined, undefined)
-        ??binearySearch(pos,this.childern);
+            ?? binearySearch(pos, this.args)
     }
 }
 
 export class applyTerm implements Term {
     token: Token
     val = "";
-    childern
-    constructor(token: Token, childern: Term[]) {
+    args
+    arity: number
+    constructor(token: Token, children: Term[]) {
         this.token = token
-        this.childern = childern
-        this.startToken = childern[0].startToken
-        this.endToken = childern[childern.length - 1].endToken
+        this.args = children
+        this.startToken = children[0].startToken
+        this.endToken = children[children.length - 1].endToken
+        this.arity = children.length;
+
     }
     startToken: Token
     endToken: Token
     search(pos: Position) {
         return checkFunctorRange(pos, this, undefined, undefined)
-        ??binearySearch(pos,this.childern);
+            ?? binearySearch(pos, this.args)
     }
 }
 export class backquotedapplyTerm implements Term {
     token: Token
     startToken: Token
     endToken: Token
-    children: Term[]
+    args: Term[]
+    arity: number
     constructor(token: Token, children: Term[]) {
         this.token = token
         this.startToken = children[1].startToken
         this.endToken = children[children.length - 1].endToken
-        this.children = children;
-        this.val = token.value;
+        this.args = children
+        this.val = token.value
+        this.arity = children.length;
+
     }
     val: string
     search(pos: Position) {
         return checkFunctorRange(pos, this, undefined, undefined)
-        ??binearySearch(pos,this.children);
+            ?? binearySearch(pos, this.args)
     }
 }
 export class infixCompound implements Term {
     token: Token
     val: string
-    childern: Term[]
-    constructor(token: Token, childern: Term[], val: string = token.value) {
+    args: Term[]
+    arity = 2
+
+    constructor(token: Token, children: Term[], val: string = token.value) {
         this.token = token
-        this.childern = childern
+        this.args = children
         this.val = val
-        this.startToken = childern[0].startToken
-        this.endToken = childern[childern.length - 1].endToken
+        this.startToken = children[0].startToken
+        this.endToken = children[children.length - 1].endToken
     }
     startToken: Token
     endToken: Token
     search(pos: Position) {
-        return checkFunctorRange(pos, this, this.childern[0], this.childern[1])
+        return checkFunctorRange(pos, this, this.args[0], this.args[1])
     }
 }
 
-export class clause implements Term{
+export class clause  {
     startToken: Token
     endToken: Token
     val: string
+	callerNode!: Term
     search(pos: Position) {
         return checkFunctorRange(pos, this, this.term, undefined)
     }
@@ -286,18 +318,18 @@ export class clause implements Term{
     term: Term
     end: Token
     token
-    varmap?: MultiMap<string, Token>
+    varmap!: MultiMap<string, Token>
     constructor(term: Term, end: Token) {
         this.term = term
         this.end = end
         this.token = this.end
         this.startToken = term.startToken
-        this.endToken = end;
-        this.val = "clause";
+        this.endToken = end
+        this.val = "clause"
     }
 }
 
-function tokenToRange(startTk: Token, endTk: Token) {
+export function tokenToRange(startTk: Token, endTk: Token) {
     return {
         start: {
             line: startTk.line - 1,
@@ -337,27 +369,27 @@ function checkFunctorRange(pos: Position, thisNode: { token: Token }, leftNode?:
     }
 }
 
-function binearySearch(pos:Position,terms :Term[]): Term | undefined {
-    let low = 0, high =terms.length;
-    const line = pos.line;
-    while (low < high){
-        const mid = Math.floor((low + high)/2)
-        const term = terms[mid];
-        let range = termRange(term);
+function binearySearch(pos: Position, terms: Term[]): Term | undefined {
+    let low = 0, high = terms.length
+    const line = pos.line
+    while (low < high) {
+        const mid = Math.floor((low + high) / 2)
+        const term = terms[mid]
+        let range = termRange(term)
         if (range.start.line > pos.line
-        || (range.start.line == pos.line && range.start.character > pos.character)) {
-            high = mid;
+            || (range.start.line == pos.line && range.start.character > pos.character)) {
+            high = mid
         }
         /**pos 在 functor 右 */
         else if (range.end.line < pos.line
-        || (range.end.line == pos.line && range.end.character < pos.character)) {
-            low = mid + 1;
+            || (range.end.line == pos.line && range.end.character < pos.character)) {
+            low = mid + 1
         }
         else {
-            return term.search(pos);
+            return term.search(pos)
         }
-    } 
+    }
 }
-export function termRange(term:Term){
-    return tokenToRange(term.startToken,term.endToken);
+export function termRange(term: Term) {
+    return tokenToRange(term.startToken, term.endToken)
 }

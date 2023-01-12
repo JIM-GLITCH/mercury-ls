@@ -4,6 +4,8 @@ import { Assoc, OpInfo, adjust_priority_for_assoc, lookup_infix_op, lookup_op, l
 import { Term, applyTerm, atom, backquotedapplyTerm, binPrefixCompound, clause, float, functorCompound, implementation_defined, infixCompound, integer, negFloat, negInteger, prefixCompound, str, variable } from './term'
 import { MultiMap } from './multimap'
 import { TextDocument } from 'vscode-languageserver-textdocument'
+import { AnalyseState, analyse } from './analysis'
+import { Document } from './document'
 
 type TermKind = "OrdinaryTerm"|"Argument"|"ListElem"
 class TokenIter {
@@ -22,7 +24,7 @@ class TokenIter {
 }
 export function parse(ps:ParserState){
     let local_lexer =  lexer.clone().reset(ps.textDocument.getText());
-    let clauses =[];
+    let clauses = ps.clauses;
     for(;;){
         let tokenList = local_lexer.getTokenList();
         if(!tokenList){
@@ -31,6 +33,9 @@ export function parse(ps:ParserState){
         let clause = read_clause_from_TokenList(tokenList,ps);
         clause.varmap = ps.varmap;
         ps.varmap = new MultiMap();
+
+        ps.clause = clause 
+        analyse(clause.term,ps as AnalyseState);
         clauses.push(clause);
     }
     return clauses;
@@ -68,10 +73,14 @@ function error(message:string,token:Token,ps:ParserState) {
     })
 }
 export interface ParserState{
+    clause?: clause
+    clauses: any
+    callerNode?: Term
     textDocument:TextDocument
     errors: Diagnostic[]
 	varmap:MultiMap<string,Token>
-
+    defsMap:MultiMap<string,clause>
+    document:Document
 }
 type readRes={
 	term:Term,

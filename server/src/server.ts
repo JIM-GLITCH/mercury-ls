@@ -19,17 +19,22 @@ import {
 	Position,
 	URI,
 	Hover,
-	MarkupContent
+	MarkupContent,
+	Definition,
+	Location,
+	DocumentSymbol,
+	SymbolKind
 } from 'vscode-languageserver/node';
 
 import {
 	TextDocument
 } from 'vscode-languageserver-textdocument';
-import { lexer } from './lexer'
 import { ParserState, parse } from './parser'
 import { MultiMap } from './multimap'
 import { Document } from './document'
-import { termRange } from './term'
+import { termRange, tokenToRange } from './term'
+import { analyse } from './analysis'
+import { tokenRange } from './lexer'
 
 // Create a connection for the server, using Node's IPC as a transport.
 // Also include all preview / proposed LSP features.
@@ -66,7 +71,9 @@ connection.onInitialize((params: InitializeParams) => {
 			completionProvider: {
 				resolveProvider: true
 			},
-			hoverProvider:true
+			hoverProvider:true,
+			definitionProvider:true,
+			documentSymbolProvider:true
 			
 			
 		}
@@ -157,15 +164,18 @@ documents.onDidChangeContent(change => {
 
 async function validateTextDocument(textDocument: TextDocument): Promise<void> {
 	// In this simple example we get the settings for every validate run.
+	let uri  =textDocument.uri;
+	let document = new Document(uri);
+	documentsMap.set(uri , document)
 	let ps:ParserState = {
 		textDocument,
-		errors:[],
-		varmap:new MultiMap()
+		errors: [],
+		varmap: new MultiMap(),
+		document,
+		defsMap: document.defsMap,
+		clauses: document.clauses,
 	}
-	let clauses = parse(ps);
-	let uri  =textDocument.uri;
-	let document = new Document(uri,clauses);
-	documentsMap.set(uri , document)
+	parse(ps);
 	// Send the computed diagnostics to VSCode.
 	connection.sendDiagnostics({ uri: textDocument.uri, diagnostics:ps.errors });
 }
@@ -198,7 +208,55 @@ ${term.val}
 	return hover
 })
 
+connection.onDefinition(async (params)=>{
+	let pos = params.position;
+	let uri = params.textDocument.uri;
+	let document ;
+	while( !(document = documentsMap.get(uri))){
+		await sleep(100);
+	}
+	let term = document.search(pos);
+	if(!term) return undefined
+	let terms = document.defsMap.get(term.val);
+	let defs:Location[] =  terms.map((clause)=>{
+		return {
+			uri:uri,
+			range:termRange(clause.callerNode??clause.term)
+		}
+	})
+	return defs;
+})
 
+connection.onDocumentSymbol(async (params)=>{
+	let uri  = params.textDocument.uri;
+	let document ;
+	let symbols :DocumentSymbol[]=[];
+	while( !(document = documentsMap.get(uri))){
+		await sleep(100);
+	}
+	for (const [name ,clauses] of document.defsMap.map) {
+		let children:DocumentSymbol[] = []
+		for (const clause of clauses) {
+			for (const [varname,varTokens] of clause.varmap.map) {
+				let varRange  = tokenRange(varTokens[0]);
+				children.push({
+					name: varname,
+					kind: SymbolKind.Variable,
+					range: varRange,
+					selectionRange: varRange
+				})	
+			} 
+		}
+		symbols.push({
+			name: name,
+			kind: SymbolKind.Function,
+			range: tokenToRange(clauses[0].startToken,clauses[clauses.length-1].endToken),
+			selectionRange: termRange(clauses[0].callerNode),
+			children:children
+		})		
+	}
+	return symbols
+})
 
 connection.onDidChangeWatchedFiles(_change => {
 	// Monitored files have change in VSCode

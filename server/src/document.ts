@@ -1,12 +1,15 @@
 import { Position, URI } from 'vscode-languageserver'
-import { clause } from './term'
+import { Term, clause } from './term'
+import { MultiMap } from './multimap'
 
 export class Document{
 	uri:URI
 	clauses:clause[];
-	constructor(uri:URI,clauses:clause[]){
+	defsMap:MultiMap<string,clause>
+	constructor(uri:URI){
 		this.uri = uri
-		this.clauses = clauses
+		this.clauses = []
+		this.defsMap= new MultiMap();
 	}
 	search(pos:Position){ 
 		let clauses = this.clauses;
