@@ -6,10 +6,12 @@ export class Document{
 	uri:URI
 	clauses:clause[];
 	defsMap:MultiMap<string,clause>
+	refsMap: MultiMap<string, Term>
 	constructor(uri:URI){
 		this.uri = uri
 		this.clauses = []
 		this.defsMap= new MultiMap();
+		this.refsMap = new MultiMap(); 
 	}
 	search(pos:Position){ 
 		let clauses = this.clauses;
@@ -26,7 +28,7 @@ export class Document{
 				low = mid + 1;
 			}
 			else{
-				return clause.search(pos);
+				return clause
 			}
 		}
 	}

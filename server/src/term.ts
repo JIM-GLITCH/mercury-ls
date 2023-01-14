@@ -318,7 +318,7 @@ export class clause  {
     term: Term
     end: Token
     token
-    varmap!: MultiMap<string, Token>
+    varmap!: MultiMap<string, Term>
     constructor(term: Term, end: Token) {
         this.term = term
         this.end = end

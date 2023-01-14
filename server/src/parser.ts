@@ -4,7 +4,7 @@ import { Assoc, OpInfo, adjust_priority_for_assoc, lookup_infix_op, lookup_op, l
 import { Term, applyTerm, atom, backquotedapplyTerm, binPrefixCompound, clause, float, functorCompound, implementation_defined, infixCompound, integer, negFloat, negInteger, prefixCompound, str, variable } from './term'
 import { MultiMap } from './multimap'
 import { TextDocument } from 'vscode-languageserver-textdocument'
-import { AnalyseState, analyse } from './analysis'
+import { AnalyseState, analyse } from './analyser'
 import { Document } from './document'
 
 type TermKind = "OrdinaryTerm"|"Argument"|"ListElem"
@@ -78,8 +78,9 @@ export interface ParserState{
     callerNode?: Term
     textDocument:TextDocument
     errors: Diagnostic[]
-	varmap:MultiMap<string,Token>
+	varmap:MultiMap<string,Term>
     defsMap:MultiMap<string,clause>
+    refsMap: MultiMap<string,Term>
     document:Document
 }
 type readRes={
@@ -134,11 +135,12 @@ function could_start_term(nextToken: Token) {
 
 
 
-function add_var(token: Token, ps: ParserState) {
-	if(token.text[0]=="_"){
+function add_var(varTerm: Term, ps: ParserState) {
+
+	if(varTerm.val[0]=="_"){
         return ;
 	}
-    ps.varmap.add(token.value,token);
+    ps.varmap.add(varTerm.val,varTerm);
 }
 
 function conjuntion_to_list(term: any) {
@@ -254,8 +256,8 @@ function read(MaxPriority: number, termKind: TermKind,p1:TokenIter,ps:ParserStat
 			}
         }
 		case "variable":{
-            add_var(token1,ps);
             let term = new variable(token1);
+            add_var(term,ps);
             baseterm = term;
             basep= p2;
             break;

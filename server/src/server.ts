@@ -33,7 +33,7 @@ import { ParserState, parse } from './parser'
 import { MultiMap } from './multimap'
 import { Document } from './document'
 import { termRange, tokenToRange } from './term'
-import { analyse } from './analysis'
+import { analyse } from './analyser'
 import { tokenRange } from './lexer'
 
 // Create a connection for the server, using Node's IPC as a transport.
@@ -73,7 +73,8 @@ connection.onInitialize((params: InitializeParams) => {
 			},
 			hoverProvider:true,
 			definitionProvider:true,
-			documentSymbolProvider:true
+			documentSymbolProvider:true,
+			referencesProvider:true
 			
 			
 		}
@@ -166,16 +167,17 @@ async function validateTextDocument(textDocument: TextDocument): Promise<void> {
 	// In this simple example we get the settings for every validate run.
 	let uri  =textDocument.uri;
 	let document = new Document(uri);
-	documentsMap.set(uri , document)
 	let ps:ParserState = {
 		textDocument,
 		errors: [],
 		varmap: new MultiMap(),
 		document,
 		defsMap: document.defsMap,
+		refsMap: document.refsMap,
 		clauses: document.clauses,
 	}
 	parse(ps);
+	documentsMap.set(uri , document)
 	// Send the computed diagnostics to VSCode.
 	connection.sendDiagnostics({ uri: textDocument.uri, diagnostics:ps.errors });
 }
@@ -191,7 +193,9 @@ connection.onHover(async(params)=>{
 	while( !(document = documentsMap.get(uri))){
 		await sleep(100);
 	}
-	let term = document.search(pos);
+	let clause = document.search(pos);
+	if(!clause) return undefined;
+	let term = clause.search(pos);
 	if(!term) return undefined
 	
 let message =`\`\`\`mercury
@@ -215,8 +219,19 @@ connection.onDefinition(async (params)=>{
 	while( !(document = documentsMap.get(uri))){
 		await sleep(100);
 	}
-	let term = document.search(pos);
-	if(!term) return undefined
+	let clause = document.search(pos);
+	if(!clause) return undefined
+	let term = clause.search(pos);
+	if(!term) return undefined;
+	if(term.token.type=="variable"){
+		let node = clause.varmap.get(term.val)[0];
+		if(!node) return undefined;
+		return {
+			uri,
+			range:termRange(node)
+		}
+	}
+
 	let terms = document.defsMap.get(term.val);
 	let defs:Location[] =  terms.map((clause)=>{
 		return {
@@ -237,8 +252,8 @@ connection.onDocumentSymbol(async (params)=>{
 	for (const [name ,clauses] of document.defsMap.map) {
 		let children:DocumentSymbol[] = []
 		for (const clause of clauses) {
-			for (const [varname,varTokens] of clause.varmap.map) {
-				let varRange  = tokenRange(varTokens[0]);
+			for (const [varname,varTerms] of clause.varmap.map) {
+				let varRange  = termRange(varTerms[0]);
 				children.push({
 					name: varname,
 					kind: SymbolKind.Variable,
@@ -256,6 +271,30 @@ connection.onDocumentSymbol(async (params)=>{
 		})		
 	}
 	return symbols
+})
+
+connection.onReferences(async (params)=>{
+	let uri  = params.textDocument.uri;
+	let pos = params.position
+	let document ;
+	while( !(document = documentsMap.get(uri))){
+		await sleep(100);
+	}
+	let clause = document.search(pos);
+	if(!clause ) return undefined;
+	let term = clause.search(pos);
+	if(!term) return undefined;
+	let refs :Location[]=[];
+	if(term.token.type=="variable"){
+		for( const refTerm of clause.varmap.get(term.val)){
+		  refs.push({uri,range:termRange(refTerm)});
+		}
+		return refs;
+	}
+	for (const refTerm of document.refsMap.get(term.val)) {
+		refs.push({uri,range:termRange(refTerm)})
+	}
+	return refs
 })
 
 connection.onDidChangeWatchedFiles(_change => {
