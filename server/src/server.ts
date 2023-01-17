@@ -35,6 +35,8 @@ import { Document } from './document'
 import { termRange, tokenToRange } from './term'
 import { analyse } from './analyser'
 import { tokenRange } from './lexer'
+import { indexMap, link } from './linker'
+import {URI as URI_obj,Utils}from "vscode-uri"
 
 // Create a connection for the server, using Node's IPC as a transport.
 // Also include all preview / proposed LSP features.
@@ -151,7 +153,6 @@ function getDocumentSettings(resource: string): Thenable<ExampleSettings> {
 	}
 	return result;
 }
-
 // Only keep settings for open documents
 documents.onDidClose(e => {
 	documentSettings.delete(e.document.uri);
@@ -162,7 +163,6 @@ documents.onDidClose(e => {
 documents.onDidChangeContent(change => {
 	validateTextDocument(change.document);
 });
-
 async function validateTextDocument(textDocument: TextDocument): Promise<void> {
 	// In this simple example we get the settings for every validate run.
 	let uri  =textDocument.uri;
@@ -177,6 +177,7 @@ async function validateTextDocument(textDocument: TextDocument): Promise<void> {
 		clauses: document.clauses,
 	}
 	parse(ps);
+	link(document);
 	documentsMap.set(uri , document)
 	// Send the computed diagnostics to VSCode.
 	connection.sendDiagnostics({ uri: textDocument.uri, diagnostics:ps.errors });
@@ -199,7 +200,7 @@ connection.onHover(async(params)=>{
 	if(!term) return undefined
 	
 let message =`\`\`\`mercury
-${term.val}
+${term.val+'/'+term.arity}
 \`\`\`
 `
 	let hover :Hover={
@@ -232,13 +233,25 @@ connection.onDefinition(async (params)=>{
 		}
 	}
 
-	let terms = document.defsMap.get(term.val);
-	let defs:Location[] =  terms.map((clause)=>{
-		return {
+	let defs:Location[]=[];
+	let clauses = document.defsMap.get(term.val);
+	for (const clause of clauses) {
+		defs.push({
 			uri:uri,
-			range:termRange(clause.callerNode??clause.term)
+			range:termRange(clause.calleeNode)
+		})
+	}
+	for (const moduleName of document.import_modules) {
+		let doc = getDoc(moduleName,document);
+		if(!doc) continue;
+		let clauses = doc.defsMap.get(term.val);
+		for (const clause of clauses) {
+			defs.push({
+				uri:doc.uri,
+				range:termRange(clause.calleeNode)
+			})
 		}
-	})
+	}
 	return defs;
 })
 
@@ -266,7 +279,7 @@ connection.onDocumentSymbol(async (params)=>{
 			name: name,
 			kind: SymbolKind.Function,
 			range: tokenToRange(clauses[0].startToken,clauses[clauses.length-1].endToken),
-			selectionRange: termRange(clauses[0].callerNode),
+			selectionRange: termRange(clauses[0].calleeNode),
 			children:children
 		})		
 	}
@@ -285,16 +298,31 @@ connection.onReferences(async (params)=>{
 	let term = clause.search(pos);
 	if(!term) return undefined;
 	let refs :Location[]=[];
+
 	if(term.token.type=="variable"){
 		for( const refTerm of clause.varmap.get(term.val)){
 		  refs.push({uri,range:termRange(refTerm)});
 		}
 		return refs;
 	}
-	for (const refTerm of document.refsMap.get(term.val)) {
-		refs.push({uri,range:termRange(refTerm)})
+
+	if(!document.exports.has(term.val)){
+		for (const refTerm of document.refsMap.get(term.val)) {
+			refs.push({uri,range:termRange(refTerm)})
+		}
+		return refs
 	}
-	return refs
+
+	for (const doc of indexMap.get(term.val)) {
+		let uri = doc.uri;
+		for (const refTerm of doc.refsMap.get(term.val)) {
+			refs.push({uri,range:termRange(refTerm)})
+		}
+	}
+	return refs;
+
+	
+
 })
 
 connection.onDidChangeWatchedFiles(_change => {
@@ -338,9 +366,22 @@ connection.onCompletionResolve(
 	}
 );
 
+
+
+
 // Make the text document manager listen on the connection
 // for open, change and close text document events
 documents.listen(connection);
 
 // Listen on the connection
 connection.listen();
+function getDoc(moduleName: string, document: Document) {
+	let uri = document.uri;
+	let uri_obj = URI_obj.parse(uri);
+	let moduleURI_string = Utils.joinPath(
+		Utils.dirname(uri_obj),
+		moduleName+".m"
+	).toString()
+	return documentsMap.get(moduleURI_string);
+}
+

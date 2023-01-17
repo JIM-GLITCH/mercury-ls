@@ -7,11 +7,21 @@ export class Document{
 	clauses:clause[];
 	defsMap:MultiMap<string,clause>
 	refsMap: MultiMap<string, Term>
+	typesMap: MultiMap<string, clause>
+	declsMap:MultiMap<string, clause>
+	include_modules:Set<string>
+    import_modules: Set<string>
+    exports: Set<string>
 	constructor(uri:URI){
 		this.uri = uri
 		this.clauses = []
 		this.defsMap= new MultiMap();
 		this.refsMap = new MultiMap(); 
+		this.typesMap = new MultiMap()
+		this.declsMap = new MultiMap()
+		this.include_modules = new Set();
+		this.import_modules = new Set();
+		this.exports = new Set();
 	}
 	search(pos:Position){ 
 		let clauses = this.clauses;

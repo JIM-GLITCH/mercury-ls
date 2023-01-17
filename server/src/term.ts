@@ -301,7 +301,7 @@ export class clause  {
     startToken: Token
     endToken: Token
     val: string
-	callerNode!: Term
+	calleeNode!: Term
     search(pos: Position) {
         return checkFunctorRange(pos, this, this.term, undefined)
     }

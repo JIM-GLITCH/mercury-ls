@@ -1,12 +1,14 @@
 import { ParserState } from './parser'
 import { Term, clause, termRange } from './term'
 export interface AnalyseState extends ParserState{
+    interface: boolean
     clause:clause
 }
 export function analyse(node:Term,ps:AnalyseState) {
     switch (termName(node)) {
         case ":-/1":{
-			break;
+            analyse_declaration(node,ps)
+            break;
 		}
 		case ":-/2":{
 			ruleHead(node.args[0],ps);
@@ -34,22 +36,48 @@ function termName(term:Term){
 }
 
 
-function analyse_declaration(term: Term,d:AnalyseState) {
+function analyse_declaration(term: Term,ps:AnalyseState) {
     let decl = term.args[0];
     switch (termName(decl)) {
         case "type/1":
         case "solver/1":
         case "pred/1":
+            pred_decl(decl.args[0],ps);
+            break;
         case "func/1":
+            func_decl(decl.args[0],ps);
         case "inst/1":
         case "mode/1":
         case "typesclass/1":
         case "instance/1":
-        case "pragama/1":
+        case "pragam/1":
         case "promise/1":
         case "initialise/1":
         case "finalise/1":
         case "mutable/1":
+        case "module/1":
+            break;
+        case "interface/0":
+            ps.interface = true;
+            break;
+        case "implementation/0":
+            ps.interface = false;
+            break;
+        case "import_module/1":{
+            // if(ps.interface){
+                add_import_module(decl.args[0],ps);
+            // }
+            break;
+        }
+        case "use_module":
+            break;
+        case "include_module/1":{
+            if(ps.interface){
+                add_include_module(decl.args[0],ps);
+            }
+            break;
+        }
+        case "end_module/0":
             break;
     
         default:
@@ -76,7 +104,7 @@ function ruleBody(node: Term, ps: AnalyseState) {
             break;
         }
         case ",/2":
-        case " &/2":
+        case "&/2":
         case ";/2":
         {
             ruleBody(node.args[0],ps);
@@ -192,10 +220,53 @@ function DCGBody(arg0: Term, ps: AnalyseState) {
 
 function addDefinition(node: Term, ps: AnalyseState) {
     ps.defsMap.add(node.val,ps.clause)
-    ps.clause.callerNode = node;
+    ps.clause.calleeNode = node;
 }
 
 function addReference(node: Term, ps: AnalyseState) {
     ps.refsMap.add(node.val,node)
+}
+
+function add_include_module(arg0: Term, ps: AnalyseState) {
+    ps.document.include_modules.add(arg0.val);
+}
+
+function add_import_module(arg0: Term, ps: AnalyseState) {
+    ps.document.import_modules.add(arg0.val);
+}
+
+function pred_decl(node: Term, ps: AnalyseState) {
+    switch (termName(node)) {
+        case "is/2":
+            let pred = node.args[0];
+            addDeclaration(pred,ps)
+            break;
+    
+        default:
+            addDeclaration(node,ps);
+            break;
+    }
+}
+
+
+function addDeclaration(pred: Term, ps: AnalyseState) {
+    ps.clause.calleeNode = pred;
+    ps.document.declsMap.add(pred.val,ps.clause)
+    if(ps.interface){
+        ps.document.exports.add(pred.val)
+    }
+}
+
+function func_decl(node: Term, ps: AnalyseState) {
+    switch (termName(node)) {
+        case "=/2":
+            let func = node.args[0];
+            addDeclaration(func,ps)
+            break;
+    
+        default:
+            addDeclaration(node,ps);
+            break;
+    }
 }
 
