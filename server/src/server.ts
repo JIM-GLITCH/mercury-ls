@@ -23,7 +23,8 @@ import {
 	Definition,
 	Location,
 	DocumentSymbol,
-	SymbolKind
+	SymbolKind,
+	WorkspaceFolder
 } from 'vscode-languageserver/node';
 
 import {
@@ -37,6 +38,8 @@ import { analyse } from './analyser'
 import { tokenRange } from './lexer'
 import { indexMap, link } from './linker'
 import {URI as URI_obj,Utils}from "vscode-uri"
+import fs = require("fs")
+import path = require('path')
 
 // Create a connection for the server, using Node's IPC as a transport.
 // Also include all preview / proposed LSP features.
@@ -47,11 +50,11 @@ const documents: TextDocuments<TextDocument> = new TextDocuments(TextDocument);
 
 let hasConfigurationCapability = false;
 let hasWorkspaceFolderCapability = false;
-let hasDiagnosticRelatedInformationCapability = false;
-
+let hasDiagnosticRelatedInformationCapability = false;    
+let workspaceFolders:WorkspaceFolder[]|null;
 connection.onInitialize((params: InitializeParams) => {
+	workspaceFolders = params.workspaceFolders;
 	const capabilities = params.capabilities;
-
 	// Does the client support the `workspace/configuration` request?
 	// If not, we fall back using global settings.
 	hasConfigurationCapability = !!(
@@ -91,7 +94,7 @@ connection.onInitialize((params: InitializeParams) => {
 	return result;
 });
 
-connection.onInitialized(() => {
+connection.onInitialized(async() => {
 	if (hasConfigurationCapability) {
 		// Register for all configuration changes.
 		connection.client.register(DidChangeConfigurationNotification.type, undefined);
@@ -101,6 +104,23 @@ connection.onInitialized(() => {
 			connection.console.log('Workspace folder change event received.');
 		});
 	}
+
+	let file_count = 0;
+	let workspaceFolder = workspaceFolders?workspaceFolders[0]:undefined;
+	if(!workspaceFolder) return undefined;
+
+	let rootPath = URI_obj.parse(workspaceFolder.uri).fsPath;
+	let filenames = fs.readdirSync(rootPath);
+	file_count = filenames.length;
+	for (const file_name of filenames) {
+		let file_path = path.join(rootPath,file_name);
+		let file_uri_string = URI_obj.file(file_path).toString();
+		let file_content = fs.readFileSync(file_path).toString();
+		let file_textDocument = TextDocument.create(file_uri_string,"mercury",1,file_content)
+		await validateTextDocument(file_textDocument);
+		console.log(`${file_name} finished`);
+	}
+		
 });
 
 // The example settings
@@ -119,11 +139,6 @@ const documentSettings: Map<string, Thenable<ExampleSettings>> = new Map();
 
 // 
 let documentsMap = new Map<URI,Document>();
-
-
-
-
-
 
 connection.onDidChangeConfiguration(change => {
 	if (hasConfigurationCapability) {
