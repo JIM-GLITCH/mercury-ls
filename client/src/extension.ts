@@ -5,6 +5,7 @@
 
 import * as path from 'path';
 import { workspace, ExtensionContext } from 'vscode';
+import * as vscode from 'vscode';
 
 import {
 	LanguageClient,
@@ -14,8 +15,8 @@ import {
 } from 'vscode-languageclient/node';
 
 let client: LanguageClient;
-
-export function activate(context: ExtensionContext) {
+let bar: vscode.StatusBarItem;
+export async function activate(context: ExtensionContext) {
 	// The server is implemented in node
 	const serverModule = context.asAbsolutePath(
 		path.join('server', 'out', 'server.js')
@@ -54,12 +55,23 @@ export function activate(context: ExtensionContext) {
 	);
 
 	// Start the client. This will also launch the server
-	client.start();
+	bar = vscode.window.createStatusBarItem(1,1);
+	bar.text = "💕Mercury";
+	bar.show();
+	bar.command ="Mercury.statusBar";
+	await  client.start();
+	vscode.commands.registerCommand(bar.command,()=>{
+		client.sendNotification('$/status/click');
+	})
+	client.onNotification('fuck',()=>{
+		bar.text="fuck";
+		bar.show();
+	})
 }
-
 export function deactivate(): Thenable<void> | undefined {
 	if (!client) {
 		return undefined;
 	}
 	return client.stop();
 }
+

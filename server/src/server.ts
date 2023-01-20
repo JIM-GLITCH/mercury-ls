@@ -30,16 +30,17 @@ import {
 import {
 	TextDocument
 } from 'vscode-languageserver-textdocument';
-import { ParserState, parse } from './parser'
+import * as parser from './parser'
 import { MultiMap } from './multimap'
 import { Document } from './document'
 import { termRange, tokenToRange } from './term'
-import { analyse } from './analyser'
+import * as analyser from './analyser'
 import { tokenRange } from './lexer'
-import { indexMap, link } from './linker'
+import * as linker from './linker' 
 import {URI as URI_obj,Utils}from "vscode-uri"
 import fs = require("fs")
 import path = require('path')
+import { nameArity } from './analyser'
 
 // Create a connection for the server, using Node's IPC as a transport.
 // Also include all preview / proposed LSP features.
@@ -53,7 +54,9 @@ let hasWorkspaceFolderCapability = false;
 let hasDiagnosticRelatedInformationCapability = false;    
 let workspaceFolders:WorkspaceFolder[]|null;
 connection.onInitialize((params: InitializeParams) => {
+	
 	workspaceFolders = params.workspaceFolders;
+
 	const capabilities = params.capabilities;
 	// Does the client support the `workspace/configuration` request?
 	// If not, we fall back using global settings.
@@ -104,7 +107,11 @@ connection.onInitialized(async() => {
 			connection.console.log('Workspace folder change event received.');
 		});
 	}
+	validateWorkspaceTextDocument();
 
+		
+});
+async function validateWorkspaceTextDocument() {
 	let file_count = 0;
 	let workspaceFolder = workspaceFolders?workspaceFolders[0]:undefined;
 	if(!workspaceFolder) return undefined;
@@ -118,11 +125,12 @@ connection.onInitialized(async() => {
 		let file_content = fs.readFileSync(file_path).toString();
 		let file_textDocument = TextDocument.create(file_uri_string,"mercury",1,file_content)
 		await validateTextDocument(file_textDocument);
-		console.log(`${file_name} finished`);
-	}
+		// connection.telemetry.logEvent(`${file_name} finished`);
+		// connection.window.showInformationMessage(`${file_name} finished`);
 		
-});
-
+	}
+	connection.sendNotification("fuck")
+}
 // The example settings
 interface ExampleSettings {
 	maxNumberOfProblems: number;
@@ -138,8 +146,7 @@ let globalSettings: ExampleSettings = defaultSettings;
 const documentSettings: Map<string, Thenable<ExampleSettings>> = new Map();
 
 // 
-let documentsMap = new Map<URI,Document>();
-
+export let docsMap = new Map<URI,Document>();
 connection.onDidChangeConfiguration(change => {
 	if (hasConfigurationCapability) {
 		// Reset all cached document settings
@@ -180,22 +187,18 @@ documents.onDidChangeContent(change => {
 });
 async function validateTextDocument(textDocument: TextDocument): Promise<void> {
 	// In this simple example we get the settings for every validate run.
-	let uri  =textDocument.uri;
-	let document = new Document(uri);
-	let ps:ParserState = {
-		textDocument,
-		errors: [],
-		varmap: new MultiMap(),
-		document,
-		defsMap: document.defsMap,
-		refsMap: document.refsMap,
-		clauses: document.clauses,
-	}
-	parse(ps);
-	link(document);
-	documentsMap.set(uri , document)
+	let document = new Document(textDocument);
+
+	// 1. parse string to ast
+	parser.parse(document);
+	// 2. analyse ast node's semantic info
+	analyser.analyse(document);
+	// 3. link the definition and references in global scope
+	linker.link(document);
+	// 4. store this document
+	docsMap.set(document.uri , document)
 	// Send the computed diagnostics to VSCode.
-	connection.sendDiagnostics({ uri: textDocument.uri, diagnostics:ps.errors });
+	connection.sendDiagnostics({ uri: document.uri, diagnostics:document.errors });
 }
 
 const sleep = (ms: number) => {
@@ -206,7 +209,7 @@ connection.onHover(async(params)=>{
 	let pos = params.position;
 	let uri = params.textDocument.uri;
 	let document ;
-	while( !(document = documentsMap.get(uri))){
+	while( !(document = docsMap.get(uri))){
 		await sleep(100);
 	}
 	let clause = document.search(pos);
@@ -215,7 +218,7 @@ connection.onHover(async(params)=>{
 	if(!term) return undefined
 	
 let message =`\`\`\`mercury
-${term.val+'/'+term.arity}
+${term.name+'/'+term.arity}
 \`\`\`
 `
 	let hover :Hover={
@@ -232,7 +235,7 @@ connection.onDefinition(async (params)=>{
 	let pos = params.position;
 	let uri = params.textDocument.uri;
 	let document ;
-	while( !(document = documentsMap.get(uri))){
+	while( !(document = docsMap.get(uri))){
 		await sleep(100);
 	}
 	let clause = document.search(pos);
@@ -240,7 +243,7 @@ connection.onDefinition(async (params)=>{
 	let term = clause.search(pos);
 	if(!term) return undefined;
 	if(term.token.type=="variable"){
-		let node = clause.varmap.get(term.val)[0];
+		let node = clause.varmap.get(term.name)[0];
 		if(!node) return undefined;
 		return {
 			uri,
@@ -249,7 +252,8 @@ connection.onDefinition(async (params)=>{
 	}
 
 	let defs:Location[]=[];
-	let clauses = document.defsMap.get(term.val);
+	let name_arity = nameArity(term);
+	let clauses = document.defsMap.get(name_arity);
 	for (const clause of clauses) {
 		defs.push({
 			uri:uri,
@@ -259,7 +263,7 @@ connection.onDefinition(async (params)=>{
 	for (const moduleName of document.import_modules) {
 		let doc = getDoc(moduleName,document);
 		if(!doc) continue;
-		let clauses = doc.defsMap.get(term.val);
+		let clauses = doc.defsMap.get(name_arity);
 		for (const clause of clauses) {
 			defs.push({
 				uri:doc.uri,
@@ -274,10 +278,10 @@ connection.onDocumentSymbol(async (params)=>{
 	let uri  = params.textDocument.uri;
 	let document ;
 	let symbols :DocumentSymbol[]=[];
-	while( !(document = documentsMap.get(uri))){
+	while( !(document = docsMap.get(uri))){
 		await sleep(100);
 	}
-	for (const [name ,clauses] of document.defsMap.map) {
+	for (const [name_arity ,clauses] of document.defsMap.map) {
 		let children:DocumentSymbol[] = []
 		for (const clause of clauses) {
 			for (const [varname,varTerms] of clause.varmap.map) {
@@ -290,12 +294,14 @@ connection.onDocumentSymbol(async (params)=>{
 				})	
 			} 
 		}
+		let calleeNode = clauses[0].calleeNode;
 		symbols.push({
-			name: name,
+			name: calleeNode.name,
 			kind: SymbolKind.Function,
 			range: tokenToRange(clauses[0].startToken,clauses[clauses.length-1].endToken),
 			selectionRange: termRange(clauses[0].calleeNode),
-			children:children
+			children:children,
+			detail:"/"+calleeNode.arity
 		})		
 	}
 	return symbols
@@ -305,7 +311,7 @@ connection.onReferences(async (params)=>{
 	let uri  = params.textDocument.uri;
 	let pos = params.position
 	let document ;
-	while( !(document = documentsMap.get(uri))){
+	while( !(document = docsMap.get(uri))){
 		await sleep(100);
 	}
 	let clause = document.search(pos);
@@ -313,25 +319,19 @@ connection.onReferences(async (params)=>{
 	let term = clause.search(pos);
 	if(!term) return undefined;
 	let refs :Location[]=[];
-
+	// 查找 variable的引用 只需要在这个varaible在的clause范围里查找
 	if(term.token.type=="variable"){
-		for( const refTerm of clause.varmap.get(term.val)){
+		for( const refTerm of clause.varmap.get(term.name)){
 		  refs.push({uri,range:termRange(refTerm)});
 		}
 		return refs;
 	}
 
-	if(!document.exports.has(term.val)){
-		for (const refTerm of document.refsMap.get(term.val)) {
-			refs.push({uri,range:termRange(refTerm)})
-		}
-		return refs
-	}
+	let name_arity = nameArity(term)
 
-	for (const doc of indexMap.get(term.val)) {
-		let uri = doc.uri;
-		for (const refTerm of doc.refsMap.get(term.val)) {
-			refs.push({uri,range:termRange(refTerm)})
+	for (const doc of linker.referencesMap.get(name_arity)) {
+		for (const refTerm of doc.refsMap.get(name_arity)) {
+			refs.push({uri:doc.uri,range:termRange(refTerm)})
 		}
 	}
 	return refs;
@@ -383,7 +383,6 @@ connection.onCompletionResolve(
 
 
 
-
 // Make the text document manager listen on the connection
 // for open, change and close text document events
 documents.listen(connection);
@@ -397,6 +396,6 @@ function getDoc(moduleName: string, document: Document) {
 		Utils.dirname(uri_obj),
 		moduleName+".m"
 	).toString()
-	return documentsMap.get(moduleURI_string);
+	return docsMap.get(moduleURI_string);
 }
 

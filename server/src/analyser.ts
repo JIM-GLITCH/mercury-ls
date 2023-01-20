@@ -1,11 +1,31 @@
-import { ParserState } from './parser'
+import { SymbolKind } from 'vscode-languageserver'
+// import { ParserState } from './parser'
 import { Term, clause, termRange } from './term'
-export interface AnalyseState extends ParserState{
-    interface: boolean
+import { Document } from './document'
+export type SematicType = 
+    "func"|
+    "pred"|
+    "type"
+    
+export interface AnalyseState{
     clause:clause
+    document: Document
+    interface: boolean;
+
 }
-export function analyse(node:Term,ps:AnalyseState) {
-    switch (termName(node)) {
+export function analyse(document:Document) {
+    let ps = {
+        clause    :document.clauses[0],
+        document  :document,
+        interface :false
+    } as AnalyseState;
+    for (const clause of document.clauses) {
+        ps.clause = clause;
+        analyse_term(clause.term,ps);
+    }
+}
+function analyse_term(node:Term,ps:AnalyseState){
+    switch (nameArity(node)) {
         case ":-/1":{
             analyse_declaration(node,ps)
             break;
@@ -31,14 +51,15 @@ export function analyse(node:Term,ps:AnalyseState) {
 			break;
     }
 }
-function termName(term:Term){
-    return term.val+'/'+term.arity;
+
+export function nameArity(term:Term){
+    return term.name+'/'+term.arity;
 }
 
 
 function analyse_declaration(term: Term,ps:AnalyseState) {
     let decl = term.args[0];
-    switch (termName(decl)) {
+    switch (nameArity(decl)) {
         case "type/1":
         case "solver/1":
         case "pred/1":
@@ -86,7 +107,7 @@ function analyse_declaration(term: Term,ps:AnalyseState) {
 }
 
 function ruleHead(node: Term, ps: AnalyseState) {
-    switch (termName(node)){
+    switch (nameArity(node)){
         case "=/2":{
             ruleHead(node.args[0],ps);
             break
@@ -97,7 +118,7 @@ function ruleHead(node: Term, ps: AnalyseState) {
 }
 
 function ruleBody(node: Term, ps: AnalyseState) {
-    switch (termName(node)) {
+    switch (nameArity(node)) {
         case "some/2":
         case "all/2":{
             ruleBody(node.args[1],ps);
@@ -219,24 +240,24 @@ function DCGBody(arg0: Term, ps: AnalyseState) {
 }
 
 function addDefinition(node: Term, ps: AnalyseState) {
-    ps.defsMap.add(node.val,ps.clause)
+    ps.document.defsMap.add(nameArity(node),ps.clause)
     ps.clause.calleeNode = node;
 }
 
 function addReference(node: Term, ps: AnalyseState) {
-    ps.refsMap.add(node.val,node)
+    ps.document.refsMap.add(nameArity(node),node)
 }
 
 function add_include_module(arg0: Term, ps: AnalyseState) {
-    ps.document.include_modules.add(arg0.val);
+    ps.document.include_modules.add(arg0.name);
 }
 
 function add_import_module(arg0: Term, ps: AnalyseState) {
-    ps.document.import_modules.add(arg0.val);
+    ps.document.import_modules.add(arg0.name);
 }
 
 function pred_decl(node: Term, ps: AnalyseState) {
-    switch (termName(node)) {
+    switch (nameArity(node)) {
         case "is/2":
             let pred = node.args[0];
             addDeclaration(pred,ps)
@@ -249,16 +270,16 @@ function pred_decl(node: Term, ps: AnalyseState) {
 }
 
 
-function addDeclaration(pred: Term, ps: AnalyseState) {
-    ps.clause.calleeNode = pred;
-    ps.document.declsMap.add(pred.val,ps.clause)
+function addDeclaration(node: Term, ps: AnalyseState) {
+    ps.clause.calleeNode = node;
+    ps.document.declsMap.add(nameArity(node),ps.clause)
     if(ps.interface){
-        ps.document.exports.add(pred.val)
+        ps.document.exports.add(nameArity(node))
     }
 }
 
 function func_decl(node: Term, ps: AnalyseState) {
-    switch (termName(node)) {
+    switch (nameArity(node)) {
         case "=/2":
             let func = node.args[0];
             addDeclaration(func,ps)
@@ -269,4 +290,5 @@ function func_decl(node: Term, ps: AnalyseState) {
             break;
     }
 }
+
 

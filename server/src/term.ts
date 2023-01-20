@@ -1,12 +1,23 @@
 // type term = functor|variable
 
-import { Position } from 'vscode-languageserver'
+import { Position, Range } from 'vscode-languageserver'
 import { Token, tokenRange } from './lexer'
 import { MultiMap } from './multimap'
+import { SematicType } from './analyser'
 
-export type TermKind =
-    variable | atom | integer | str | float | negInteger | negFloat | implementation_defined | binPrefixCompound | prefixCompound | functorCompound
+type TermType=
+    "variable"|
+    "atom"|
+    "integer"|
+    "string"|
+    "float"|
+    "implementation_defined"
+
 export interface Term {
+    /**
+     * term type
+     */
+    termType:TermType
     args: Term[]
     /**which token represents this term */
     token: Token
@@ -14,293 +25,150 @@ export interface Term {
     startToken: Token
     /**which token has the largest position */
     endToken: Token
-    /**find the Term by position */
-    search(pos: Position): Term | undefined
     /**
-     *  for hover
+     *  the term's name
      */
-    val: string
+    name: string
+    /**  
+     *  the term's arity
+     */
     arity: number
+    /**
+     *  semantic type
+     */
+    sematicType?:SematicType
+    toString():string
 }
-export class variable implements Term {
-    token
-    startToken: Token
-    endToken: Token
-    arity=0
-    constructor(token: Token) {
-        this.token = token
-        this.startToken = token
-        this.endToken = token
-        this.val = token.value
+export class defaultTerm implements Term{
+    
+    constructor(TermType:TermType,token:Token,args:Term[]=[],startToken:Token=token,endToken:Token=token,name:string=token.value){
+        this.termType = TermType
+        this.token = token;
+        this.args = args;
+        this.startToken = startToken;
+        this.endToken = endToken;
+        this.name = name;
+        this.arity = args.length
     }
-    args: Term[]=[]
-    val: string
-    search(pos: Position) {
-        return checkFunctorRange(pos, this, undefined, undefined)
-    }
-}
-
-export class atom implements Term {
-    token: Token
-    val: string
-    arity=0
-    constructor(token: Token, val: string = token.value) {
-        this.token = token
-        this.val = val
-        this.startToken = token
-        this.endToken = token
-    }
-    args: Term[]=[]
-    startToken: Token
-    endToken: Token
-    search(pos: Position) {
-        return checkFunctorRange(pos, this, undefined, undefined)
-    }
-
-}
-export class integer implements Term {
-    token: Token
-    arity=0
-    constructor(token: Token,) {
-        this.token = token
-        this.startToken = token
-        this.endToken = token
-        this.val = token.value
-
-    }
-    args: Term[]=[]
-    val: string
-    startToken: Token
-    endToken: Token
-    search(pos: Position) {
-        return checkFunctorRange(pos, this, undefined, undefined)
-    }
-}
-export class str implements Term {
-    token: Token
-    arity=0
-    constructor(token: Token,) {
-        this.token = token
-        this.startToken = token
-        this.endToken = token
-        this.val = token.value
-
-    }
-    args: Term[]=[]
-    val: string
-    startToken: Token
-    endToken: Token
-    search(pos: Position) {
-        return checkFunctorRange(pos, this, undefined, undefined)
-    }
-}
-export class float implements Term {
-    token: Token
-    arity=0
-    constructor(token: Token) {
-        this.token = token
-        this.startToken = token
-        this.endToken = token
-        this.val = token.value
-
-    }
-    args: Term[]=[]
-    val: string
-    startToken: Token
-    endToken: Token
-    search(pos: Position) {
-        return checkFunctorRange(pos, this, undefined, undefined)
-    }
-}
-
-export class negInteger implements Term {
-    sign: Token
-    token: Token
-    arity=0
-    constructor(token: Token, sign: Token) {
-        this.token = token
-        this.sign = sign
-        this.startToken = sign
-        this.endToken = token
-        this.val = token.value
-
-    }
-    args: Term[]=[]
-    val: string
-    startToken: Token
-    endToken: Token
-    search(pos: Position) {
-        return checkFunctorRange(pos, this, undefined, undefined)
-    }
-}
-export class negFloat implements Term {
-    sign: Token
-    token: Token
-    arity=0
-    constructor(token: Token, sign: Token) {
-        this.token = token
-        this.sign = sign
-        this.startToken = sign
-        this.endToken = token
-        this.val = token.value
-
-    }
-    args: Term[]=[]
-    val: string
-    startToken: Token
-    endToken: Token
-    search(pos: Position) {
-        return checkFunctorRange(pos, this, undefined, undefined)
-    }
-}
-export class implementation_defined implements Term {
-    token: Token
-    arity=0
-    constructor(token: Token,) {
-        this.token = token
-        this.startToken = token
-        this.endToken = token
-        this.val = token.value
-
-    }
-    args: Term[]=[]
-    val: string
-    startToken: Token
-    endToken: Token
-    search(pos: Position) {
-        return checkFunctorRange(pos, this, undefined, undefined)
-    }
-}
-export class binPrefixCompound implements Term {
-    token: Token
+    termType:TermType
     args: Term[]
-    arity=2
-    constructor(token: Token, children: Term[]) {
-        this.token = token
-        this.args = children
-        this.startToken = token
-        this.endToken = children[1].endToken
-        this.val = token.value
-
-    }
-    val: string
+    token: Token
     startToken: Token
     endToken: Token
-    search(pos: Position) {
-        return checkFunctorRange(pos, this, undefined, undefined)
-            ?? binearySearch(pos, this.args)
-    }
-}
-
-export class prefixCompound implements Term {
-    token: Token
+    name: string
     arity: number
-    constructor(token: Token, children: Term[]) {
-        this.token = token
-        this.args = children
-        this.startToken = token
-        this.endToken = children[0].endToken
-        this.val = token.value
-        this.arity = children.length
-
-    }
-    args: Term[]=[]
-    val: string
-    startToken: Token
-    endToken: Token
-    search(pos: Position) {
-        return checkFunctorRange(pos, this, undefined, undefined)
-            ?? binearySearch(pos, this.args)
+    sematicType?: SematicType | undefined
+    toString(): string {
+        return termToString(this);
     }
 }
+function TermSearch(term:Term,pos:Position){
 
-
-export class functorCompound implements Term {
-    token: Token
-    val: string
-    args: Term[]
-    arity:number 
-    constructor(token: Token, children: Term[], val: string = token.value) {
-        this.token = token
-        this.args = children
-        this.val = val
-        this.startToken = token
-        this.endToken = children[children.length - 1].endToken
-        this.arity = children.length;
-    }
-    startToken: Token
-    endToken: Token
-    search(pos: Position) {
-        return checkFunctorRange(pos, this, undefined, undefined)
-            ?? binearySearch(pos, this.args)
-    }
+}
+export function atom(token:Token,name?:string){
+    return new defaultTerm("atom",token,undefined,undefined,undefined,name);
+}
+export function variable(token:Token){
+    return new defaultTerm("variable",token);
 }
 
-export class applyTerm implements Term {
-    token: Token
-    val = "";
-    args
-    arity: number
-    constructor(token: Token, children: Term[]) {
-        this.token = token
-        this.args = children
-        this.startToken = children[0].startToken
-        this.endToken = children[children.length - 1].endToken
-        this.arity = children.length;
-
-    }
-    startToken: Token
-    endToken: Token
-    search(pos: Position) {
-        return checkFunctorRange(pos, this, undefined, undefined)
-            ?? binearySearch(pos, this.args)
-    }
+export function integer(token:Token){
+    return new defaultTerm("integer",token);
 }
-export class backquotedapplyTerm implements Term {
-    token: Token
-    startToken: Token
-    endToken: Token
-    args: Term[]
-    arity: number
-    constructor(token: Token, children: Term[]) {
-        this.token = token
-        this.startToken = children[1].startToken
-        this.endToken = children[children.length - 1].endToken
-        this.args = children
-        this.val = token.value
-        this.arity = children.length;
-
-    }
-    val: string
-    search(pos: Position) {
-        return checkFunctorRange(pos, this, undefined, undefined)
-            ?? binearySearch(pos, this.args)
-    }
+export function negInteger(token:Token,sign:Token){
+    return new defaultTerm("integer",token,[],sign,token,'-'+token.value);
 }
-export class infixCompound implements Term {
-    token: Token
-    val: string
-    args: Term[]
-    arity = 2
-
-    constructor(token: Token, children: Term[], val: string = token.value) {
-        this.token = token
-        this.args = children
-        this.val = val
-        this.startToken = children[0].startToken
-        this.endToken = children[children.length - 1].endToken
-    }
-    startToken: Token
-    endToken: Token
-    search(pos: Position) {
-        return checkFunctorRange(pos, this, this.args[0], this.args[1])
-    }
+export function string(token:Token){
+    return new defaultTerm("string",token);
 }
 
+export function float(token:Token){
+    return new defaultTerm("float",token);
+}
+
+export function negFloat(token:Token,sign:Token){
+    return new defaultTerm("float",token,[],sign,token,'-'+token.value);
+}
+export function implementation_defined(token:Token){
+    return new defaultTerm("implementation_defined",token);
+}
+
+export function binPrefixCompound(token: Token, children: Term[]){
+    let node =  new defaultTerm(
+        "atom",
+        token,
+        children,
+        token,
+        children[children.length-1].endToken);
+    fixArity(node);
+    return node;
+
+}
+
+export function prefixCompound(token: Token, children: Term[]){
+    let node =  new defaultTerm(
+        "atom",
+        token,
+        children,
+        token,
+        children[children.length - 1].endToken
+        );
+    fixArity(node);
+    return node;
+
+}
+export function functorCompound(token: Token, children: Term[],name?:string){
+    let node =  new defaultTerm(
+        "atom",
+        token,
+        children,
+        token,
+        children[children.length - 1].endToken,
+        name
+    );
+    fixArity(node);
+    return node;
+
+}
+export function applyCompound(token: Token, children: Term[]){
+    let node = new defaultTerm(
+        "atom",
+        token,
+        children,
+        token,
+        children[children.length - 1].endToken
+    )
+    fixArity(node);
+    return node;
+}
+export function backquotedapplyCompound(token: Token, children: Term[]){
+    let node =  new defaultTerm(
+        "atom",
+        token,
+        children,
+        children[1].startToken,
+        children[children.length - 1].endToken
+    )
+    fixArity(node);
+    return node;
+}
+
+export function infixCompound(token: Token, children: Term[], name?:string){
+    let node =  new defaultTerm(
+        "atom",
+        token,
+        children,
+        children[0].startToken,
+        children[children.length - 1].endToken
+    )
+    fixArity(node);
+    return node;
+}
+ 
 export class clause  {
     startToken: Token
     endToken: Token
-    val: string
+    name: string
 	calleeNode!: Term
     search(pos: Position) {
         return checkFunctorRange(pos, this, this.term, undefined)
@@ -325,7 +193,7 @@ export class clause  {
         this.token = this.end
         this.startToken = term.startToken
         this.endToken = end
-        this.val = "clause"
+        this.name = "clause"
     }
 }
 
@@ -346,9 +214,9 @@ export function tokenToRange(startTk: Token, endTk: Token) {
 function checkFunctorRange(pos: Position, thisNode: { token: Token }, leftNode?: Term, rightNode?: Term): Term | undefined {
     const functor = thisNode.token
     if (functor == undefined) {
-        let node = leftNode?.search(pos)
+        let node = search(leftNode,pos)
         if (node) return node
-        node = rightNode?.search(pos)
+        node = search(rightNode,pos)
         if (node) return node
         return undefined
 
@@ -357,19 +225,32 @@ function checkFunctorRange(pos: Position, thisNode: { token: Token }, leftNode?:
     let range = tokenRange(functor)
     if (range.start.line > pos.line
         || (range.start.line == pos.line && range.start.character > pos.character)) {
-        return leftNode?.search(pos)
+        return search(leftNode,pos)
     }
     /**pos 在 functor 右 */
     else if (range.end.line < pos.line
         || (range.end.line == pos.line && range.end.character < pos.character)) {
-        return rightNode?.search(pos)
+        return search(rightNode,pos)
     }
     else {
         return thisNode as any
     }
 }
 
-function binearySearch(pos: Position, terms: Term[]): Term | undefined {
+
+function pos_in_range(pos:Position,range:Range){
+    if (range.start.line > pos.line
+        || (range.start.line == pos.line && range.start.character > pos.character)) {
+        return false;
+    }
+    else if (range.end.line < pos.line
+        || (range.end.line == pos.line && range.end.character < pos.character)) {
+        return false;
+    }
+    return true;
+}
+
+function binarySearch( terms: Term[],pos: Position,): Term | undefined {
     let low = 0, high = terms.length
     const line = pos.line
     while (low < high) {
@@ -386,10 +267,65 @@ function binearySearch(pos: Position, terms: Term[]): Term | undefined {
             low = mid + 1
         }
         else {
-            return term.search(pos)
+            return search(term,pos)
         }
     }
 }
 export function termRange(term: Term) {
     return tokenToRange(term.startToken, term.endToken)
 }
+// 每一个 state variable 例如 !X 占两个参数位置
+function fixArity(node:Term){
+    for (const arg of node.args) {
+        if(arg.name == "!" && arg.arity==1&&arg.args[0].token.type=="variable"){
+            node.arity++;
+        }
+    }
+}
+/**
+ * 
+ * @param term search position in this term
+ * @param pos postition  to find a term
+ * @returns  term at the postion or undefined
+ */
+function search(term: Term | undefined, pos: Position): Term | undefined {
+    switch(term?.termType){
+        case "atom":{
+            let token_range = tokenRange(term.token);
+            if(pos_in_range(pos,token_range)){
+                return term;              
+            }
+            return binarySearch(term.args,pos);
+        }
+        case "float":
+        case "implementation_defined":
+        case "integer":
+        case "string":
+        case "variable":{
+            let term_range = termRange(term)
+            if(pos_in_range(pos,term_range)){
+               return term 
+            }
+            return undefined;
+        }
+    } 
+}
+function termToString(term: Term) {
+    switch(term.termType){
+        case 'atom':{
+            if(term.args.length == 0){
+                return term.name;
+            }
+            let argsString  = term.args.map(x=>x.toString()).join()
+            return `${term.name}(${argsString})`
+        }
+        case 'string':
+        case 'variable':
+        case 'integer':
+        case 'float':
+        case 'implementation_defined':{
+            return term.name;
+        }
+    }
+}
+

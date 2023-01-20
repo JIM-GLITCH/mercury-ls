@@ -1,11 +1,9 @@
-import { Diagnostic, Position, URI } from 'vscode-languageserver'
-import { Lexer, Token, TokenList, TokenType, lexer, tokenRange } from './lexer';
-import { Assoc, OpInfo, adjust_priority_for_assoc, lookup_infix_op, lookup_op, lookup_op_infos, lookup_operator_term, max_priority, opTable } from './ops'
-import { Term, applyTerm, atom, backquotedapplyTerm, binPrefixCompound, clause, float, functorCompound, implementation_defined, infixCompound, integer, negFloat, negInteger, prefixCompound, str, variable } from './term'
+import { Diagnostic } from 'vscode-languageserver'
+import { Token, TokenList, TokenType, lexer, tokenRange } from './lexer';
+import { OpInfo, adjust_priority_for_assoc, lookup_infix_op, lookup_op, lookup_op_infos, max_priority } from './ops'
+import { Term, string,applyCompound, atom, backquotedapplyCompound, binPrefixCompound, clause, float, functorCompound, implementation_defined, infixCompound, integer, negFloat, negInteger, prefixCompound, variable } from './term'
 import { MultiMap } from './multimap'
-import { TextDocument } from 'vscode-languageserver-textdocument'
-import { AnalyseState, analyse } from './analyser'
-import { Document } from './document'
+import type{ Document } from './document'
 
 type TermKind = "OrdinaryTerm"|"Argument"|"ListElem"
 class TokenIter {
@@ -22,9 +20,13 @@ class TokenIter {
 		return new TokenIter(this.tokens, this.idx + 1)
 	}
 }
-export function parse(ps:ParserState){
-    let local_lexer =  lexer.clone().reset(ps.textDocument.getText());
-    let clauses = ps.clauses;
+export function parse(document:Document){
+    let ps= {
+		errors: document.errors,
+		varmap: new MultiMap()
+	} as ParserState
+    let local_lexer =  lexer.clone().reset(document.getText());
+    let clauses = document.clauses;
     for(;;){
         let tokenList = local_lexer.getTokenList();
         if(!tokenList){
@@ -33,14 +35,30 @@ export function parse(ps:ParserState){
         let clause = read_clause_from_TokenList(tokenList,ps);
         clause.varmap = ps.varmap;
         ps.varmap = new MultiMap();
-
-        ps.clause = clause 
-        analyse(clause.term,ps as AnalyseState);
         clauses.push(clause);
     }
-    return clauses;
-
 }
+
+export function parse_string(text:string){
+    let ps= {
+		errors: [] as Diagnostic[] ,
+		varmap: new MultiMap()
+	} as ParserState
+    let local_lexer =  lexer.clone().reset(text);
+    let clauses = [] as clause[];
+    for(;;){
+        let tokenList = local_lexer.getTokenList();
+        if(!tokenList){
+            break;
+        }
+        let clause = read_clause_from_TokenList(tokenList,ps);
+        clause.varmap = ps.varmap;
+        ps.varmap = new MultiMap();
+        clauses.push(clause);
+    }
+    return {clauses,errors:ps.errors};
+}
+
 function read_clause_from_TokenList(tokenList:TokenList,ps:ParserState) {
     // push lexer errors
     let tokens  = tokenList.tokens;
@@ -73,15 +91,9 @@ function error(message:string,token:Token,ps:ParserState) {
     })
 }
 export interface ParserState{
-    clause?: clause
-    clauses: any
-    callerNode?: Term
-    textDocument:TextDocument
+    calleeNode?: Term
     errors: Diagnostic[]
 	varmap:MultiMap<string,Term>
-    defsMap:MultiMap<string,clause>
-    refsMap: MultiMap<string,Term>
-    document:Document
 }
 type readRes={
 	term:Term,
@@ -137,10 +149,10 @@ function could_start_term(nextToken: Token) {
 
 function add_var(varTerm: Term, ps: ParserState) {
 
-	if(varTerm.val[0]=="_"){
+	if(varTerm.name[0]=="_"){
         return ;
 	}
-    ps.varmap.add(varTerm.val,varTerm);
+    ps.varmap.add(varTerm.name,varTerm);
 }
 
 function conjuntion_to_list(term: any) {
@@ -163,7 +175,7 @@ function read(MaxPriority: number, termKind: TermKind,p1:TokenIter,ps:ParserStat
 	let opinfos;
 	if(token1.type=="EOF"){
 		error("unexpected end-of-file at start of sub-term",token1,ps);
-        let term = new atom(token1);
+        let term = atom(token1);
 		return {term,p:p1};
 	}
     //  parse special case or operator notaion case 
@@ -172,12 +184,12 @@ function read(MaxPriority: number, termKind: TermKind,p1:TokenIter,ps:ParserStat
 	&& token2
 	){
 		if( token2.type=="integer" ){
-			let term  =new negInteger(token2,token1);
+			let term  =negInteger(token2,token1);
 			// return [term,0,p.next()]
 			return bottom_up(MaxPriority,termKind,0,term,p3,ps);
 		}
 		if( token2.type=="float"){
-			let term  =new negFloat(token2,token1);
+			let term  =negFloat(token2,token1);
 			// return [term,0,p.next()]
 			return bottom_up(MaxPriority,termKind,0,term,p3,ps);
 		}
@@ -204,7 +216,7 @@ function read(MaxPriority: number, termKind: TermKind,p1:TokenIter,ps:ParserStat
 			let rightRightPriority = adjust_priority_for_assoc(oppriority,rightRightAssoc);
 			let r1 = read(rightPriority,termKind,p2,ps);
 			let r2 = read(rightRightPriority,termKind,r1.p,ps);
-            let term = new binPrefixCompound(token1,[r1.term,r2.term]);
+            let term = binPrefixCompound(token1,[r1.term,r2.term]);
             return bottom_up(MaxPriority,termKind,oppriority,term,r2.p,ps);
         }	
         // % Check for prefix op.
@@ -221,7 +233,7 @@ function read(MaxPriority: number, termKind: TermKind,p1:TokenIter,ps:ParserStat
 			let rightAssoc = prefixOPinfo[1]
 			let rightPriority = adjust_priority_for_assoc(oppriority,rightAssoc);
 			let r1=read(rightPriority,termKind,p2,ps);
-			let term = new prefixCompound(token1,[r1.term]);
+			let term = prefixCompound(token1,[r1.term]);
             return bottom_up(MaxPriority,termKind,oppriority,term,r1.p,ps)
         }
 	}
@@ -234,7 +246,7 @@ function read(MaxPriority: number, termKind: TermKind,p1:TokenIter,ps:ParserStat
 		case "name":{
 			if(token2?.type=="open_ct"){
                 let r1=read_args(p3,ps);
-                let term = new functorCompound(token1,r1.args);
+                let term =  functorCompound(token1,r1.args);
                 baseterm = term;
                 basep = r1.p;
                 break;
@@ -242,13 +254,13 @@ function read(MaxPriority: number, termKind: TermKind,p1:TokenIter,ps:ParserStat
 			else{
                 if(lookup_op(token1.value)&& MaxPriority<=max_priority){
                     error("unexpected token at start of (sub)term",token1,ps)
-                    let term = new atom(token1);
+                    let term =  atom(token1);
                     baseterm= term;
                     basep = p2;
                     break;
                 }
                 else{
-                    let term = new atom(token1);
+                    let term =  atom(token1);
                     baseterm = term;
                     basep= p2;
                     break;
@@ -256,32 +268,32 @@ function read(MaxPriority: number, termKind: TermKind,p1:TokenIter,ps:ParserStat
 			}
         }
 		case "variable":{
-            let term = new variable(token1);
+            let term =  variable(token1);
             add_var(term,ps);
             baseterm = term;
             basep= p2;
             break;
         }
         case "integer":{
-            let term = new integer(token1);
+            let term =  integer(token1);
             baseterm = term;
             basep= p2;
             break;
         }
         case "float":{
-            let term = new float(token1);
+            let term =  float(token1);
             baseterm = term;
             basep= p2;
             break;
         }
         case "string":{
-            let term = new str(token1);
+            let term =  string(token1);
             baseterm = term;
             basep= p2
             break
         }
         case "implementation_defined":{
-            let term = new implementation_defined(token1);
+            let term =  implementation_defined(token1);
             baseterm = term;
             basep= p2;
             break;       
@@ -305,21 +317,21 @@ function read(MaxPriority: number, termKind: TermKind,p1:TokenIter,ps:ParserStat
         case "open_list":{
             let r1 = read(max_priority+1,"ListElem",p2,ps);
             let r2 = read_list(r1.p,ps);
-            let term = new functorCompound(token1,[r1.term,r2.term],"[|]");
+            let term =  functorCompound(token1,[r1.term,r2.term],"[|]");
             baseterm = term;
             basep = r2.p;
             break;
         }
         case "open_curly":{
             let r1 = read_args_curly(p2,ps);
-            let term = new functorCompound(token1,r1.args,"{}");
+            let term =  functorCompound(token1,r1.args,"{}");
             baseterm = term;
             basep = r1.p;
             break;
         }
 		default:{
             error("unexpected token at start of (sub)term",token2,ps);
-            let term  = new atom(token1);
+            let term  =  atom(token1);
             baseterm = term;
             basep = p2;
             break;
@@ -343,7 +355,7 @@ function read(MaxPriority: number, termKind: TermKind,p1:TokenIter,ps:ParserStat
         let token = pp.val();
         if (token.type == "open_ct"){
             let r = read_args(pp.next(),ps);
-            tt = new applyTerm(token,[tt,...r.args]);
+            tt =  applyCompound(token,[tt,...r.args]);
             pp = r.p;
             continue
         }
@@ -412,13 +424,13 @@ function read_list(p1: TokenIter, ps: ParserState):readRes {
     switch (token1.type) {
         case "EOF":{
             error("unexpected end-of-file in list",token1,ps);
-            let term = new atom(token1,"[]");
+            let term =  atom(token1,"[]");
             return {term,p:p1};
         }
         case "comma":{
             let r1 = read(max_priority+1,"ListElem",p2,ps);
             let r2 = read_list(r1.p,ps);
-            let term = new functorCompound(token1,[r1.term,r2.term],"[|]");
+            let term =  functorCompound(token1,[r1.term,r2.term],"[|]");
             return {term,p:r2.p};
 
         }
@@ -435,14 +447,14 @@ function read_list(p1: TokenIter, ps: ParserState):readRes {
             
         }
         case "close_list":{
-            let term = new atom(token1,"[]");
+            let term =  atom(token1,"[]");
             return {term,p:p2};
         }
         default:{
             error("missing comma",token1,ps);
             let r1 = read(max_priority+1,"ListElem",p1,ps);
             let r2 = read_list(r1.p,ps);
-            let term = new functorCompound(token1,[r1.term,r2.term],"[|]");
+            let term =  functorCompound(token1,[r1.term,r2.term],"[|]");
             return {term,p:r2.p};
         }
     }
@@ -469,11 +481,11 @@ function bottom_up(MaxPriority:number,termKind:TermKind,lpriority:number,lterm:T
         let r  = read(opinfo.rpriority,termKind,p2,ps);
         if(token1.type=="backquoted"){
             let opterm = read_term_from_backquoted(token1,ps);
-            let term  =  new backquotedapplyTerm(token1,[opterm,lterm,r.term]);
+            let term  =   backquotedapplyCompound(token1,[opterm,lterm,r.term]);
             return bottom_up(MaxPriority,termKind,opinfo.priority,term,r.p,ps);
         }
         //  name token
-        let term = new infixCompound(token1,[lterm,r.term]);
+        let term =  infixCompound(token1,[lterm,r.term]);
         return bottom_up(MaxPriority,termKind,opinfo.priority,term,r.p,ps);
     }
     //    postfix  however mercury doesn't have opfix operator
@@ -520,7 +532,7 @@ function read_term_from_backquoted(token:Token,ps:ParserState) {
     let tokenList = tmplexer.getTokenList()
     if(!tokenList){
         error(" missing  token in backquoted",token,ps);
-        return new atom(token);
+        return atom(token);
     }
     // push lexer errors
     let tokens  = tokenList.tokens;
