@@ -57,16 +57,27 @@ export async function activate(context: ExtensionContext) {
 	// Start the client. This will also launch the server
 	bar = vscode.window.createStatusBarItem(1,1);
 	bar.text = "💕Mercury";
+	bar.tooltip="mercury";
+
 	bar.show();
 	bar.command ="Mercury.statusBar";
-	await  client.start();
+	client.start();
+	// NOTE : when client state is 3 ，client is ready
+	while((client as any).state <3){
+		await sleep(100);
+	}
 	vscode.commands.registerCommand(bar.command,()=>{
 		client.sendNotification('$/status/click');
 	})
-	client.onNotification('fuck',()=>{
-		bar.text="fuck";
-		bar.show();
+	client.onNotification('$/fuck',(msg)=>{
+		bar.tooltip = 
+`cached files: ${msg.cached}
+mermory usage: ${msg.usage}MB
+`
+
 	})
+	client.sendNotification("$/fuck");
+
 }
 export function deactivate(): Thenable<void> | undefined {
 	if (!client) {
@@ -75,3 +86,6 @@ export function deactivate(): Thenable<void> | undefined {
 	return client.stop();
 }
 
+function sleep(ms: number) {
+	return new Promise(resolve => setTimeout(resolve, ms))
+}

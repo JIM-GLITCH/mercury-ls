@@ -106,11 +106,11 @@ connection.onInitialized(async() => {
 		connection.workspace.onDidChangeWorkspaceFolders(_event => {
 			connection.console.log('Workspace folder change event received.');
 		});
-	}
-	validateWorkspaceTextDocument();
-
-		
+	}		
 });
+connection.onNotification("$/fuck",async()=>{
+	validateWorkspaceTextDocument()
+})
 async function validateWorkspaceTextDocument() {
 	let file_count = 0;
 	let workspaceFolder = workspaceFolders?workspaceFolders[0]:undefined;
@@ -118,18 +118,17 @@ async function validateWorkspaceTextDocument() {
 
 	let rootPath = URI_obj.parse(workspaceFolder.uri).fsPath;
 	let filenames = fs.readdirSync(rootPath);
-	file_count = filenames.length;
+	let file_number = filenames.length;
 	for (const file_name of filenames) {
 		let file_path = path.join(rootPath,file_name);
 		let file_uri_string = URI_obj.file(file_path).toString();
 		let file_content = fs.readFileSync(file_path).toString();
 		let file_textDocument = TextDocument.create(file_uri_string,"mercury",1,file_content)
 		await validateTextDocument(file_textDocument);
-		// connection.telemetry.logEvent(`${file_name} finished`);
-		// connection.window.showInformationMessage(`${file_name} finished`);
-		
+		file_count++;
+		connection.sendNotification("$/fuck",{cached:`${file_count}/${file_number}`,usage:process.memoryUsage.rss()/1000000});
 	}
-	connection.sendNotification("fuck")
+
 }
 // The example settings
 interface ExampleSettings {
