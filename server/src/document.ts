@@ -5,9 +5,10 @@ import { URI as URI_obj,Utils } from 'vscode-uri'
 import { TextDocument } from 'vscode-languageserver-textdocument'
 
 export class Document{
-    getText (): string  {
+	getText (): string  {
 		return this.textDocument.getText();
     }
+	version: number
 	uri:URI
 	uri_obj:URI_obj
 	clauses:clause[];
@@ -36,6 +37,7 @@ export class Document{
 		                                             // slice(0,-2) 去掉  文件名中的 ".m"
 		this.module_name = Utils.basename(this.uri_obj).slice(0,-2);
 		this.errors = [];
+		this.version = textDocument.version;
 		
 	}
 	search(pos:Position){ 

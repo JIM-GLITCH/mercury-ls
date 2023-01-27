@@ -231,12 +231,84 @@ function ruleBody(node: Term, ps: AnalyseState) {
     }
 }
 
-function DCGHead(arg0: Term, ps: AnalyseState) {
-    // throw new Error('Function not implemented.')
+function DCGHead(term: Term, ps: AnalyseState) {
+    DCGfixArity(term);
+    addDefinition(term,ps);
 }
 
-function DCGBody(arg0: Term, ps: AnalyseState) {
-    // throw new Error('Function not implemented.')
+function DCGBody(term: Term, ps: AnalyseState) {
+    switch (nameArity(term)) {
+        case "some/2":
+        case "all/2":{
+            DCGBody(term.args[1],ps);
+            break;
+        }
+        case ",/2":
+        // case "&/2":
+        case ";/2":
+        {
+            DCGBody(term.args[0],ps);
+            DCGBody(term.args[1],ps);
+            break;
+        }
+        case  '{}/1':{
+            ruleBody(term.args[0],ps);
+            break;
+        }
+        // case "[|]/2":
+        // case "[]/0":
+        // case "true":
+        // case "fail":
+        case "not/1":
+        case "\\+/1":
+        {
+            DCGBody(term.args[0],ps);
+            break;
+        }
+        // case "=>/2":
+        // case "<=/2":
+        // case "<=>/2":
+        case "else/2":{
+            DCGBody(term.args[0],ps);
+            DCGBody(term.args[1],ps);
+            break;
+        }
+        
+        case "if/1":{
+            DCGBody(term.args[0],ps);
+            break;
+        }
+        case "then/2":
+        case "->/2":
+        // case "=/2":
+        // case "\\=/2":
+        {
+            DCGBody(term.args[0],ps);
+            DCGBody(term.args[1],ps);
+            break;
+        }
+        case "=/1":
+        case ":=/1":{
+            ruleBody(term.args[0],ps);
+            break;
+        }
+        case "=^/2":
+        case ":=/2":{
+            ruleBody(term.args[0],ps);
+            ruleBody(term.args[1],ps);
+            break;
+        }
+        case "^/1":{
+            ruleBody(term.args[0],ps);
+            break;
+
+        }
+        default:
+            if(term.token.type!="variable"){
+                DCGfixArity(term);
+                addReference(term,ps);
+            }
+    }
 }
 
 function addDefinition(node: Term, ps: AnalyseState) {
@@ -291,4 +363,8 @@ function func_decl(node: Term, ps: AnalyseState) {
     }
 }
 
+
+function DCGfixArity(term: Term) {
+    term.arity+=2;
+}
 
