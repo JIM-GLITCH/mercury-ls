@@ -24,7 +24,20 @@ import {
     Location,
     DocumentSymbol,
     SymbolKind,
-    WorkspaceFolder
+    WorkspaceFolder,
+    DocumentSymbolParams,
+    DefinitionParams,
+    ReferenceParams,
+    HoverParams,
+    CallHierarchyPrepareParams,
+    CallHierarchyItem,
+    CallHierarchyIncomingCallsParams,
+    CallHierarchyIncomingCall,
+    DeclarationParams,
+    CallHierarchyOutgoingCall,
+    CallHierarchyPrepareRequest,
+    CallHierarchyIncomingCallsRequest,
+    CallHierarchyOutgoingCallsRequest
 } from 'vscode-languageserver/node';
 
 import {
@@ -33,15 +46,19 @@ import {
 import * as parser from './parser'
 import { MultiMap } from './multimap'
 import { Document } from './document'
-import { termRange, tokenToRange } from './term'
+import { Term, clause, termRange, tokenToRange } from './term'
 import * as analyser from './analyser'
-import { tokenRange } from './lexer'
 import * as linker from './linker' 
 import {URI as URI_obj,Utils}from "vscode-uri"
 import fs = require("fs")
 import path = require('path')
-import { nameArity } from './analyser'
-
+import { P } from 'ts-pattern'
+import { nameArity, sleep, tokenRange } from './utils'
+import * as globalSpace from"./globalSpace"
+import { docsMap } from './globalSpace'
+import { DefinitionProvider } from './definition-provider'
+import { DeclarationProvider } from './declaration-provider'
+import { outgoingCallsProvider, prepareCallHierarchyProvider } from './callHierarchy-provider'
 // Create a connection for the server, using Node's IPC as a transport.
 // Also include all preview / proposed LSP features.
 const connection = createConnection(ProposedFeatures.all);
@@ -82,9 +99,10 @@ connection.onInitialize((params: InitializeParams) => {
             hoverProvider:true,
             definitionProvider:true,
             documentSymbolProvider:true,
-            referencesProvider:true
-            
-            
+            referencesProvider:true,
+            callHierarchyProvider:true,
+            declarationProvider:true,
+            implementationProvider:true
         }
     };
     if (hasWorkspaceFolderCapability) {
@@ -108,10 +126,10 @@ connection.onInitialized(async() => {
         });
     }
 });
-connection.onNotification("$/fuck",async()=>{
-    validateWorkspaceTextDocument()
+connection.onNotification("$/validateWorkspaceTextDocuments",async()=>{
+    validateWorkspaceTextDocuments()
 })
-async function validateWorkspaceTextDocument() {
+async function validateWorkspaceTextDocuments() {
     let file_count = 0;
     let workspaceFolder = workspaceFolders?workspaceFolders[0]:undefined;
     if(!workspaceFolder) return undefined;
@@ -126,8 +144,10 @@ async function validateWorkspaceTextDocument() {
         let file_textDocument = TextDocument.create(file_uri_string,"mercury",1,file_content)
         await validateTextDocument(file_textDocument);
         file_count++;
-        connection.sendNotification("$/fuck",{cached:`${file_count}/${file_number}`,usage:process.memoryUsage.rss()/1000000});
+        connection.sendNotification("$/statusBar/text",`Cached files: ${file_count}/${file_number}`);
     }
+    connection.sendNotification("$/statusBar/text","Mercury");
+    connection.sendNotification("$/statusBar/tooltip",{cached:docsMap.size,usage:process.memoryUsage.rss()/1000000});
 
 }
 // The example settings     
@@ -145,7 +165,7 @@ let globalSettings: ExampleSettings = defaultSettings;
 const documentSettings: Map<string, Thenable<ExampleSettings>> = new Map();
 
 // 
-export let docsMap = new Map<URI,Document>();
+
 connection.onDidChangeConfiguration(change => {
     if (hasConfigurationCapability) {
         // Reset all cached document settings
@@ -184,168 +204,21 @@ documents.onDidClose(e => {
 documents.onDidChangeContent(change => {
     validateTextDocument(change.document);
 });
-async function validateTextDocument(textDocument: TextDocument): Promise<void> {
-    // In this simple example we get the settings for every validate run.
-    let document = new Document(textDocument);
 
-    if(!isNewVersion(textDocument)){
-        return;
-    }
-    // 1. parse string to ast
-    parser.parse(document);
-    // 2. analyse ast node's semantic info
-    analyser.analyse(document);
-    // 3. link the definition and references in global scope
-    linker.link(document);
-    // 4. store this document
-    docsMap.set(document.uri , document)
-    // Send the computed diagnostics to VSCode.
-    connection.sendDiagnostics({ uri: document.uri, diagnostics:document.errors });
-}
 
-const sleep = (ms: number) => {
-    return new Promise(resolve => setTimeout(resolve, ms))
-}
 
-connection.onHover(async(params)=>{
-    let pos = params.position;
-    let uri = params.textDocument.uri;
-    let document ;
-    while( !(document = docsMap.get(uri))){
-        await sleep(100);
-    }
-    let clause = document.search(pos);
-    if(!clause) return undefined;
-    let term = clause.search(pos);
-    if(!term) return undefined
-    
-let message =`\`\`\`mercury
-${term.name+'/'+term.arity}
-\`\`\`
-`
-    let hover :Hover={
-        contents:{
-            kind:"markdown",
-            value:message
-        } as MarkupContent,
-        range:termRange(term)
-    }
-    return hover
-})
 
-connection.onDefinition(async (params)=>{
-    let pos = params.position;
-    let uri = params.textDocument.uri;
-    let document ;
-    while( !(document = docsMap.get(uri))){
-        await sleep(100);
-    }
-    let clause = document.search(pos);
-    if(!clause) return undefined
-    let term = clause.search(pos);
-    if(!term) return undefined;
-    if(term.token.type=="variable"){
-        let node = clause.varmap.get(term.name)[0];
-        if(!node) return undefined;
-        return {
-            uri,
-            range:termRange(node)
-        }
-    }
-
-    let defs:Location[]=[];
-    let name_arity = nameArity(term);
-    let clauses = document.defsMap.get(name_arity);
-    for (const clause of clauses) {
-        defs.push({
-            uri:uri,
-            range:termRange(clause.calleeNode)
-        })
-    }
-    // for (const moduleName of document.import_modules) {
-    //     let doc = getDoc(moduleName,document);
-    //     if(!doc) continue;
-    //     let clauses = doc.defsMap.get(name_arity);
-    //     for (const clause of clauses) {
-    //         defs.push({
-    //             uri:doc.uri,
-    //             range:termRange(clause.calleeNode)
-    //         })
-    //     }
-    // }
-    for (const doc of linker.definitionsMap.get(name_arity)) {
-        for (const defclause of doc.defsMap.get(name_arity)) {
-            defs.push({uri:doc.uri,range:termRange(defclause.calleeNode)})
-        }
-    }
-    return defs;
-})
-
-connection.onDocumentSymbol(async (params)=>{
-    let uri  = params.textDocument.uri;
-    let document ;
-    let symbols :DocumentSymbol[]=[];
-    while( !(document = docsMap.get(uri))){
-        await sleep(10);
-    }
-    for (const [name_arity ,clauses] of document.defsMap.map) {
-        let children:DocumentSymbol[] = []
-        for (const clause of clauses) {
-            for (const [varname,varTerms] of clause.varmap.map) {
-                let varRange  = termRange(varTerms[0]);
-                children.push({
-                    name: varname,
-                    kind: SymbolKind.Variable,
-                    range: varRange,
-                    selectionRange: varRange
-                })	
-            } 
-        }
-        let calleeNode = clauses[0].calleeNode;
-        symbols.push({
-            name: calleeNode.name,
-            kind: SymbolKind.Function,
-            range: tokenToRange(clauses[0].startToken,clauses[clauses.length-1].endToken),
-            selectionRange: termRange(clauses[0].calleeNode),
-            children:children,
-            detail:"/"+calleeNode.arity
-        })		
-    }
-    return symbols
-})
-
-connection.onReferences(async (params)=>{
-    let uri  = params.textDocument.uri;
-    let pos = params.position
-    let document ;
-    while( !(document = docsMap.get(uri))){
-        await sleep(100);
-    }
-    let clause = document.search(pos);
-    if(!clause ) return undefined;
-    let term = clause.search(pos);
-    if(!term) return undefined;
-    let refs :Location[]=[];
-    // 查找 variable的引用 只需要在这个varaible在的clause范围里查找
-    if(term.token.type=="variable"){
-        for( const refTerm of clause.varmap.get(term.name)){
-          refs.push({uri,range:termRange(refTerm)});
-        }
-        return refs;
-    }
-
-    let name_arity = nameArity(term)
-
-    for (const doc of linker.referencesMap.get(name_arity)) {
-        for (const refTerm of doc.refsMap.get(name_arity)) {
-            refs.push({uri:doc.uri,range:termRange(refTerm)})
-        }
-    }
-    return refs;
-
-    
-
-})
+connection.onDocumentSymbol(DocumentSymbolProvider);
+connection.onHover(HoverProvider);
+connection.onDefinition(DefinitionProvider);
+// connection.onReferences(ReferenceProvider);
+connection.onImplementation(DefinitionProvider);
+connection.onDeclaration(DeclarationProvider);
+connection.onImplementation(DefinitionProvider);
+// connection.onTypeDefinition(TypeDefinitionProvider);
+connection.onRequest(CallHierarchyPrepareRequest.method,prepareCallHierarchyProvider);
+connection.onRequest(CallHierarchyIncomingCallsRequest.method,outgoingCallsProvider);
+connection.onRequest(CallHierarchyOutgoingCallsRequest.method,outgoingCallsProvider);
 
 connection.onDidChangeWatchedFiles(_change => {
     // Monitored files have change in VSCode
@@ -414,3 +287,168 @@ function isNewVersion(textDocument: TextDocument) {
         return true;
     return false;
 }
+interface defTerm extends Term{
+    clause:clause
+}
+interface refTerm extends Term{
+    clause:clause
+}
+async function DocumentSymbolProvider(params: DocumentSymbolParams) {
+    let uri  = params.textDocument.uri;
+    let document ;
+    while( !(document = docsMap.get(uri))){
+        await sleep(100);
+    }
+    let symbols :DocumentSymbol[]=[];
+    for (const [name_arity ,funcTerms] of document.funcDefMap.map) {
+        let children:DocumentSymbol[] = []
+        for (const funcTerm of funcTerms as defTerm[]) {
+            for (const [varName,varTerms] of funcTerm.clause.varmap.map) {
+                let varRange  = termRange(varTerms[0]);
+                children.push({
+                    name: varName,
+                    kind: SymbolKind.Variable,
+                    range: varRange,
+                    selectionRange: varRange
+                })	
+            } 
+        }
+        let funcTerm = funcTerms[0];
+        symbols.push({
+            name: name_arity,
+            kind:SymbolKind.Operator,
+            range: tokenToRange(funcTerms[0].clause!.startToken,funcTerms[funcTerms.length-1].clause!.endToken),
+            selectionRange: termRange(funcTerm),
+            children:children,
+        })
+    }
+
+    for (const [name ,predTerms] of document.predDefMap.map) {
+        let children:DocumentSymbol[] = []
+        for (const funcTerm of predTerms as defTerm[]) {
+            for (const [varName,varTerms] of funcTerm.clause.varmap.map) {
+                let varRange  = termRange(varTerms[0]);
+                children.push({
+                    name: varName,
+                    kind: SymbolKind.Variable,
+                    range: varRange,
+                    selectionRange: varRange
+                })	
+            } 
+        }
+        let funcTerm = predTerms[0];
+        symbols.push({
+            name: name,
+            kind:SymbolKind.Function,
+            range: tokenToRange(predTerms[0].clause!.startToken,predTerms[predTerms.length-1].clause!.endToken),
+            selectionRange: termRange(funcTerm),
+            children:children,
+        })
+    }
+    return symbols
+} 
+
+// async function ReferenceProvider(params:ReferenceParams) {
+//     let uri  = params.textDocument.uri;
+//     let pos = params.position
+//     let document ;
+//     while( !(document = docsMap.get(uri))){
+//         await sleep(100);
+//     }
+//     let{term, clause} = document.search(pos);
+
+//     if(!term) return undefined;
+//     let refs :Location[]=[];
+//     // 查找 variable的引用 只需要在这个varaible在的clause范围里查找
+//     if(term.token.type=="variable"){
+//         for( const refTerm of clause!.varmap.get(term.name)){
+//           refs.push({uri,range:termRange(refTerm)});
+//         }
+//         return refs;
+//     }
+
+//     let name_arity = nameArity(term)
+//     // 找到这个term的定义的位置
+//     for (const doc of globalSpace.referencesMap.get(name_arity)) {
+//         for (const refTerm of doc.refsMap.get(name_arity)) {
+//             refs.push({uri:doc.uri,range:termRange(refTerm)})
+//         }
+//     }
+//     return refs;
+// }
+async function HoverProvider(params:HoverParams) {
+    let pos = params.position;
+    let uri = params.textDocument.uri;
+    let term = docsMap.get(uri)?.search(pos);
+    if(!term) return;
+    let msg;
+    forloop:
+    for(;;){
+        switch (term.semanticType){
+            case 'func':
+                msg = `func ${nameArity(term)}`
+                break forloop;
+            case 'pred':
+                msg = `pred ${nameArity(term)}`
+                break forloop;
+            case 'type':
+                msg = `type ${nameArity(term)}`
+                break forloop;
+            case 'module':
+                msg = `module ${term.name}`
+                break forloop;
+            case undefined:
+                // 如果term没有 semanticType 那么根据syntaxType处理
+                break;
+        }
+        
+        switch (term.syntaxType) {
+            case 'string':
+            case 'variable':
+            case 'integer':
+            case 'float':
+            case 'implementation_defined':
+                msg = term.name;
+                break forloop;
+            case 'atom':
+                msg = nameArity(term);
+                break forloop;
+        }
+    }    
+let message =`\`\`\`mercury
+${msg}
+\`\`\`
+`
+    return {
+        contents:{
+            kind:"markdown",
+            value:message
+        } as MarkupContent,
+        range:termRange(term)
+    } as Hover
+}
+
+async function validateTextDocument(textDocument: TextDocument): Promise<void> {
+    // In this simple example we get the settings for every validate run.
+    let document = new Document(textDocument);
+
+    if(!isNewVersion(textDocument)){
+        return;
+    }
+    // 1. parse string to ast
+    parser.parse(document);
+    // 2. analyse ast node's semantic info
+    analyser.analyse(document);
+    // 3. link the definition and references in global scope
+    linker.link(document);
+    // 4. store this document
+    docsMap.set(document.uri , document)
+    // Send the computed diagnostics to VSCode.
+    connection.sendDiagnostics({ uri: document.uri, diagnostics:document.errors });
+    connection.sendNotification("$/statusBar/tooltip",{cached:docsMap.size,usage:process.memoryUsage.rss()/1000000});
+}
+
+function getTerm(uri: string, pos: Position) {
+    return docsMap.get(uri)?.search(pos);
+}
+

@@ -1,9 +1,10 @@
 import { Diagnostic } from 'vscode-languageserver'
-import { Token, TokenList, TokenType, lexer, tokenRange } from './lexer';
+import { Token, TokenList, TokenType, lexer, } from './lexer';
 import { OpInfo, adjust_priority_for_assoc, lookup_infix_op, lookup_op, lookup_op_infos, max_priority } from './ops'
 import { Term, string,applyCompound, atom, backquotedapplyCompound, binPrefixCompound, clause, float, functorCompound, implementation_defined, infixCompound, integer, negFloat, negInteger, prefixCompound, variable } from './term'
 import { MultiMap } from './multimap'
 import type{ Document } from './document'
+import { error } from './utils'
 
 type TermKind = "OrdinaryTerm"|"Argument"|"ListElem"
 class TokenIter {
@@ -33,7 +34,6 @@ export function parse(document:Document){
             break;
         }
         let clause = read_clause_from_TokenList(tokenList,ps);
-        clause.varmap = ps.varmap;
         ps.varmap = new MultiMap();
         clauses.push(clause);
     }
@@ -80,16 +80,10 @@ function read_clause_from_TokenList(tokenList:TokenList,ps:ParserState) {
         error("missing end of clause token",lastToken,ps);
     }
     let end  = tokenList.end?? tokenList.tokens[tokenList.tokens.length-1]
-    let  clauseItem= new clause(r.term,end);
+    let  clauseItem= new clause(r.term,end,ps.varmap);
     return clauseItem;
 }
-function error(message:string,token:Token,ps:ParserState) {
-	let range = tokenRange(token);
-    ps.errors.push({
-        range,
-        message
-    })
-}
+
 export interface ParserState{
     calleeNode?: Term
     errors: Diagnostic[]

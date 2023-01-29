@@ -1,11 +1,13 @@
 // type term = functor|variable
 
 import { Position, Range } from 'vscode-languageserver'
-import { Token, tokenRange } from './lexer'
+import { Token } from './lexer'
 import { MultiMap } from './multimap'
-import { SematicType } from './analyser'
+import { SemanticType } from './analyser'
+import { tokenRange } from './utils'
+import { RefTerm } from './document'
 
-type TermType=
+type syntaxType=
     "variable"|
     "atom"|
     "integer"|
@@ -15,9 +17,13 @@ type TermType=
 
 export interface Term {
     /**
-     * term type
+     * term 是哪一个module里定义的
      */
-    termType:TermType
+    module?: string
+    /**
+     * syntaxType
+     */
+    syntaxType:syntaxType
     args: Term[]
     /**which token represents this term */
     token: Token
@@ -36,13 +42,17 @@ export interface Term {
     /**
      *  semantic type
      */
-    sematicType?:SematicType
+    semanticType?:SemanticType
+    /**
+     * the clause this term belong to 
+     */
+    clause?:clause
     toString():string
 }
 export class defaultTerm implements Term{
     
-    constructor(TermType:TermType,token:Token,args:Term[]=[],startToken:Token=token,endToken:Token=token,name:string=token.value){
-        this.termType = TermType
+    constructor(TermType:syntaxType,token:Token,args:Term[]=[],startToken:Token=token,endToken:Token=token,name:string=token.value){
+        this.syntaxType = TermType
         this.token = token;
         this.args = args;
         this.startToken = startToken;
@@ -50,26 +60,27 @@ export class defaultTerm implements Term{
         this.name = name;
         this.arity = args.length
     }
-    termType:TermType
+    clause?: clause
+    syntaxType:syntaxType
     args: Term[]
     token: Token
     startToken: Token
     endToken: Token
     name: string
     arity: number
-    sematicType?: SematicType | undefined
+    semanticType?: SemanticType | undefined
     toString(): string {
         return termToString(this);
     }
 }
-function TermSearch(term:Term,pos:Position){
 
-}
 export function atom(token:Token,name?:string){
     return new defaultTerm("atom",token,undefined,undefined,undefined,name);
 }
 export function variable(token:Token){
-    return new defaultTerm("variable",token);
+    let term = new defaultTerm("variable",token);
+    term.semanticType ="variable"
+    return term
 }
 
 export function integer(token:Token){
@@ -170,6 +181,9 @@ export class clause  {
     endToken: Token
     name: string
 	calleeNode!: Term
+    calledNodes:RefTerm[]=[]
+    defTerm?: Term
+    refTerms: Term[]=[]
     search(pos: Position) {
         return checkFunctorRange(pos, this, this.term, undefined)
     }
@@ -186,14 +200,18 @@ export class clause  {
     term: Term
     end: Token
     token
-    varmap!: MultiMap<string, Term>
-    constructor(term: Term, end: Token) {
+    varmap: MultiMap<string, Term>
+    constructor(term: Term, end: Token,varmap: MultiMap<string, Term> ) {
         this.term = term
         this.end = end
         this.token = this.end
         this.startToken = term.startToken
         this.endToken = end
         this.name = "clause"
+        this.varmap = varmap
+        for (const [,varTerms] of varmap.map) {
+            varTerms.forEach(v =>v.clause = this);
+        }
     }
 }
 
@@ -289,7 +307,7 @@ function fixArity(node:Term){
  * @returns  term at the postion or undefined
  */
 function search(term: Term | undefined, pos: Position): Term | undefined {
-    switch(term?.termType){
+    switch(term?.syntaxType){
         case "atom":{
             let token_range = tokenRange(term.token);
             if(pos_in_range(pos,token_range)){
@@ -311,7 +329,7 @@ function search(term: Term | undefined, pos: Position): Term | undefined {
     } 
 }
 function termToString(term: Term) {
-    switch(term.termType){
+    switch(term.syntaxType){
         case 'atom':{
             if(term.args.length == 0){
                 return term.name;

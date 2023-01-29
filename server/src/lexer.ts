@@ -212,17 +212,3 @@ MyLexerPrototype.getTokenList = function () {
     }
 }
 
-export function tokenRange( token:Token):Range{
-	return {
-		start:{
-			line:token.line-1,
-			character:token.col-1
-		},
-		end:{
-			line:token.line+token.lineBreaks-1,
-			character:token.lineBreaks
-				?	(token.text.length-token.text.lastIndexOf("\n")-1)
-				:	(token.col+token.text.length-1)
-		}
-	}
-}

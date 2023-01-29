@@ -1,24 +1,36 @@
-import { SymbolKind } from 'vscode-languageserver'
+import { Diagnostic, SymbolKind, URI } from 'vscode-languageserver'
 // import { ParserState } from './parser'
 import { Term, clause, termRange } from './term'
-import { Document } from './document'
-export type SematicType = 
+import { DefTerm, Document, RefTerm } from './document'
+import { error, nameArity } from './utils'
+import { parse_type_defn_item } from './parse_type_defn_item'
+import { moduleUriMap  } from './globalSpace'
+export type SemanticType = 
     "func"|
     "pred"|
-    "type"
+    "type"|
+    "module"|
+    "underscore_sep_module"|
+    "variable"
     
 export interface AnalyseState{
+    moduleUriMap: Map<string,URI>
+    moduleName: string[] | undefined
     clause:clause
     document: Document
     interface: boolean;
+    errors:Diagnostic[]
 
 }
 export function analyse(document:Document) {
-    let ps = {
-        clause    :document.clauses[0],
-        document  :document,
-        interface :false
-    } as AnalyseState;
+    let ps: AnalyseState = {
+        clause: document.clauses[0],
+        document: document,
+        interface: false,
+        errors: document.errors,
+        moduleName: undefined,
+        moduleUriMap: moduleUriMap
+    } ;
     for (const clause of document.clauses) {
         ps.clause = clause;
         analyse_term(clause.term,ps);
@@ -27,7 +39,7 @@ export function analyse(document:Document) {
 function analyse_term(node:Term,ps:AnalyseState){
     switch (nameArity(node)) {
         case ":-/1":{
-            analyse_declaration(node,ps)
+            analyse_declaration(node.args[0],ps)
             break;
 		}
 		case ":-/2":{
@@ -42,31 +54,62 @@ function analyse_term(node:Term,ps:AnalyseState){
 			return ;
 		}
         case "=/2":{
-			ruleHead(node.args[0],ps);
+			funcRuleHead(node.args[0],ps);
             break;
         }
 		
 		default:
-			addDefinition(node,ps);
+			addPredDef(node,ps);
 			break;
     }
 }
 
-export function nameArity(term:Term){
-    return term.name+'/'+term.arity;
-}
+
 
 
 function analyse_declaration(term: Term,ps:AnalyseState) {
-    let decl = term.args[0];
-    switch (nameArity(decl)) {
-        case "type/1":
+    switch (nameArity(term)) {
+        case "module/1":{
+            parse_module_marker(term.args[0],ps)
+            break;
+        }
+        case "end_module/1":{
+            parse_end_module_marker(term.args[0],ps)
+            break;
+        }
+        case "interface/0":
+            ps.interface = true;
+            break;
+        case "implementation/0":
+            ps.interface = false;
+            break;
+        case "import_module/1":{
+            // if(ps.interface){
+                addImportModule(term.args[0],ps);
+            // }
+            break;
+        }
+        case "use_module":
+            break;
+        case "include_module/1":{
+            if(ps.interface){
+                addIncludeModule(term.args[0],ps);
+            }
+            break;
+        }
+        case "version_numbers/1":{
+            break;
+        }
+        case "type/1":{
+            // parse_type_defn_item(term.args[0],ps);
+            break;
+        }
         case "solver/1":
         case "pred/1":
-            pred_decl(decl.args[0],ps);
+            pred_decl(term.args[0],ps);
             break;
         case "func/1":
-            func_decl(decl.args[0],ps);
+            func_decl(term.args[0],ps);
         case "inst/1":
         case "mode/1":
         case "typesclass/1":
@@ -76,30 +119,6 @@ function analyse_declaration(term: Term,ps:AnalyseState) {
         case "initialise/1":
         case "finalise/1":
         case "mutable/1":
-        case "module/1":
-            break;
-        case "interface/0":
-            ps.interface = true;
-            break;
-        case "implementation/0":
-            ps.interface = false;
-            break;
-        case "import_module/1":{
-            // if(ps.interface){
-                add_import_module(decl.args[0],ps);
-            // }
-            break;
-        }
-        case "use_module":
-            break;
-        case "include_module/1":{
-            if(ps.interface){
-                add_include_module(decl.args[0],ps);
-            }
-            break;
-        }
-        case "end_module/0":
-            break;
     
         default:
             break;
@@ -109,14 +128,20 @@ function analyse_declaration(term: Term,ps:AnalyseState) {
 function ruleHead(node: Term, ps: AnalyseState) {
     switch (nameArity(node)){
         case "=/2":{
-            ruleHead(node.args[0],ps);
+            funcRuleHead(node.args[0],ps);
             break
         }
         default:
-            addDefinition(node,ps);
+            addPredDef(node,ps);
     }
 }
-
+function funcRuleHead(term:Term,ps:AnalyseState){
+    if(term.syntaxType=="variable"){
+        error(" can't be variable",term.token,ps);
+        return
+    }
+    addFuncDef(term,ps);
+}
 function ruleBody(node: Term, ps: AnalyseState) {
     switch (nameArity(node)) {
         case "some/2":
@@ -226,14 +251,14 @@ function ruleBody(node: Term, ps: AnalyseState) {
         }
         default:
             if(node.token.type!="variable"){
-                addReference(node,ps);
+                addRef(node,ps);
             }
     }
 }
 
 function DCGHead(term: Term, ps: AnalyseState) {
     DCGfixArity(term);
-    addDefinition(term,ps);
+    addFuncDef(term,ps);
 }
 
 function DCGBody(term: Term, ps: AnalyseState) {
@@ -306,59 +331,94 @@ function DCGBody(term: Term, ps: AnalyseState) {
         default:
             if(term.token.type!="variable"){
                 DCGfixArity(term);
-                addReference(term,ps);
+                addRef(term,ps);
             }
     }
 }
 
-function addDefinition(node: Term, ps: AnalyseState) {
-    ps.document.defsMap.add(nameArity(node),ps.clause)
-    ps.clause.calleeNode = node;
+function addFuncDef(node: Term, ps: AnalyseState) {
+    ps.document.funcDefMap.add(node.name,node as DefTerm);
+    node.clause = ps.clause
+    node.semanticType = "func";
+    ps.clause.defTerm =node
+}
+function addPredDef(node: Term, ps: AnalyseState) {
+    if(node.syntaxType=="variable"){
+        error(" can't be variable",node.token,ps);
+        return
+    }
+    ps.document.predDefMap.add(node.name,node as DefTerm);
+    node.clause = ps.clause
+    node.semanticType = "pred";
+    ps.clause.defTerm = node;
+}
+function addRef(node: Term, ps: AnalyseState) {
+    node.clause = ps.clause;
+    // ps.document.funcRefMap.add(node.name,node)
+    ps.clause.refTerms.push(node);
+}
+// function addFuncRef(node: Term, ps: AnalyseState) {
+//     node.clause = ps.clause;
+//     ps.document.funcRefMap.add(node.name,node)
+//     ps.clause.refTerms.push(node);
+// }
+// function addPredRef(node: Term, ps: AnalyseState) {
+//     node.clause = ps.clause;
+//     ps.document.predRefMap.add(node.name,node)
+//     ps.clause.refTerms.push(node);
+// }
+function addIncludeModule(term: Term, ps: AnalyseState) {
+    let moduleName  =  getModuleNameFromTerm(term,ps)
+    if(moduleName){
+        ps.document.includeModules.add(moduleName.join("."));
+    }
 }
 
-function addReference(node: Term, ps: AnalyseState) {
-    ps.document.refsMap.add(nameArity(node),node)
-}
-
-function add_include_module(arg0: Term, ps: AnalyseState) {
-    ps.document.include_modules.add(arg0.name);
-}
-
-function add_import_module(arg0: Term, ps: AnalyseState) {
-    ps.document.import_modules.add(arg0.name);
+function addImportModule(term: Term, ps: AnalyseState) {
+    let moduleName  =  getModuleNameFromTerm(term,ps)
+    if(moduleName){
+        ps.document.includeModules.add(moduleName.join("."));
+    }
 }
 
 function pred_decl(node: Term, ps: AnalyseState) {
     switch (nameArity(node)) {
         case "is/2":
             let pred = node.args[0];
-            addDeclaration(pred,ps)
+            addPredDeclaration(pred,ps)
             break;
     
         default:
-            addDeclaration(node,ps);
+            addPredDeclaration(node,ps);
             break;
     }
 }
-
-
-function addDeclaration(node: Term, ps: AnalyseState) {
-    ps.clause.calleeNode = node;
-    ps.document.declsMap.add(nameArity(node),ps.clause)
-    if(ps.interface){
-        ps.document.exports.add(nameArity(node))
-    }
+function addPredDeclaration(term:Term,ps:AnalyseState){
+    term.semanticType = "pred";
+    addPredDecl(term,ps)
 }
 
+function addFuncDecl(node: Term, ps: AnalyseState) {
+    ps.document.funcDeclMap.add(node.name,node)
+    if(ps.interface){
+        ps.document.exportFuncs.add(node.name)
+    }
+}
+function addPredDecl(term:Term,ps:AnalyseState) {
+    ps.document.predDeclMap.add(term.name,term);
+    if(ps.interface){
+        ps.document.exportPreds.add(term.name)
+    }
+}
 function func_decl(node: Term, ps: AnalyseState) {
     switch (nameArity(node)) {
         case "=/2":
             let func = node.args[0];
-            addDeclaration(func,ps)
+            addFuncDecl(func,ps)
             break;
     
         default:
-            addDeclaration(node,ps);
+            addFuncDecl(node,ps);
             break;
     }
 }
@@ -367,4 +427,78 @@ function func_decl(node: Term, ps: AnalyseState) {
 function DCGfixArity(term: Term) {
     term.arity+=2;
 }
+function parse_module_marker(term: Term, ps: AnalyseState) {
+    let moduleName = getModuleNameFromTerm(term,ps);
+    if(!moduleName) return ;
+    if(!matchName(moduleName,ps.document.fileNameWithoutExt.split("."))){
+        error("module name is not same with file name",term.token,ps);
+    }
+    ps.moduleName = moduleName;
+    addModuleDef(moduleName,ps)
+    ps.clause.calleeNode = term;
 
+}
+function parse_end_module_marker(term: Term, ps: AnalyseState) {
+    let endModuleName = getModuleNameFromTerm(term,ps);
+    if(!endModuleName) return ;
+    if(!ps.moduleName) return ;
+    if(!matchName(ps.moduleName,endModuleName)){
+        error("end module name is not same with module name",term.token,ps);
+    }
+}
+
+
+
+function getModuleNameFromTerm(term: Term,ps:AnalyseState) {
+    let list = [];
+    forloop:
+    for(;;){
+        switch(nameArity(term)){
+            case ":/2":
+            case "./2":{
+                if(term.args[1].arity!=0){
+                    error("invalid module name",term.args[1].token,ps)
+                    return 
+                }
+                list.push(term.args[1].name);
+                term.args[1].semanticType = "module"
+                term = term.args[0];
+                continue;
+            }
+            default:
+                if(term.arity!=0){
+                    return 
+                }
+                term.semanticType = "underscore_sep_module";
+                let symName = term.name.split("__")
+                list.push(...symName);
+                break forloop;
+        }
+    }
+    list.reverse()
+    return list
+}
+
+function matchName(moduleName: string[], fileNameWithoutExt: string[]) {
+    let length = Math.min(moduleName.length,fileNameWithoutExt.length);
+    for (let index = 0; index < length; index++) {
+        const element1 = moduleName[moduleName.length-1-index];
+        const element2 = fileNameWithoutExt[fileNameWithoutExt.length-1-index];
+        if(element1 != element2){
+            return false;
+        }
+    }
+    return true;
+}
+
+function addModuleDef(list:string[],ps:AnalyseState){
+    let moduleName = list[list.length-1];
+    let uri = ps.document.uri;
+    for (let index = list.length-2; index >=0; index--) {
+        ps.moduleUriMap.set(moduleName,uri)
+        const element = list[index];
+        moduleName=element+"."+moduleName;
+    }
+    ps.moduleUriMap.set(moduleName,uri);
+    // ps.document.defsMap.add(moduleName,ps.clause);
+}
