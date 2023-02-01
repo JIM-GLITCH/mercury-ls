@@ -1,40 +1,48 @@
-import { DeclarationParams, Location } from 'vscode-languageserver'
-import { docsMap, funcMap, predMap } from './globalSpace'
+import { DefinitionParams, Location } from 'vscode-languageserver'
+import { docsMap, funcMap, moduleUriMap, predMap } from './globalSpace'
 import { getDocumentFromModule, sleep } from './utils'
 import { termRange } from './term'
+import { Document } from './document'
 
-export async function DeclarationProvider(params:DeclarationParams) {
+export async function DefinitionProvider(params:DefinitionParams) {
     let pos = params.position;
     let uri = params.textDocument.uri;
-    let document;
-    while(!(document=docsMap.get(uri))){
+    let document ;
+    while( !(document = docsMap.get(uri))){
         await sleep(100);
     }
-    let term = document.search(pos);
-    if(!term) return
+
+    let term =document.search(pos);
+    if(!term) return undefined;
     switch (term.semanticType!) {
         case 'variable':{
-            return;
+            // 在 variable所在的clause里查找
+            let node = term.clause!.varmap.get(term.name)[0];
+            if(!node) return undefined;
+            return {
+                uri,
+                range:termRange(node)
+            } as Location;
         }
         case 'func':{
-            let collect:Location[]=[];
+            let defs:Location[]=[];
             // term有module属性 在该module里找
             if(term.module){
                 let doc = getDocumentFromModule(term.module);
                 if(!doc) return;
-                let funcTerms = doc.funcDeclMap.get(term.name);
+                let funcTerms = doc.funcDefMap.get(term.name);
                 for (const funcTerm of funcTerms) {
-                    collect.push({
+                    defs.push({
                         uri:uri,
                         range:termRange(funcTerm)
                     })
                 }
-                return collect;
+                return defs;
             }
             // 在本文件查找
-            let funcTerms = document.funcDeclMap.get(term.name);
+            let funcTerms = document.funcDefMap.get(term.name);
             for (const funcTerm of funcTerms) {
-                collect.push({
+                defs.push({
                     uri:uri,
                     range:termRange(funcTerm)
                 })
@@ -46,37 +54,37 @@ export async function DeclarationProvider(params:DeclarationParams) {
                     continue
                 }
                 //如果导入 进行查找
-                let funcTerms = doc.funcDeclMap.get(term.name);
+                let funcTerms = doc.funcDefMap.get(term.name);
                 for (const funcTerm of funcTerms) {
-                    collect.push({
+                    defs.push({
                         uri:uri,
                         range:termRange(funcTerm)
                     })
                 }
             }
-            return collect
+            return defs
         }
         case 'pred':{
-            let collect:Location[]=[];
+            let defs:Location[]=[];
             // term有module属性 在该module里找
             if(term.module){
                 let doc = getDocumentFromModule(term.module);
                 if(!doc) return;
-                let terms = doc.predDeclMap.get(term.name);
-                for (const term of terms) {
-                    collect.push({
+                let predTerms = doc.predDefMap.get(term.name);
+                for (const predTerm of predTerms) {
+                    defs.push({
                         uri:uri,
-                        range:termRange(term)
+                        range:termRange(predTerm)
                     })
                 }
-                return collect;
+                return defs;
             }
             // 在本文件查找
-            let terms = document.predDeclMap.get(term.name);
-            for (const term of terms) {
-                collect.push({
+            let predTerms = document.predDefMap.get(term.name);
+            for (const predTerm of predTerms) {
+                defs.push({
                     uri:uri,
-                    range:termRange(term)
+                    range:termRange(predTerm)
                 })
             }
             // 在全局的文件里查找
@@ -86,23 +94,22 @@ export async function DeclarationProvider(params:DeclarationParams) {
                     continue
                 }
                 //如果导入 进行查找
-                let terms = doc.predDeclMap.get(term.name);
-                for (const term of terms) {
-                    collect.push({
+                let predTerms = doc.predDefMap.get(term.name);
+                for (const predTerm of predTerms) {
+                    defs.push({
                         uri:uri,
-                        range:termRange(term)
+                        range:termRange(predTerm)
                     })
                 }
             }
-            return collect
+            return defs;
         }
         case 'type':
         case 'module':
-        case 'underscore_sep_module':
-            
-            break;
-    
         default:
-            break;
+            // 查找所有map
+
     }
+
 }
+

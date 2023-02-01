@@ -16,6 +16,7 @@ type syntaxType=
     "implementation_defined"
 
 export interface Term {
+    qualification?: string
     /**
      * term 是哪一个module里定义的
      */
@@ -50,6 +51,7 @@ export interface Term {
     toString():string
 }
 export class defaultTerm implements Term{
+    semanticType?: SemanticType 
     
     constructor(TermType:syntaxType,token:Token,args:Term[]=[],startToken:Token=token,endToken:Token=token,name:string=token.value){
         this.syntaxType = TermType
@@ -60,6 +62,8 @@ export class defaultTerm implements Term{
         this.name = name;
         this.arity = args.length
     }
+    qualification: string | undefined
+    module?: string | undefined
     clause?: clause
     syntaxType:syntaxType
     args: Term[]
@@ -68,7 +72,6 @@ export class defaultTerm implements Term{
     endToken: Token
     name: string
     arity: number
-    semanticType?: SemanticType | undefined
     toString(): string {
         return termToString(this);
     }
@@ -182,8 +185,6 @@ export class clause  {
     name: string
 	calleeNode!: Term
     calledNodes:RefTerm[]=[]
-    defTerm?: Term
-    refTerms: Term[]=[]
     search(pos: Position) {
         return checkFunctorRange(pos, this, this.term, undefined)
     }
@@ -212,6 +213,9 @@ export class clause  {
         for (const [,varTerms] of varmap.map) {
             varTerms.forEach(v =>v.clause = this);
         }
+    }
+    toString(){
+        return this.term.toString()+".";
     }
 }
 

@@ -10,7 +10,6 @@ export type SemanticType =
     "pred"|
     "type"|
     "module"|
-    "underscore_sep_module"|
     "variable"
     
 export interface AnalyseState{
@@ -29,7 +28,7 @@ export function analyse(document:Document) {
         interface: false,
         errors: document.errors,
         moduleName: undefined,
-        moduleUriMap: moduleUriMap
+        moduleUriMap: moduleUriMap,
     } ;
     for (const clause of document.clauses) {
         ps.clause = clause;
@@ -74,7 +73,7 @@ function analyse_declaration(term: Term,ps:AnalyseState) {
             break;
         }
         case "end_module/1":{
-            parse_end_module_marker(term.args[0],ps)
+            // parse_end_module_marker(term.args[0],ps)
             break;
         }
         case "interface/0":
@@ -106,10 +105,10 @@ function analyse_declaration(term: Term,ps:AnalyseState) {
         }
         case "solver/1":
         case "pred/1":
-            pred_decl(term.args[0],ps);
+            parse_pred_decl(term.args[0],ps);
             break;
         case "func/1":
-            func_decl(term.args[0],ps);
+            parse_func_decl(term.args[0],ps);
         case "inst/1":
         case "mode/1":
         case "typesclass/1":
@@ -119,7 +118,11 @@ function analyse_declaration(term: Term,ps:AnalyseState) {
         case "initialise/1":
         case "finalise/1":
         case "mutable/1":
-    
+            break;
+        case "<=/2":{
+            analyse_declaration(term.args[0],ps);
+        }
+
         default:
             break;
     }
@@ -340,7 +343,7 @@ function addFuncDef(node: Term, ps: AnalyseState) {
     ps.document.funcDefMap.add(node.name,node as DefTerm);
     node.clause = ps.clause
     node.semanticType = "func";
-    ps.clause.defTerm =node
+    ps.clause.calleeNode =node
 }
 function addPredDef(node: Term, ps: AnalyseState) {
     if(node.syntaxType=="variable"){
@@ -350,12 +353,12 @@ function addPredDef(node: Term, ps: AnalyseState) {
     ps.document.predDefMap.add(node.name,node as DefTerm);
     node.clause = ps.clause
     node.semanticType = "pred";
-    ps.clause.defTerm = node;
+    ps.clause.calleeNode = node;
 }
 function addRef(node: Term, ps: AnalyseState) {
     node.clause = ps.clause;
-    // ps.document.funcRefMap.add(node.name,node)
-    ps.clause.refTerms.push(node);
+    ps.document.refMap.add(node.name,node as RefTerm)
+    ps.clause.calledNodes.push(node as RefTerm);
 }
 // function addFuncRef(node: Term, ps: AnalyseState) {
 //     node.clause = ps.clause;
@@ -368,20 +371,20 @@ function addRef(node: Term, ps: AnalyseState) {
 //     ps.clause.refTerms.push(node);
 // }
 function addIncludeModule(term: Term, ps: AnalyseState) {
-    let moduleName  =  getModuleNameFromTerm(term,ps)
+    let moduleName  =  getModuleList(term,ps)
     if(moduleName){
         ps.document.includeModules.add(moduleName.join("."));
     }
 }
 
 function addImportModule(term: Term, ps: AnalyseState) {
-    let moduleName  =  getModuleNameFromTerm(term,ps)
+    let moduleName  =  getModuleList(term,ps)
     if(moduleName){
         ps.document.includeModules.add(moduleName.join("."));
     }
 }
 
-function pred_decl(node: Term, ps: AnalyseState) {
+function parse_pred_decl(node: Term, ps: AnalyseState) {
     switch (nameArity(node)) {
         case "is/2":
             let pred = node.args[0];
@@ -398,10 +401,11 @@ function addPredDeclaration(term:Term,ps:AnalyseState){
     addPredDecl(term,ps)
 }
 
-function addFuncDecl(node: Term, ps: AnalyseState) {
-    ps.document.funcDeclMap.add(node.name,node)
+function addFuncDecl(term: Term, ps: AnalyseState) {
+    term.semanticType = "func";
+    ps.document.funcDeclMap.add(term.name,term)
     if(ps.interface){
-        ps.document.exportFuncs.add(node.name)
+        ps.document.exportFuncs.add(term.name)
     }
 }
 function addPredDecl(term:Term,ps:AnalyseState) {
@@ -410,15 +414,14 @@ function addPredDecl(term:Term,ps:AnalyseState) {
         ps.document.exportPreds.add(term.name)
     }
 }
-function func_decl(node: Term, ps: AnalyseState) {
-    switch (nameArity(node)) {
+function parse_func_decl(term: Term, ps: AnalyseState) {
+    switch (nameArity(term)) {
         case "=/2":
-            let func = node.args[0];
+            let func = term.args[0];
             addFuncDecl(func,ps)
             break;
-    
         default:
-            addFuncDecl(node,ps);
+            addFuncDecl(term,ps);
             break;
     }
 }
@@ -428,28 +431,32 @@ function DCGfixArity(term: Term) {
     term.arity+=2;
 }
 function parse_module_marker(term: Term, ps: AnalyseState) {
-    let moduleName = getModuleNameFromTerm(term,ps);
-    if(!moduleName) return ;
-    if(!matchName(moduleName,ps.document.fileNameWithoutExt.split("."))){
-        error("module name is not same with file name",term.token,ps);
+    let module_list = getModuleList(term,ps);
+    if(!module_list) return ;
+    // 处理module list
+    let parent_modules_names: string[] = [];
+    for (const moduleTerm of module_list) {
+        
+        moduleTerm.qualification = parent_modules_names.join(".");
+        parent_modules_names.push(moduleTerm.name);
+
+        addModuleDef(moduleTerm,ps)
     }
-    ps.moduleName = moduleName;
-    addModuleDef(moduleName,ps)
-    ps.clause.calleeNode = term;
+    ps.clause.calleeNode = module_list.pop()!;
 
 }
-function parse_end_module_marker(term: Term, ps: AnalyseState) {
-    let endModuleName = getModuleNameFromTerm(term,ps);
-    if(!endModuleName) return ;
-    if(!ps.moduleName) return ;
-    if(!matchName(ps.moduleName,endModuleName)){
-        error("end module name is not same with module name",term.token,ps);
-    }
-}
+// function parse_end_module_marker(term: Term, ps: AnalyseState) {
+//     let endModuleName = getModuleList(term,ps);
+//     if(!endModuleName) return ;
+//     if(!ps.moduleName) return ;
+//     if(!matchName(ps.moduleName,endModuleName)){
+//         error("end module name is not same with module name",term.token,ps);
+//     }
+// }
 
 
 
-function getModuleNameFromTerm(term: Term,ps:AnalyseState) {
+function getModuleList(term: Term,ps:AnalyseState) {
     let list = [];
     forloop:
     for(;;){
@@ -460,8 +467,10 @@ function getModuleNameFromTerm(term: Term,ps:AnalyseState) {
                     error("invalid module name",term.args[1].token,ps)
                     return 
                 }
-                list.push(term.args[1].name);
+                
                 term.args[1].semanticType = "module"
+                list.push(term.args[1]);
+                
                 term = term.args[0];
                 continue;
             }
@@ -469,14 +478,13 @@ function getModuleNameFromTerm(term: Term,ps:AnalyseState) {
                 if(term.arity!=0){
                     return 
                 }
-                term.semanticType = "underscore_sep_module";
-                let symName = term.name.split("__")
-                list.push(...symName);
+                term.semanticType = "module";
+                list.push(term);
                 break forloop;
         }
     }
-    list.reverse()
-    return list
+    return list.reverse();
+
 }
 
 function matchName(moduleName: string[], fileNameWithoutExt: string[]) {
@@ -491,14 +499,7 @@ function matchName(moduleName: string[], fileNameWithoutExt: string[]) {
     return true;
 }
 
-function addModuleDef(list:string[],ps:AnalyseState){
-    let moduleName = list[list.length-1];
-    let uri = ps.document.uri;
-    for (let index = list.length-2; index >=0; index--) {
-        ps.moduleUriMap.set(moduleName,uri)
-        const element = list[index];
-        moduleName=element+"."+moduleName;
-    }
-    ps.moduleUriMap.set(moduleName,uri);
+function addModuleDef(moduleTerm:Term,ps:AnalyseState){
+    ps.document.moduleDefMap.add(moduleTerm.name,moduleTerm);
     // ps.document.defsMap.add(moduleName,ps.clause);
 }

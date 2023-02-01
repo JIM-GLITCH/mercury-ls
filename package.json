@@ -62,5 +62,6 @@
 		"mocha": "^9.2.2",
 		"typescript": "^4.9.4"
 	},
-	"type": "module"
+	"type": "module",
+	"dependencies": {}
 }

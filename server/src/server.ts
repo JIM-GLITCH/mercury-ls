@@ -56,9 +56,12 @@ import { P } from 'ts-pattern'
 import { nameArity, sleep, tokenRange } from './utils'
 import * as globalSpace from"./globalSpace"
 import { docsMap } from './globalSpace'
-import { DefinitionProvider } from './definition-provider'
-import { DeclarationProvider } from './declaration-provider'
-import { outgoingCallsProvider, prepareCallHierarchyProvider } from './callHierarchy-provider'
+import { DefinitionProvider } from './provide-definition'
+import { DeclarationProvider } from './provide-declaration'
+import { incomingCallsProvider, outgoingCallsProvider, prepareCallHierarchyProvider } from './provide-callHierarchy'
+import { ReferenceProvider } from './provide-reference'
+import { HoverProvider } from './provide-hover'
+import { DocumentSymbolProvider } from './provide-documentSymbol'
 // Create a connection for the server, using Node's IPC as a transport.
 // Also include all preview / proposed LSP features.
 const connection = createConnection(ProposedFeatures.all);
@@ -206,18 +209,16 @@ documents.onDidChangeContent(change => {
 });
 
 
-
-
 connection.onDocumentSymbol(DocumentSymbolProvider);
 connection.onHover(HoverProvider);
 connection.onDefinition(DefinitionProvider);
-// connection.onReferences(ReferenceProvider);
+connection.onReferences(ReferenceProvider);
 connection.onImplementation(DefinitionProvider);
 connection.onDeclaration(DeclarationProvider);
 connection.onImplementation(DefinitionProvider);
 // connection.onTypeDefinition(TypeDefinitionProvider);
 connection.onRequest(CallHierarchyPrepareRequest.method,prepareCallHierarchyProvider);
-connection.onRequest(CallHierarchyIncomingCallsRequest.method,outgoingCallsProvider);
+connection.onRequest(CallHierarchyIncomingCallsRequest.method,incomingCallsProvider);
 connection.onRequest(CallHierarchyOutgoingCallsRequest.method,outgoingCallsProvider);
 
 connection.onDidChangeWatchedFiles(_change => {
@@ -292,140 +293,6 @@ interface defTerm extends Term{
 }
 interface refTerm extends Term{
     clause:clause
-}
-async function DocumentSymbolProvider(params: DocumentSymbolParams) {
-    let uri  = params.textDocument.uri;
-    let document ;
-    while( !(document = docsMap.get(uri))){
-        await sleep(100);
-    }
-    let symbols :DocumentSymbol[]=[];
-    for (const [name_arity ,funcTerms] of document.funcDefMap.map) {
-        let children:DocumentSymbol[] = []
-        for (const funcTerm of funcTerms as defTerm[]) {
-            for (const [varName,varTerms] of funcTerm.clause.varmap.map) {
-                let varRange  = termRange(varTerms[0]);
-                children.push({
-                    name: varName,
-                    kind: SymbolKind.Variable,
-                    range: varRange,
-                    selectionRange: varRange
-                })	
-            } 
-        }
-        let funcTerm = funcTerms[0];
-        symbols.push({
-            name: name_arity,
-            kind:SymbolKind.Operator,
-            range: tokenToRange(funcTerms[0].clause!.startToken,funcTerms[funcTerms.length-1].clause!.endToken),
-            selectionRange: termRange(funcTerm),
-            children:children,
-        })
-    }
-
-    for (const [name ,predTerms] of document.predDefMap.map) {
-        let children:DocumentSymbol[] = []
-        for (const funcTerm of predTerms as defTerm[]) {
-            for (const [varName,varTerms] of funcTerm.clause.varmap.map) {
-                let varRange  = termRange(varTerms[0]);
-                children.push({
-                    name: varName,
-                    kind: SymbolKind.Variable,
-                    range: varRange,
-                    selectionRange: varRange
-                })	
-            } 
-        }
-        let funcTerm = predTerms[0];
-        symbols.push({
-            name: name,
-            kind:SymbolKind.Function,
-            range: tokenToRange(predTerms[0].clause!.startToken,predTerms[predTerms.length-1].clause!.endToken),
-            selectionRange: termRange(funcTerm),
-            children:children,
-        })
-    }
-    return symbols
-} 
-
-// async function ReferenceProvider(params:ReferenceParams) {
-//     let uri  = params.textDocument.uri;
-//     let pos = params.position
-//     let document ;
-//     while( !(document = docsMap.get(uri))){
-//         await sleep(100);
-//     }
-//     let{term, clause} = document.search(pos);
-
-//     if(!term) return undefined;
-//     let refs :Location[]=[];
-//     // 查找 variable的引用 只需要在这个varaible在的clause范围里查找
-//     if(term.token.type=="variable"){
-//         for( const refTerm of clause!.varmap.get(term.name)){
-//           refs.push({uri,range:termRange(refTerm)});
-//         }
-//         return refs;
-//     }
-
-//     let name_arity = nameArity(term)
-//     // 找到这个term的定义的位置
-//     for (const doc of globalSpace.referencesMap.get(name_arity)) {
-//         for (const refTerm of doc.refsMap.get(name_arity)) {
-//             refs.push({uri:doc.uri,range:termRange(refTerm)})
-//         }
-//     }
-//     return refs;
-// }
-async function HoverProvider(params:HoverParams) {
-    let pos = params.position;
-    let uri = params.textDocument.uri;
-    let term = docsMap.get(uri)?.search(pos);
-    if(!term) return;
-    let msg;
-    forloop:
-    for(;;){
-        switch (term.semanticType){
-            case 'func':
-                msg = `func ${nameArity(term)}`
-                break forloop;
-            case 'pred':
-                msg = `pred ${nameArity(term)}`
-                break forloop;
-            case 'type':
-                msg = `type ${nameArity(term)}`
-                break forloop;
-            case 'module':
-                msg = `module ${term.name}`
-                break forloop;
-            case undefined:
-                // 如果term没有 semanticType 那么根据syntaxType处理
-                break;
-        }
-        
-        switch (term.syntaxType) {
-            case 'string':
-            case 'variable':
-            case 'integer':
-            case 'float':
-            case 'implementation_defined':
-                msg = term.name;
-                break forloop;
-            case 'atom':
-                msg = nameArity(term);
-                break forloop;
-        }
-    }    
-let message =`\`\`\`mercury
-${msg}
-\`\`\`
-`
-    return {
-        contents:{
-            kind:"markdown",
-            value:message
-        } as MarkupContent,
-        range:termRange(term)
-    } as Hover
 }
 
 async function validateTextDocument(textDocument: TextDocument): Promise<void> {

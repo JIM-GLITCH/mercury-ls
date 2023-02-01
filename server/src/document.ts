@@ -9,6 +9,8 @@ export interface RefTerm extends Term{
 	clause:clause
 }
 export class Document{
+    refMap: MultiMap<string,RefTerm>
+    moduleDefMap: MultiMap<string,Term>
 	getText (): string  {
 		return this.textDocument.getText();
     }
@@ -56,18 +58,19 @@ export class Document{
 		this.fileNameWithoutExt = Utils.basename(this.uri_obj).slice(0,-2);
 		this.errors = [];
 		this.version = textDocument.version;
-		
+		this.refMap = new MultiMap()
+		this.moduleDefMap=new MultiMap();
 	}
 	search(pos:Position){ 
 		let clauses = this.clauses;
 		let low = 0, high =clauses.length-1;
 		const line = pos.line;
-		while (low < high){
+		while (low <= high){
 			const mid = Math.floor((low + high)/2)
 			const clause = clauses[mid];
 			let clauseRange = clause.range();
 			if (clauseRange.start.line>line){
-				high = mid;
+				high = mid-1;
 			}
 			else if(clauseRange.end.line<line){
 				low = mid + 1;
