@@ -106,10 +106,39 @@ export async function DefinitionProvider(params:DefinitionParams) {
         }
         case 'type':
         case 'module':
-        default:
+        default:{
+            let defs:Location[]=[];
             // 查找所有map
+            for (const doc of funcMap.get(term.name)) {
+                // 如果没有导入 跳过
+                if (!document.importModules.has(doc.fileNameWithoutExt)&&document!=doc){
+                    continue
+                }
+                //如果导入 进行查找
+                let funcTerms = doc.funcDefMap.get(term.name);
+                for (const funcTerm of funcTerms) {
+                    defs.push({
+                        uri:uri,
+                        range:termRange(funcTerm)
+                    })
+                }
+            }
+            for (const doc of predMap.get(term.name)) {
+                // 如果没有导入 跳过
+                if (!document.importModules.has(doc.fileNameWithoutExt)&&document!=doc){
+                    continue
+                }
+                //如果导入 进行查找
+                let predTerms = doc.predDefMap.get(term.name);
+                for (const predTerm of predTerms) {
+                    defs.push({
+                        uri:uri,
+                        range:termRange(predTerm)
+                    })
+                }
 
+            }
+        }
     }
-
 }
 

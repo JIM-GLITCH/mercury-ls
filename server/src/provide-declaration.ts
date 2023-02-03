@@ -101,7 +101,10 @@ export async function DeclarationProvider(params:DeclarationParams) {
             
             break;
     
-        default:
+        default:{
+            
+        }
+
             break;
     }
 }

@@ -21,6 +21,7 @@ export async function HoverProvider(params:HoverParams) {
                 msg = nameArity(term)
                 break ;
             case 'module':
+            case "variable":
                 msg = term.name
                 break ;
         }
@@ -29,7 +30,7 @@ export async function HoverProvider(params:HoverParams) {
                 kind:"markdown",
                 value:[
                     '```mercury',
-                    `${term.semanticType} ${msg}`,
+                    `(${term.semanticType}) ${msg}`,
                     '```'
                 ].join('\n')
             } as MarkupContent,

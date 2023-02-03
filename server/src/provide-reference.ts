@@ -40,7 +40,13 @@ export async function ReferenceProvider(params:ReferenceParams) {
         }
         case 'type':
         case 'module':
+            break
         default:
+            for (const doc of refMap.get(term.name)) {
+                for (const refTerm of doc.refMap.get(term.name)) {
+                    refs.push({uri:doc.uri,range:termRange(refTerm)})
+                }
+            }
             break;
     }
     return refs;

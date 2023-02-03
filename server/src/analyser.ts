@@ -105,7 +105,7 @@ function analyse_declaration(term: Term,ps:AnalyseState) {
         }
         case "solver/1":
         case "pred/1":
-            parse_pred_decl(term.args[0],ps);
+            parse_pred_declareation(term.args[0],ps);
             break;
         case "func/1":
             parse_func_decl(term.args[0],ps);
@@ -128,36 +128,42 @@ function analyse_declaration(term: Term,ps:AnalyseState) {
     }
 }
 
-function ruleHead(node: Term, ps: AnalyseState) {
-    switch (nameArity(node)){
+function ruleHead(term: Term, ps: AnalyseState) {
+    switch (nameArity(term)){
         case "=/2":{
-            funcRuleHead(node.args[0],ps);
+            funcRuleHead(term.args[0],ps);
             break
         }
+        case "./2":
+        // case ":/2":
+            let qualifiedTerm = parse_qualified_term(term,ps);
+            addPredDef(qualifiedTerm,ps);
+            break;
         default:
-            addPredDef(node,ps);
+            addPredDef(term,ps);
     }
 }
 function funcRuleHead(term:Term,ps:AnalyseState){
     if(term.syntaxType=="variable"){
-        error(" can't be variable",term.token,ps);
+        error("can't be variable",term.token,ps);
         return
     }
-    addFuncDef(term,ps);
+    let qualifiedTerm = parse_qualified_term(term,ps);
+    addFuncDef(qualifiedTerm,ps);
 }
-function ruleBody(node: Term, ps: AnalyseState) {
-    switch (nameArity(node)) {
+function ruleBody(term: Term, ps: AnalyseState) {
+    switch (nameArity(term)) {
         case "some/2":
         case "all/2":{
-            ruleBody(node.args[1],ps);
+            ruleBody(term.args[1],ps);
             break;
         }
         case ",/2":
         case "&/2":
         case ";/2":
         {
-            ruleBody(node.args[0],ps);
-            ruleBody(node.args[1],ps);
+            ruleBody(term.args[0],ps);
+            ruleBody(term.args[1],ps);
             break;
         }
             
@@ -169,28 +175,28 @@ function ruleBody(node: Term, ps: AnalyseState) {
         case "not/1":
         case "\\+/1":
         {
-            ruleBody(node.args[0],ps);
+            ruleBody(term.args[0],ps);
             break;
         }
         case "=>/2":
         case "<=/2":
         case "<=>/2":
         case "else/2":{
-            ruleBody(node.args[0],ps);
-            ruleBody(node.args[1],ps);
+            ruleBody(term.args[0],ps);
+            ruleBody(term.args[1],ps);
             break;
         }
         
         case "if/1":{
-            ruleBody(node.args[0],ps);
+            ruleBody(term.args[0],ps);
             break;
         }
         case "then/2":
         case "->/2":
         case "=/2":
         case "\\=/2":{
-            ruleBody(node.args[0],ps);
-            ruleBody(node.args[1],ps);
+            ruleBody(term.args[0],ps);
+            ruleBody(term.args[1],ps);
             break;
         }
         /** 
@@ -201,12 +207,12 @@ function ruleBody(node: Term, ps: AnalyseState) {
         case "promise_pure/1":
         case "promise_semipure/1":
         case "promise_impure/1":{
-            ruleBody(node.args[0],ps);
+            ruleBody(term.args[0],ps);
             break;
         }
         case "promise_equivalent_solutions/2":
         case "promise_equivalent_solution_sets/2":{
-            ruleBody(node.args[1],ps);
+            ruleBody(term.args[1],ps);
             break;
         }
 
@@ -219,7 +225,7 @@ function ruleBody(node: Term, ps: AnalyseState) {
         case "require_cc_nondet/1" :
         case "require_erroneous/1" :
         case "require_failure/1" :{
-            ruleBody(node.args[0],ps);
+            ruleBody(term.args[0],ps);
             break;
         }
 
@@ -237,25 +243,33 @@ function ruleBody(node: Term, ps: AnalyseState) {
         case "disable_warnings/2":
         case "disable_warning/2":
         case "trace/2":{
-            ruleBody(node.args[1],ps);
+            ruleBody(term.args[1],ps);
             break;
         }
         
         case "catch_any/2":
         case "catch/2":
         case "try/2":{
-            ruleBody(node.args[0],ps);
-            ruleBody(node.args[1],ps);
+            ruleBody(term.args[0],ps);
+            ruleBody(term.args[1],ps);
             break;
         }
         case "event/1":{
-            ruleBody(node.args[0],ps);
+            ruleBody(term.args[0],ps);
+            break;
+        }
+        case "./2":
+        // case ":/2":
+        {
+            let qualifiedTerm = parse_qualified_term(term,ps)
+            addRef(qualifiedTerm,ps);
             break;
         }
         default:
-            if(node.token.type!="variable"){
-                addRef(node,ps);
+            if(term.token.type=="variable"){
+                return
             }
+            addRef(term,ps);
     }
 }
 
@@ -384,7 +398,7 @@ function addImportModule(term: Term, ps: AnalyseState) {
     }
 }
 
-function parse_pred_decl(node: Term, ps: AnalyseState) {
+function parse_pred_declareation(node: Term, ps: AnalyseState) {
     switch (nameArity(node)) {
         case "is/2":
             let pred = node.args[0];
@@ -401,7 +415,7 @@ function addPredDeclaration(term:Term,ps:AnalyseState){
     addPredDecl(term,ps)
 }
 
-function addFuncDecl(term: Term, ps: AnalyseState) {
+function addFuncDeclaration(term: Term, ps: AnalyseState) {
     term.semanticType = "func";
     ps.document.funcDeclMap.add(term.name,term)
     if(ps.interface){
@@ -418,10 +432,10 @@ function parse_func_decl(term: Term, ps: AnalyseState) {
     switch (nameArity(term)) {
         case "=/2":
             let func = term.args[0];
-            addFuncDecl(func,ps)
+            addFuncDeclaration(func,ps)
             break;
         default:
-            addFuncDecl(term,ps);
+            addFuncDeclaration(term,ps);
             break;
     }
 }
@@ -455,7 +469,48 @@ function parse_module_marker(term: Term, ps: AnalyseState) {
 // }
 
 
+function parse_qualified_term(term: Term,ps:AnalyseState) {
+    // 判断term是不是 qualified term 如果不是 直接返回term;如果是  返回最右边的term
+    switch(nameArity(term)){
+        // case ":/2":
+        case "./2":
+            break;
+        default:
+            return term;
+    }
 
+    let right_term = term.args[1];
+    term = term.args[0];
+    let list = [];
+    forloop:
+    for(;;){
+        switch(nameArity(term)){
+            case ":/2":
+            case "./2":{
+                if(term.args[1].arity!=0){
+                    error("invalid module name",term.args[1].token,ps)
+                    break forloop 
+                }
+                
+                term.args[1].semanticType = "module"
+                list.push(term.args[1].name);
+                
+                term = term.args[0];
+                continue;
+            }
+            default:
+                if(term.arity!=0){
+                    error("invalid module name",term.args[1].token,ps)
+                    break forloop 
+                }
+                term.semanticType = "module";
+                list.push(term.name);
+                break forloop;
+        }
+    }
+    right_term.qualification = list.reverse().join(".");
+    return right_term;
+}
 function getModuleList(term: Term,ps:AnalyseState) {
     let list = [];
     forloop:
@@ -484,7 +539,6 @@ function getModuleList(term: Term,ps:AnalyseState) {
         }
     }
     return list.reverse();
-
 }
 
 function matchName(moduleName: string[], fileNameWithoutExt: string[]) {
@@ -503,3 +557,5 @@ function addModuleDef(moduleTerm:Term,ps:AnalyseState){
     ps.document.moduleDefMap.add(moduleTerm.name,moduleTerm);
     // ps.document.defsMap.add(moduleName,ps.clause);
 }
+
+
