@@ -134,7 +134,7 @@ const moolexer = moo.compile({
     close_curly: "}",
     ht_sep: "|",
     comma: ",",
-    backquoted:/`.*?`/,
+    backquote:/`/,
     junk: { match: /\s+/, lineBreaks: true },
     error: /./,
 })

@@ -1,7 +1,7 @@
 import { DefinitionParams, Location } from 'vscode-languageserver'
-import { docsMap, funcMap, moduleUriMap, predMap } from './globalSpace'
+import { SomeSemanticType, docsMap, funcMap, globalMap, moduleUriMap, predMap } from './globalSpace'
 import { getDocumentFromModule, sleep } from './utils'
-import { termRange } from './term'
+import { Term, termRange } from './term'
 import { Document } from './document'
 
 export async function DefinitionProvider(params:DefinitionParams) {
@@ -25,120 +25,64 @@ export async function DefinitionProvider(params:DefinitionParams) {
             } as Location;
         }
         case 'func':{
-            let defs:Location[]=[];
-            // term有module属性 在该module里找
-            if(term.module){
-                let doc = getDocumentFromModule(term.module);
-                if(!doc) return;
-                let funcTerms = doc.funcDefMap.get(term.name);
-                for (const funcTerm of funcTerms) {
-                    defs.push({
-                        uri:uri,
-                        range:termRange(funcTerm)
-                    })
-                }
-                return defs;
-            }
-            // 在本文件查找
-            let funcTerms = document.funcDefMap.get(term.name);
-            for (const funcTerm of funcTerms) {
-                defs.push({
-                    uri:uri,
-                    range:termRange(funcTerm)
-                })
-            }
-            // 在全局的文件里查找
-            for (const doc of funcMap.get(term.name)) {
-                // 如果没有导入 跳过
-                if (!document.importModules.has(doc.fileNameWithoutExt)){
-                    continue
-                }
-                //如果导入 进行查找
-                let funcTerms = doc.funcDefMap.get(term.name);
-                for (const funcTerm of funcTerms) {
-                    defs.push({
-                        uri:uri,
-                        range:termRange(funcTerm)
-                    })
-                }
-            }
+            let defs=findDefinitions('func',term,document);
             return defs
         }
         case 'pred':{
-            let defs:Location[]=[];
-            // term有module属性 在该module里找
-            if(term.module){
-                let doc = getDocumentFromModule(term.module);
-                if(!doc) return;
-                let predTerms = doc.predDefMap.get(term.name);
-                for (const predTerm of predTerms) {
-                    defs.push({
-                        uri:uri,
-                        range:termRange(predTerm)
-                    })
-                }
-                return defs;
-            }
-            // 在本文件查找
-            let predTerms = document.predDefMap.get(term.name);
-            for (const predTerm of predTerms) {
-                defs.push({
-                    uri:uri,
-                    range:termRange(predTerm)
-                })
-            }
-            // 在全局的文件里查找
-            for (const doc of predMap.get(term.name)) {
-                // 如果没有导入 跳过
-                if (!document.importModules.has(doc.fileNameWithoutExt)){
-                    continue
-                }
-                //如果导入 进行查找
-                let predTerms = doc.predDefMap.get(term.name);
-                for (const predTerm of predTerms) {
-                    defs.push({
-                        uri:uri,
-                        range:termRange(predTerm)
-                    })
-                }
-            }
-            return defs;
+            let defs=findDefinitions('pred',term,document);
+            return defs
         }
         case 'type':
         case 'module':
         default:{
-            let defs:Location[]=[];
             // 查找所有map
-            for (const doc of funcMap.get(term.name)) {
-                // 如果没有导入 跳过
-                if (!document.importModules.has(doc.fileNameWithoutExt)&&document!=doc){
-                    continue
-                }
-                //如果导入 进行查找
-                let funcTerms = doc.funcDefMap.get(term.name);
-                for (const funcTerm of funcTerms) {
-                    defs.push({
-                        uri:uri,
-                        range:termRange(funcTerm)
-                    })
-                }
-            }
-            for (const doc of predMap.get(term.name)) {
-                // 如果没有导入 跳过
-                if (!document.importModules.has(doc.fileNameWithoutExt)&&document!=doc){
-                    continue
-                }
-                //如果导入 进行查找
-                let predTerms = doc.predDefMap.get(term.name);
-                for (const predTerm of predTerms) {
-                    defs.push({
-                        uri:uri,
-                        range:termRange(predTerm)
-                    })
-                }
-
-            }
+            let defs1=findDefinitions('func',term,document);
+            
+            let defs2=findDefinitions('pred',term,document);
+            defs1.push(...defs2);
+            return defs1
         }
     }
 }
 
+function findDefinitions(semanticType:SomeSemanticType,term:Term,document:Document){
+    let defs:Location[]=[];
+    // term有module属性 在该module里找
+    // if(term.module){
+    //     let doc = getDocumentFromModule(term.module);
+    //     if(!doc) return defs;
+    //     let funcTerms = doc.defMap[semanticType].get(term.name);
+    //     for (const funcTerm of funcTerms) {
+    //         defs.push({
+    //             uri:doc.uri,
+    //             range:termRange(funcTerm)
+    //         })
+    //     }
+    //     return defs;
+    // }
+    // 在本文件查找
+    // let funcTerms = document.defMap[semanticType].get(term.name);
+    // for (const funcTerm of funcTerms) {
+    //     defs.push({
+    //         uri:document.uri,
+    //         range:termRange(funcTerm)
+    //     })
+    // }
+    // 在全局的文件里查找
+    for (const doc of globalMap[semanticType].get(term.name)) {
+        // 如果没有导入 跳过
+        // if (!document.importModules.has(doc.fileNameWithoutExt)){
+        //     continue
+        // }
+        //如果导入 进行查找
+        let funcTerms = doc.defMap[semanticType].get(term.name);
+        for (const funcTerm of funcTerms) {
+            if(funcTerm.arity != term.arity) continue;
+            defs.push({
+                uri:doc.uri,
+                range:termRange(funcTerm)
+            })
+        }
+    }
+    return defs
+}

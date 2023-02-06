@@ -266,7 +266,7 @@ function pos_in_range(pos:Position,range:Range){
         return false;
     }
     else if (range.end.line < pos.line
-        || (range.end.line == pos.line && range.end.character < pos.character)) {
+        || (range.end.line == pos.line && range.end.character <= pos.character)) {
         return false;
     }
     return true;

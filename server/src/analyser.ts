@@ -135,7 +135,6 @@ function ruleHead(term: Term, ps: AnalyseState) {
             break
         }
         case "./2":
-        // case ":/2":
             let qualifiedTerm = parse_qualified_term(term,ps);
             addPredDef(qualifiedTerm,ps);
             break;

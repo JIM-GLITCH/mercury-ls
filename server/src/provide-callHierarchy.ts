@@ -1,8 +1,9 @@
 import { CallHierarchyIncomingCall, CallHierarchyIncomingCallsParams, CallHierarchyItem, CallHierarchyOutgoingCall, CallHierarchyOutgoingCallsParams, CallHierarchyPrepareParams, SymbolKind } from 'vscode-languageserver'
-import { docsMap, funcMap, predMap, refMap } from './globalSpace'
-import { getDocumentFromModule, sleep, tokenRange } from './utils'
-import { termRange } from './term'
+import { SomeSemanticType, docsMap, funcMap, globalMap, predMap, refMap } from './globalSpace'
+import { getDocumentFromModule, nameArity, sleep, tokenRange } from './utils'
+import { Term, termRange } from './term'
 import { SemanticType } from './analyser'
+import { DefMap, Document } from './document'
 
 export async function prepareCallHierarchyProvider(params:CallHierarchyPrepareParams){
     let pos = params.position;
@@ -26,6 +27,7 @@ export async function prepareCallHierarchyProvider(params:CallHierarchyPreparePa
     }] as CallHierarchyItem[]
 
 }
+
 export async function outgoingCallsProvider(params:CallHierarchyOutgoingCallsParams){
     let item  = params.item;
     let uri = item.uri;
@@ -39,141 +41,21 @@ export async function outgoingCallsProvider(params:CallHierarchyOutgoingCallsPar
             return
         }
         case 'func':{
-            let collect:CallHierarchyOutgoingCall[]=[];
-            // term有module属性 在该module里找
-            if(term.module){
-                let doc = getDocumentFromModule(term.module);
-                if(!doc) return;
-                let terms = doc.funcDefMap.get(term.name);
-                for (const refNodes of terms.map(x=>x.clause!.calledNodes)) {
-                    for (const refnode of refNodes) {
-                        let refRange = termRange(refnode)
-                        collect.push({
-                            to: {
-                                name:refnode.name,
-                                uri:doc.uri,
-                                range:refRange,
-                                kind:SemanticTypeToSymbolKind(refnode.semanticType)??SymbolKind.Function,
-                                selectionRange:tokenRange(term.token)
-                            },
-                            fromRanges: [refRange]
-                        })
-                    }
-                }
-                return collect;
-            }
-            // 在本文件查找
-            let terms = document.funcDefMap.get(term.name);
-            for (const refNodes of terms.map(x=>x.clause!.calledNodes)) {
-                for (const refnode of refNodes) {
-                    let refRange = termRange(refnode)
-                    collect.push({
-                        to: {
-                            name:refnode.name,
-                            uri:document.uri,
-                            range:refRange,
-                            kind:SemanticTypeToSymbolKind(refnode.semanticType)??SymbolKind.Function,
-                            selectionRange:tokenRange(term.token)
-                        },
-                        fromRanges: [refRange]
-                    })
-                }
-            }
-            // 在全局的文件里查找
-            for (const doc of funcMap.get(term.name)) {
-                // 如果没有导入 跳过
-                if (!document.importModules.has(doc.fileNameWithoutExt)){
-                    continue
-                }
-                //如果导入 进行查找
-                let terms = doc.funcDefMap.get(term.name);
-                for (const refNodes of terms.map(x=>x.clause!.calledNodes)) {
-                    for (const refnode of refNodes) {
-                        let refRange = termRange(refnode)
-                        collect.push({
-                            to: {
-                                name:refnode.name,
-                                uri:document.uri,
-                                range:refRange,
-                                kind:SemanticTypeToSymbolKind(refnode.semanticType)??SymbolKind.Function,
-                                selectionRange:tokenRange(term.token)
-                            },
-                            fromRanges: [refRange]
-                        })
-                    }
-                }
-            }
-            return collect
+            let collect = findOutGoingCalls("func",term,document);
+            return collect;
         }
         case 'pred':{
-            let collect:CallHierarchyOutgoingCall[]=[];
-            // term有module属性 在该module里找
-            if(term.module){
-                let doc = getDocumentFromModule(term.module);
-                if(!doc) return;
-                let terms = doc.funcDefMap.get(term.name);
-                for (const refNodes of terms.map(x=>x.clause!.calledNodes)) {
-                    for (const refnode of refNodes) {
-                        let refRange = termRange(refnode)
-                        collect.push({
-                            to: {
-                                name:refnode.name,
-                                uri:doc.uri,
-                                range:refRange,
-                                kind:SemanticTypeToSymbolKind(refnode.semanticType)??SymbolKind.Function,
-                                selectionRange:tokenRange(term.token)
-                            },
-                            fromRanges: [refRange]
-                        })
-                    }
-                }
-                return collect;
-            }
-            // 在本文件查找
-            let terms = document.predDefMap.get(term.name);
-            for (const refNodes of terms.map(x=>x.clause!.calledNodes)) {
-                for (const refnode of refNodes) {
-                    let refRange = termRange(refnode)
-                    collect.push({
-                        to: {
-                            name:refnode.name,
-                            uri:document.uri,
-                            range:refRange,
-                            kind:SemanticTypeToSymbolKind(refnode.semanticType)??SymbolKind.Function,
-                            selectionRange:tokenRange(term.token)
-                        },
-                        fromRanges: [refRange]
-                    })
-                }
-            }
-            // 在全局的文件里查找
-            for (const doc of predMap.get(term.name)) {
-                // 如果没有导入 跳过
-                if (!document.importModules.has(doc.fileNameWithoutExt)){
-                    continue
-                }
-                //如果导入 进行查找
-                let terms = doc.predDefMap.get(term.name);
-                for (const refNodes of terms.map(x=>x.clause!.calledNodes)) {
-                    for (const refnode of refNodes) {
-                        let refRange = termRange(refnode)
-                        collect.push({
-                            to: {
-                                name:refnode.name,
-                                uri:document.uri,
-                                range:refRange,
-                                kind:SemanticTypeToSymbolKind(refnode.semanticType)??SymbolKind.Function,
-                                selectionRange:tokenRange(term.token)
-                            },
-                            fromRanges: [refRange]
-                        })
-                    }
-                }
-            }
-            return collect
+            let collect = findOutGoingCalls("pred",term,document);
+            return collect;
         }
         case 'type':
         case 'module':
+            break;
+        default:
+            let collect1 = findOutGoingCalls("func",term,document);
+            let collect2 = findOutGoingCalls("pred",term,document);
+            collect1.push(...collect2)
+            return collect1;
     }
 
 }
@@ -182,7 +64,7 @@ export async function incomingCallsProvider(params:CallHierarchyIncomingCallsPar
     let item  = params.item;
     let uri = item.uri;
     let pos = item.selectionRange.start;
-    let document  = docsMap.get(uri)
+    let document  = docsMap.get(uri)  
     if(!document) return;
     let term = document.search(pos);
     if(!term) return ;
@@ -200,8 +82,8 @@ export async function incomingCallsProvider(params:CallHierarchyIncomingCallsPar
                     let calleeTerm = refTerm.clause.calleeNode;
                     colloct.push({
                         from: {
-                            name:calleeTerm.name,
-                            kind:SymbolKind.Function,
+                            name:nameArity(calleeTerm),
+                            kind:SemanticTypeToSymbolKind('func'),
                             uri:doc.uri,
                             range:termRange(calleeTerm),
                             selectionRange:tokenRange(calleeTerm.token)
@@ -219,8 +101,8 @@ export async function incomingCallsProvider(params:CallHierarchyIncomingCallsPar
                     let calleeTerm = refTerm.clause.calleeNode;
                     colloct.push({
                         from: {
-                            name:calleeTerm.name,
-                            kind:SymbolKind.Function,
+                            name:nameArity(calleeTerm),
+                            kind:SemanticTypeToSymbolKind("pred"),
                             uri:doc.uri,
                             range:termRange(calleeTerm),
                             selectionRange:tokenRange(calleeTerm.token)
@@ -241,10 +123,7 @@ export async function incomingCallsProvider(params:CallHierarchyIncomingCallsPar
     }
 }
 
-function SemanticTypeToSymbolKind(semanticType: SemanticType | undefined): SymbolKind|undefined {
-    if(!semanticType){
-        return undefined
-    }
+function SemanticTypeToSymbolKind(semanticType: SemanticType ): SymbolKind {
     switch (semanticType) {
         case 'func':
             return SymbolKind.Operator
@@ -259,3 +138,78 @@ function SemanticTypeToSymbolKind(semanticType: SemanticType | undefined): Symbo
     }
 }
 
+function findOutGoingCalls(semanticType:SomeSemanticType,term:Term,document:Document){
+    let collect:CallHierarchyOutgoingCall[]=[];
+    // term有module属性 在该module里找
+    // if(term.module){
+    //     let doc = getDocumentFromModule(term.module);
+    //     if(!doc) return collect;
+    //     let terms = doc.defMap[semanticType].get(term.name);
+    //     for (const refNodes of terms.map(x=>x.clause!.calledNodes)) {
+    //         for (const refnode of refNodes) {
+    //             let refRange = termRange(refnode)
+    //             collect.push({
+    //                 to: {
+    //                     name:refnode.name,
+    //                     uri:doc.uri,
+    //                     range:refRange,
+    //                     kind:SemanticTypeToSymbolKind(refnode.semanticType)??SymbolKind.Function,
+    //                     selectionRange:tokenRange(refnode.token)
+    //                 },
+    //                 fromRanges: [refRange]
+    //             })
+    //         }
+    //     }
+    //     return collect;
+    // }
+    // 在本文件查找
+    let terms = document.defMap[semanticType].get(term.name);
+    for (const refNodes of terms.map(x=>x.clause!.calledNodes)) {
+        for (const refnode of refNodes) {
+            let refRange = termRange(refnode)
+            let kind = refnode.semanticType
+                ?   SemanticTypeToSymbolKind(refnode.semanticType)
+                :   SymbolKind.Function;
+            collect.push({
+                to: {
+                    name:nameArity(refnode),
+                    uri:document.uri,
+                    range:refRange,
+                    kind,
+                    selectionRange:tokenRange(refnode.token)
+                },
+                fromRanges: [refRange]
+            })
+        }
+    }
+    // 在全局的文件里查找
+    for (const doc of globalMap[semanticType].get(term.name)) {
+        // 如果没有导入 跳过
+        // if (!document.importModules.has(doc.fileNameWithoutExt)){
+        //     continue
+        // }
+        // 如果是自己文件 跳过 避免重复
+        if( doc  == document ) continue ;
+        //如果导入 进行查找
+        let terms = doc.defMap[semanticType].get(term.name);
+        for (const refNodes of terms.map(x=>x.clause!.calledNodes)) {
+            for (const refnode of refNodes) {
+                let refRange = termRange(refnode)
+                let kind = refnode.semanticType
+                    ?   SemanticTypeToSymbolKind(refnode.semanticType)
+                    :   SymbolKind.Function;
+                collect.push({
+                    to: {
+                        name:nameArity(refnode),
+                        uri:doc.uri,
+                        range:refRange,
+                        kind,
+                        selectionRange:tokenRange(refnode.token)
+                    },
+                    fromRanges: [refRange]
+                })
+            }
+        }
+    }
+    return collect
+}
