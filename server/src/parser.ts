@@ -4,7 +4,7 @@ import { OpInfo, adjust_priority_for_assoc, lookup_infix_op, lookup_op, lookup_o
 import { Term, string,applyCompound, atom, backquotedapplyCompound, binPrefixCompound, clause, float, functorCompound, implementation_defined, infixCompound, integer, negFloat, negInteger, prefixCompound, variable } from './term'
 import { MultiMap } from './multimap'
 import type{ Document } from './document'
-import { error } from './utils'
+import { error, nameArity } from './utils'
 
 type TermKind = "OrdinaryTerm"|"Argument"|"ListElem"
 class TokenIter {
@@ -472,13 +472,25 @@ function bottom_up(MaxPriority:number,termKind:TermKind,lpriority:number,lterm:T
     if((opinfo=isInfixOp(token1)) 
     && (opinfo.priority<=MaxPriority) 
     && opinfo.lpriority>=lpriority){
-        let r  = read(opinfo.rpriority,termKind,p2,ps);
-        if(token1.type=="backquoted"){
-            let opterm = read_term_from_backquoted(token1,ps);
-            let term  =   backquotedapplyCompound(token1,[opterm,lterm,r.term]);
-            return bottom_up(MaxPriority,termKind,opinfo.priority,term,r.p,ps);
+        
+        if(token1.type=="backquote"){
+            let r1 = parse_backquoted_operator(p2,ps);
+            let r2  = read(opinfo.rpriority,termKind,r1.p,ps);
+            let backquoted_term = r1.term;
+            if(nameArity(backquoted_term) == "./2"){
+                backquoted_term.args[1]= backquotedapplyCompound(
+                    backquoted_term.args[1].token,
+                    [lterm,r2.term]
+                )
+                backquoted_term.startToken = backquoted_term.args[1].startToken;
+                backquoted_term.endToken = backquoted_term.args[1].endToken;
+                return bottom_up(MaxPriority,termKind,opinfo.priority,backquoted_term,r2.p,ps);
+            }
+            backquoted_term =   backquotedapplyCompound(backquoted_term.token,[lterm,r2.term]);
+            return bottom_up(MaxPriority,termKind,opinfo.priority,backquoted_term,r2.p,ps);
         }
         //  name token
+        let r  = read(opinfo.rpriority,termKind,p2,ps);
         let term =  infixCompound(token1,[lterm,r.term]);
         return bottom_up(MaxPriority,termKind,opinfo.priority,term,r.p,ps);
     }
@@ -491,7 +503,7 @@ function imply(a:boolean,b:boolean){
 }
 
 function isInfixOp(token:Token) {
-    if(token.type =="backquoted"){
+    if(token.type =="backquote"){
         return {
             priority: 120,
             lpriority:120,
@@ -517,33 +529,80 @@ function isInfixOp(token:Token) {
 
 
 
-function read_term_from_backquoted(token:Token,ps:ParserState) {
-    let text  = token.text.slice(1,-1);
-    let tmplexer = lexer.clone();
-    tmplexer.reset(text);
-    tmplexer.line = token.line;
-    tmplexer.col=token.col+1;
-    let tokenList = tmplexer.getTokenList()
-    if(!tokenList){
-        error(" missing  token in backquoted",token,ps);
-        return atom(token);
+function parse_backquoted_operator(p1:TokenIter,ps:ParserState) {
+    let token1 = p1.val();
+    let p2 = p1.next();
+    switch (token1.type) {
+        case "variable":{
+            let term = variable(token1);
+            add_var(term,ps);
+            let token2 = p2.val();
+            if(token2.type!="backquote"){
+                error("expect '`'",token2,ps);
+                let r = skipUntil("backquote",p2.next(),ps);
+                return {
+                    term:term,
+                    p:r.p
+                }
+            }
+        }
+        case "name":{
+            let term = atom(token1);
+            let nextp  = p2;
+            forloop:
+            for(;;){
+                let nextToken = nextp.val();
+                switch(nextToken.text){
+                    case ".":{
+                        let nextnextp = nextp.next();
+                        let nextnextToken = nextnextp.val();
+                        if(nextnextToken.type!="name"){
+                            error("expect name token",nextnextToken,ps);
+                            let r = skipUntil("backquote",nextnextp,ps);
+                            return {
+                                term,
+                                p:r.p
+                            };
+                        }
+                        let r_term  = atom(nextnextToken);
+                        term =  infixCompound(nextToken,[term,r_term]);
+                        nextp = nextnextp.next();
+                        continue forloop;
+                    }
+                    case "`":{
+                        return {
+                            term,
+                            p:nextp.next()
+                        };
+                    }
+                    // EOF
+                    case "":{
+                        return {
+                            term,
+                            p:nextp
+                        }
+                    }
+                    default:{
+                        error("missing '.'",nextToken,ps);
+                        let r = skipUntil("backquote",nextp.next(),ps);
+                        return {
+                            term,
+                            p:r.p
+                        }
+                    }
+                }
+            }
+        }
+        default:{
+            error("missing name token",token1,ps);
+            let term = atom(token1);
+            let r = skipUntil("backquote",p1,ps);
+            return{
+                term,
+                p:r.p
+            }
+        }
     }
-    // push lexer errors
-    let tokens  = tokenList.tokens;
-    let errors = tokenList.errors;
-    for (const errorToken of errors) {
-        error("invalid token",errorToken,ps);
-    }
-
-    // read term
-	let p = new TokenIter(tokens);
-    let r= read(max_priority+1,"OrdinaryTerm",p,ps);
-    // check tokens are left
-    let lastToken  = r.p.val();
-    if(lastToken.type!="EOF"){
-        error("need an infix operator ",lastToken,ps);
-    }
-    return r.term
 }
 
 function skipUntil(tokenType:TokenType, p1: TokenIter, ps: ParserState) {

@@ -22,7 +22,7 @@ export type TokenType=
     |"open"
     |"open_ct"
     |"implementation_defined"
-    |"backquoted"
+    |"backquote"
     |"EOF"
 
 interface Token extends moo.Token{

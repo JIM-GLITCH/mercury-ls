@@ -368,10 +368,19 @@ function addPredDef(node: Term, ps: AnalyseState) {
     node.semanticType = "pred";
     ps.clause.calleeNode = node;
 }
-function addRef(node: Term, ps: AnalyseState) {
-    node.clause = ps.clause;
-    ps.document.refMap.add(node.name,node as RefTerm)
-    ps.clause.calledNodes.push(node as RefTerm);
+function addRef(term: Term, ps: AnalyseState) {
+    term.clause = ps.clause;
+    switch (term.syntaxType) {
+        case 'string':
+        case 'variable':
+        case 'integer':
+        case 'float':
+            return;
+        case 'atom':
+        case 'implementation_defined':
+    }
+    ps.document.refMap.add(term.name,term as RefTerm)
+    ps.clause.calledNodes.push(term as RefTerm);
 }
 // function addFuncRef(node: Term, ps: AnalyseState) {
 //     node.clause = ps.clause;

@@ -61,19 +61,21 @@ function findDefinitions(semanticType:SomeSemanticType,term:Term,document:Docume
     //     return defs;
     // }
     // 在本文件查找
-    // let funcTerms = document.defMap[semanticType].get(term.name);
-    // for (const funcTerm of funcTerms) {
-    //     defs.push({
-    //         uri:document.uri,
-    //         range:termRange(funcTerm)
-    //     })
-    // }
+    let funcTerms = document.defMap[semanticType].get(term.name);
+    for (const funcTerm of funcTerms) {
+        defs.push({
+            uri:document.uri,
+            range:termRange(funcTerm)
+        })
+    }
     // 在全局的文件里查找
     for (const doc of globalMap[semanticType].get(term.name)) {
         // 如果没有导入 跳过
         // if (!document.importModules.has(doc.fileNameWithoutExt)){
         //     continue
         // }
+        // 跳过本文件
+        if(doc == document) continue;
         //如果导入 进行查找
         let funcTerms = doc.defMap[semanticType].get(term.name);
         for (const funcTerm of funcTerms) {

@@ -48,7 +48,7 @@ export interface Term {
      * the clause this term belong to 
      */
     clause?:clause
-    toString():string
+    toString(depth?:number):string
 }
 export class defaultTerm implements Term{
     semanticType?: SemanticType 
@@ -62,7 +62,7 @@ export class defaultTerm implements Term{
         this.name = name;
         this.arity = args.length
     }
-    qualification: string | undefined
+    qualification?: string 
     module?: string | undefined
     clause?: clause
     syntaxType:syntaxType
@@ -72,8 +72,8 @@ export class defaultTerm implements Term{
     endToken: Token
     name: string
     arity: number
-    toString(): string {
-        return termToString(this);
+    toString(depth=1): string {
+        return termToString(this,depth);
     }
 }
 
@@ -160,8 +160,8 @@ export function backquotedapplyCompound(token: Token, children: Term[]){
         "atom",
         token,
         children,
-        children[1].startToken,
-        children[children.length - 1].endToken
+        children[0].startToken,
+        children[1].endToken
     )
     fixArity(node);
     return node;
@@ -186,7 +186,7 @@ export class clause  {
 	calleeNode!: Term
     calledNodes:RefTerm[]=[]
     search(pos: Position) {
-        return checkFunctorRange(pos, this, this.term, undefined)
+        return search(this.term,pos);
     }
     range() {
         if (this.term && this.end) {
@@ -273,7 +273,7 @@ function pos_in_range(pos:Position,range:Range){
 }
 
 function binarySearch( terms: Term[],pos: Position,): Term | undefined {
-    let low = 0, high = terms.length
+    let low = 0, high = terms.length-1
     const line = pos.line
     while (low < high) {
         const mid = Math.floor((low + high) / 2)
@@ -317,7 +317,10 @@ function search(term: Term | undefined, pos: Position): Term | undefined {
             if(pos_in_range(pos,token_range)){
                 return term;              
             }
-            return binarySearch(term.args,pos);
+            for (const arg of term.args) {
+                let res = search(arg,pos);
+                if(res) return res;
+            }
         }
         case "float":
         case "implementation_defined":
@@ -332,13 +335,16 @@ function search(term: Term | undefined, pos: Position): Term | undefined {
         }
     } 
 }
-function termToString(term: Term) {
+function termToString(term: Term,depth:number=1) {
+    if(depth>3){
+        return " ... ";
+    }
     switch(term.syntaxType){
         case 'atom':{
             if(term.args.length == 0){
                 return term.name;
             }
-            let argsString  = term.args.map(x=>x.toString()).join()
+            let argsString  = term.args.map(x=>x.toString(depth+1)).join()
             return `${term.name}(${argsString})`
         }
         case 'string':
