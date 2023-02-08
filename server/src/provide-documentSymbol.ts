@@ -1,5 +1,5 @@
 import { DocumentSymbol, DocumentSymbolParams, SymbolInformation, SymbolKind } from 'vscode-languageserver'
-import { nameArity, sleep } from './utils'
+import { nameArity, showNameArity, sleep } from './utils'
 import { docsMap } from './globalSpace'
 import { termRange, tokenToRange } from './term'
 
@@ -25,7 +25,7 @@ export async function DocumentSymbolProvider(params: DocumentSymbolParams) {
         }
         let funcTerm = funcTerms[0];
         symbols.push({
-            name: nameArity(funcTerm),
+            name: showNameArity(funcTerm),
             kind:SymbolKind.Operator,
             range: tokenToRange(funcTerms[0].clause!.startToken,funcTerms[funcTerms.length-1].clause!.endToken),
             selectionRange: termRange(funcTerm),
@@ -48,7 +48,7 @@ export async function DocumentSymbolProvider(params: DocumentSymbolParams) {
         }
         let funcTerm = predTerms[0];
         symbols.push({
-            name: nameArity(funcTerm),
+            name: showNameArity(funcTerm),
             kind:SymbolKind.Function,
             range: tokenToRange(predTerms[0].clause.startToken,predTerms[predTerms.length-1].clause!.endToken),
             selectionRange: termRange(funcTerm),

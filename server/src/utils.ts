@@ -30,6 +30,9 @@ export function tokenRange( token:Token):Range{
 export function nameArity(term:Term){
     return term.name+'/'+term.arity;
 }
+export function showNameArity(term:Term){
+    return term.name+' /'+term.arity;
+}
 
 export function sleep(ms: number){
     return new Promise(resolve => setTimeout(resolve, ms))

@@ -141,6 +141,7 @@ async function validateWorkspaceTextDocuments() {
     let filenames = fs.readdirSync(rootPath);
     let file_number = filenames.length;
     for (const file_name of filenames) {
+        if(path.extname(file_name) !=".m") continue;
         let file_path = path.join(rootPath,file_name);
         let file_uri_string = URI_obj.file(file_path).toString();
         let file_content = fs.readFileSync(file_path).toString();
