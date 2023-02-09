@@ -1,6 +1,6 @@
 import { CallHierarchyIncomingCall, CallHierarchyIncomingCallsParams, CallHierarchyItem, CallHierarchyOutgoingCall, CallHierarchyOutgoingCallsParams, CallHierarchyPrepareParams, SymbolKind } from 'vscode-languageserver'
 import { SomeSemanticType, docsMap, funcMap, globalMap, predMap, refMap } from './globalSpace'
-import { getDocumentFromModule, nameArity, sleep, tokenRange } from './utils'
+import {  nameArity, sleep, termTokenRange, tokenRange } from './utils'
 import { Term, termRange } from './term'
 import { SemanticType } from './analyser'
 import { DefMap, Document } from './document'
@@ -18,9 +18,8 @@ export async function prepareCallHierarchyProvider(params:CallHierarchyPreparePa
         return 
     }
     return [{
-        name:term.name,
+        name:nameArity(term),
         kind:SymbolKind.Function,
-        detail:"/"+term.arity,
         uri,
         range:termRange(term),
         selectionRange:tokenRange(term.token)
@@ -88,7 +87,7 @@ export async function incomingCallsProvider(params:CallHierarchyIncomingCallsPar
                             range:termRange(calleeTerm),
                             selectionRange:tokenRange(calleeTerm.token)
                         },
-                        fromRanges:[termRange(calleeTerm)]
+                        fromRanges:[termRange(refTerm)]
                     })
                 }
             }
@@ -107,7 +106,7 @@ export async function incomingCallsProvider(params:CallHierarchyIncomingCallsPar
                             range:termRange(calleeTerm),
                             selectionRange:tokenRange(calleeTerm.token)
                         },
-                        fromRanges:[termRange(calleeTerm)]
+                        fromRanges:[termRange(refTerm)]
                     })
                 }
             }
@@ -123,7 +122,7 @@ export async function incomingCallsProvider(params:CallHierarchyIncomingCallsPar
     }
 }
 
-function SemanticTypeToSymbolKind(semanticType: SemanticType ): SymbolKind {
+function SemanticTypeToSymbolKind(semanticType?: SemanticType ): SymbolKind {
     switch (semanticType) {
         case 'func':
             return SymbolKind.Operator
@@ -135,6 +134,8 @@ function SemanticTypeToSymbolKind(semanticType: SemanticType ): SymbolKind {
             return SymbolKind.Module
         case 'variable':
             return SymbolKind.Variable
+        default:
+            return SymbolKind.Function
     }
 }
 
@@ -164,7 +165,7 @@ function findOutGoingCalls(semanticType:SomeSemanticType,term:Term,document:Docu
     // }
     // 在本文件查找
     let terms = document.defMap[semanticType].get(term.name);
-    for (const refNodes of terms.map(x=>x.clause!.calledNodes)) {
+    for (const refNodes of terms.filter((x)=>x.arity == term.arity).map(x=>x.clause!.calledNodes)) {
         for (const refnode of refNodes) {
             let refRange = termRange(refnode)
             let kind = refnode.semanticType
@@ -192,19 +193,17 @@ function findOutGoingCalls(semanticType:SomeSemanticType,term:Term,document:Docu
         if( doc  == document ) continue ;
         //如果导入 进行查找
         let terms = doc.defMap[semanticType].get(term.name);
-        for (const refNodes of terms.map(x=>x.clause!.calledNodes)) {
+        for (const refNodes of terms.filter((x)=>x.arity == term.arity).map(x=>x.clause!.calledNodes)) {
             for (const refnode of refNodes) {
-                let refRange = termRange(refnode)
-                let kind = refnode.semanticType
-                    ?   SemanticTypeToSymbolKind(refnode.semanticType)
-                    :   SymbolKind.Function;
+                let refRange = termTokenRange(refnode)
+                let kind = SemanticTypeToSymbolKind(refnode.semanticType);
                 collect.push({
                     to: {
                         name:nameArity(refnode),
                         uri:doc.uri,
                         range:refRange,
                         kind,
-                        selectionRange:tokenRange(refnode.token)
+                        selectionRange:termTokenRange(refnode)
                     },
                     fromRanges: [refRange]
                 })

@@ -2,9 +2,9 @@ import { Diagnostic, SymbolKind, URI } from 'vscode-languageserver'
 // import { ParserState } from './parser'
 import { Term, clause, termRange } from './term'
 import { DefTerm, Document, RefTerm } from './document'
-import { error, nameArity } from './utils'
+import { errorTerm, errorToken, nameArity } from './utils'
 import { parse_type_defn_item } from './parse_type_defn_item'
-import { moduleUriMap  } from './globalSpace'
+import {   } from './globalSpace'
 export type SemanticType = 
     "func"|
     "pred"|
@@ -13,8 +13,7 @@ export type SemanticType =
     "variable"
     
 export interface AnalyseState{
-    moduleUriMap: Map<string,URI>
-    moduleName: string[] | undefined
+    moduleName: string | undefined
     clause:clause
     document: Document
     interface: boolean;
@@ -28,17 +27,16 @@ export function analyse(document:Document) {
         interface: false,
         errors: document.errors,
         moduleName: undefined,
-        moduleUriMap: moduleUriMap,
     } ;
     for (const clause of document.clauses) {
         ps.clause = clause;
-        analyse_term(clause.term,ps);
+        parse_item_or_marker(clause.term,ps);
     }
 }
-function analyse_term(node:Term,ps:AnalyseState){
+function parse_item_or_marker(node:Term,ps:AnalyseState){
     switch (nameArity(node)) {
         case ":-/1":{
-            analyse_declaration(node.args[0],ps)
+                        parse_decl_item_or_marker(node.args[0],ps)
             break;
 		}
 		case ":-/2":{
@@ -66,14 +64,14 @@ function analyse_term(node:Term,ps:AnalyseState){
 
 
 
-function analyse_declaration(term: Term,ps:AnalyseState) {
+function parse_decl_item_or_marker(term: Term,ps:AnalyseState) {
     switch (nameArity(term)) {
         case "module/1":{
             parse_module_marker(term.args[0],ps)
             break;
         }
         case "end_module/1":{
-            // parse_end_module_marker(term.args[0],ps)
+            parse_end_module_marker(term.args[0],ps)
             break;
         }
         case "interface/0":
@@ -83,17 +81,14 @@ function analyse_declaration(term: Term,ps:AnalyseState) {
             ps.interface = false;
             break;
         case "import_module/1":{
-            // if(ps.interface){
-                addImportModule(term.args[0],ps);
-            // }
+            parse_import_module(term.args[0],ps);
             break;
         }
-        case "use_module":
+        case "use_module/1":
+            parse_use_module(term.args[0],ps);
             break;
         case "include_module/1":{
-            if(ps.interface){
-                addIncludeModule(term.args[0],ps);
-            }
+            parse_include_module(term.args[0],ps)
             break;
         }
         case "version_numbers/1":{
@@ -120,11 +115,11 @@ function analyse_declaration(term: Term,ps:AnalyseState) {
         case "mutable/1":
             break;
         case "<=/2":{
-            analyse_declaration(term.args[0],ps);
+                        parse_decl_item_or_marker(term.args[0],ps);
         }
 
         default:
-            break;
+            // errorTerm("invalid declaraction",term,ps);
     }
 }
 
@@ -144,7 +139,7 @@ function ruleHead(term: Term, ps: AnalyseState) {
 }
 function funcRuleHead(term:Term,ps:AnalyseState){
     if(term.syntaxType=="variable"){
-        error("can't be variable",term.token,ps);
+        errorToken("can't be variable",term.token,ps);
         return
     }
     let qualifiedTerm = parse_qualified_term(term,ps);
@@ -360,7 +355,7 @@ function addFuncDef(node: Term, ps: AnalyseState) {
 }
 function addPredDef(node: Term, ps: AnalyseState) {
     if(node.syntaxType=="variable"){
-        error(" can't be variable",node.token,ps);
+        errorToken(" can't be variable",node.token,ps);
         return
     }
     ps.document.predDefMap.add(node.name,node as DefTerm);
@@ -453,19 +448,13 @@ function DCGfixArity(term: Term) {
     term.arity+=2;
 }
 function parse_module_marker(term: Term, ps: AnalyseState) {
-    let module_list = getModuleList(term,ps);
-    if(!module_list) return ;
-    // 处理module list
-    let parent_modules_names: string[] = [];
-    for (const moduleTerm of module_list) {
-        
-        moduleTerm.qualification = parent_modules_names.join(".");
-        parent_modules_names.push(moduleTerm.name);
-
-        addModuleDef(moduleTerm,ps)
-    }
-    ps.clause.calleeNode = module_list.pop()!;
-
+    let moduleNameTerm = term;
+    let rightHandModuleTerm = try_parse_module_symbol_name(moduleNameTerm,ps);
+    if(!rightHandModuleTerm) {
+    errorTerm( "module declaration should have just one argument,which should be a module name.",term,ps)
+        return 
+    };
+    addModuleDef(rightHandModuleTerm,ps);
 }
 // function parse_end_module_marker(term: Term, ps: AnalyseState) {
 //     let endModuleName = getModuleList(term,ps);
@@ -496,7 +485,7 @@ function parse_qualified_term(term: Term,ps:AnalyseState) {
             case ":/2":
             case "./2":{
                 if(term.args[1].arity!=0){
-                    error("invalid module name",term.args[1].token,ps)
+                    errorToken("invalid module name",term.args[1].token,ps)
                     break forloop 
                 }
                 
@@ -508,7 +497,7 @@ function parse_qualified_term(term: Term,ps:AnalyseState) {
             }
             default:
                 if(term.arity!=0){
-                    error("invalid module name",term.args[1].token,ps)
+                    errorToken("invalid module name",term.args[1].token,ps)
                     break forloop 
                 }
                 term.semanticType = "module";
@@ -527,7 +516,7 @@ function getModuleList(term: Term,ps:AnalyseState) {
             case ":/2":
             case "./2":{
                 if(term.args[1].arity!=0){
-                    error("invalid module name",term.args[1].token,ps)
+                    errorToken("invalid module name",term.args[1].token,ps)
                     return 
                 }
                 
@@ -562,8 +551,125 @@ function matchName(moduleName: string[], fileNameWithoutExt: string[]) {
 }
 
 function addModuleDef(moduleTerm:Term,ps:AnalyseState){
-    ps.document.moduleDefMap.add(moduleTerm.name,moduleTerm);
-    // ps.document.defsMap.add(moduleName,ps.clause);
+    moduleTerm.semanticType = "module";
+    ps.document.moduleDefMap.has(moduleTerm.name)
+        ?   errorTerm("alreadt defined",moduleTerm,ps)
+        :   ps.document.moduleDefMap.set(moduleTerm.name,moduleTerm)
+}
+function addModuleRef(moduleTerm:Term,ps:AnalyseState){
+    moduleTerm.semanticType = "module";
+    ps.document.refMap.add(moduleTerm.name,moduleTerm as any);
 }
 
+
+function try_parse_module_symbol_name(term:Term,ps:AnalyseState) {
+    switch (nameArity(term)) {
+        // case ":/2":
+        case "./2":{
+            let moduleTerm = term.args[0];
+            let rightHandTerm = term.args[1]
+            let module =  try_parse_module_symbol_name(moduleTerm,ps);
+            qualified(module,rightHandTerm)
+            addModuleRef(rightHandTerm,ps)
+            return rightHandTerm
+        }
+        default:{
+            if (term.syntaxType=="atom"){
+                addModuleRef(term,ps)
+                return term;
+            }
+        }
+    }
+}
+function try_parse_include_module_symbol_name(term:Term,ps:AnalyseState) {
+    switch (nameArity(term)) {
+        // case ":/2":
+        case "./2":{
+            let moduleTerm = term.args[0];
+            let rightHandTerm = term.args[1]
+            let module =  try_parse_module_symbol_name(moduleTerm,ps);
+            qualified(module,rightHandTerm)
+            addModuleDef(rightHandTerm,ps)
+            return rightHandTerm
+        }
+        default:{
+            if (term.syntaxType=="atom"){
+                term.module = ps.moduleName
+                addModuleDef(term,ps)
+                return term;
+            }
+        }
+    }
+}
+
+function parse_end_module_marker(term:Term,ps:AnalyseState){
+    let rightHandTerm = try_parse_module_symbol_name(term,ps);
+    if(!rightHandTerm){
+        errorTerm("end_module declaration should have just one argument,which should be a module name.",term,ps);
+    }
+}
+type IIU=
+    "iiu_include_module"
+    |"iiu_import_module"
+    |"iiu_use_module"
+
+function parse_incl_imp_use_items(term: Term,IIU:IIU,ps: AnalyseState) {
+    let parser;
+    switch(IIU){
+        case 'iiu_include_module':
+
+            break;
+        case 'iiu_import_module':
+        case 'iiu_use_module':
+            parser = "parse_implicitly_qualified_module_name"
+            break;
+    }
+    let termList = conjuntion_to_list(term.args[0]);
+    termList.map(term=>try_parse_module_symbol_name(term,ps))
+}
+function conjuntion_to_list(term: Term) {
+	let list = [];
+	while(nameArity(term) == ",/2"){
+		list.push(term.args[0]);
+		term = term.args[1]
+	}
+	list.push(term);
+	return list;
+}
+
+function parse_symbol_name(term: Term, ps: AnalyseState): any {
+    switch (nameArity(term)) {
+        case "./2":
+        case ":/2":{
+            let [moduleTerm,nameTerm] = term.args;
+            if(nameTerm.syntaxType =="atom" && nameTerm.arity == 0){
+                let module = parse_symbol_name(moduleTerm,ps);
+                qualified(module,nameTerm);
+
+            }
+            else{
+                errorTerm("identifier expected after . in qualified symbol name.",nameTerm,ps);
+
+            }
+        }
+    
+        default:
+            return term;
+            break;
+    }
+}
+function qualified(module: Term | undefined, rightHandTerm: Term) {
+    rightHandTerm.module = module?.name;
+}
+
+function parse_import_module(term: Term, ps: AnalyseState) {
+    conjuntion_to_list(term).map(term=>try_parse_module_symbol_name(term,ps));
+}
+
+function parse_use_module(term: Term, ps: AnalyseState) {
+    conjuntion_to_list(term).map(term=>try_parse_module_symbol_name(term,ps));
+}
+function parse_include_module(term: Term, ps: AnalyseState){
+    conjuntion_to_list(term).map(term=>try_parse_include_module_symbol_name(term,ps));
+}
 

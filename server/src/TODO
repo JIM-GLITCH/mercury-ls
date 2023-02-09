@@ -1,5 +1,6 @@
 [X] fix infix manner `op`
 [X] fix toString depth 3
-[ ] fix call hierarchy ranges 
-[ ] module system
+[X] fix call hierarchy ranges 
+[X] module system
+[ ] module call heirarchy 
 [ ] type system 

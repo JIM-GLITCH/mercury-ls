@@ -1,5 +1,5 @@
 import { Document } from './document'
-import { docsMap, funcMap, predMap, refMap } from './globalSpace'
+import { docsMap, funcMap, moduleMap, predMap, refMap } from './globalSpace'
 
 
 
@@ -29,6 +29,9 @@ export function link(doc:Document) {
         for (const refName of oldDoc.refMap.map.keys()) {
             refMap.delete(refName,oldDoc);
         }
+        for (const moudleName of oldDoc.moduleDefMap.keys()) {
+            moduleMap.delete(moudleName)
+        }
     }
     // 然后添加新的索引
     for (const funcName of doc.exportFuncs) {
@@ -42,5 +45,8 @@ export function link(doc:Document) {
     }
     for (const refName of doc.refMap.map.keys()) {
         refMap.add(refName,doc);
+    }
+    for (const moudleName of doc.moduleDefMap.keys()) {
+        moduleMap.set(moudleName,doc);
     }
 }

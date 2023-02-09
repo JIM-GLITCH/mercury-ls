@@ -9,8 +9,11 @@ export interface RefTerm extends Term{
 }
 export interface DefTerm extends Term{
     clause:clause
+    semanticType:SemanticType
 }
 export interface DeclTerm extends Term{
+}
+export interface ModuleTerm extends Term{
 }
 export type DefMap={
     "func":MultiMap<string,DefTerm>
@@ -25,9 +28,10 @@ export type DeclMap={
 
 export class Document{
     refMap: MultiMap<string,RefTerm>
-    moduleDefMap: MultiMap<string,Term>
+    moduleDefMap: Map<string,Term>
     defMap: DefMap
     declMap: DeclMap
+    moduleRefMap: MultiMap<string,ModuleTerm>
     getText (): string  {
         return this.textDocument.getText();
     }
@@ -76,7 +80,8 @@ export class Document{
         this.errors = [];
         this.version = textDocument.version;
         this.refMap = new MultiMap()
-        this.moduleDefMap=new MultiMap();
+        this.moduleDefMap=new Map();
+        this.moduleRefMap = new MultiMap();
         this.defMap={
             "func":this.funcDefMap,
             "pred":this.predDefMap,
@@ -107,6 +112,8 @@ export class Document{
 
             }
         }
-
+    }
+    toString(){
+        return this.uri;
     }
 }

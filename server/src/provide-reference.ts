@@ -23,28 +23,34 @@ export async function ReferenceProvider(params:ReferenceParams) {
             return refs;
         }
         case 'func':{
-            let refs = findReferences(term);
+            let refs:Location[] = [];
+            findReferences(term,refs);
             return refs;
         }
         case 'pred':{
-            let refs = findReferences(term);
+            let refs:Location[] = [];
+            findReferences(term,refs);
             return refs;
         }
         case 'type':
-        case 'module':
             break
+        case 'module':{
+            let refs:Location[] = [];
+            findReferences(term,refs);
+            return refs;
+        }
         default:
-            let refs = findReferences(term);
+            let refs:Location[] = [];
+            findReferences(term,refs);
             return refs;
     }
     return [];
 }
-function findReferences(term:Term){
-    let refs =[]
+function findReferences(term:Term,refs:Location[]){
     for (const doc of refMap.get(term.name)) {
         for (const refTerm of doc.refMap.get(term.name)) {
+            if(refTerm.arity!=term.arity) continue;
             refs.push({uri:doc.uri,range:termRange(refTerm)})
         }
     }
-    return refs;
 }

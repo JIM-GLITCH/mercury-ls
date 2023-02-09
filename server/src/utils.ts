@@ -2,11 +2,18 @@ import type{ Diagnostic, Range } from 'vscode-languageserver'
 import type{ ParserState } from './parser'
 import type{ Token } from './lexer'
 import type{ Document } from './document'
-import type{ Term } from './term'
-import { docsMap, moduleUriMap } from './globalSpace'
+import{ Term, termRange } from './term'
+import { docsMap } from './globalSpace'
 
-export function error(message:string,token:Token,ps:{errors:Diagnostic[]}) {
+export function errorToken(message:string,token:Token,ps:{errors:Diagnostic[]}) {
 	let range = tokenRange(token);
+    ps.errors.push({
+        range,
+        message
+    })
+}
+export function errorTerm(message:string,term:Term,ps:{errors:Diagnostic[]}) {
+	let range = termRange(term);
     ps.errors.push({
         range,
         message
@@ -27,6 +34,9 @@ export function tokenRange( token:Token):Range{
 		}
 	}
 }
+export function termTokenRange(term:Term){
+	return tokenRange(term.token);
+}
 export function nameArity(term:Term){
     return term.name+'/'+term.arity;
 }
@@ -38,9 +48,3 @@ export function sleep(ms: number){
     return new Promise(resolve => setTimeout(resolve, ms))
 }
 
-export function getDocumentFromModule(module: string): Document|undefined {
-    let uri = moduleUriMap.get(module);
-    if(!uri)
-        return undefined;
-    return docsMap.get(uri);
-}

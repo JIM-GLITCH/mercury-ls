@@ -1,6 +1,6 @@
 import { DeclarationParams, Location } from 'vscode-languageserver'
 import { SomeSemanticType, docsMap, funcMap, predMap } from './globalSpace'
-import { getDocumentFromModule, sleep } from './utils'
+import {  sleep } from './utils'
 import { Term, termRange } from './term'
 
 export async function DeclarationProvider(params:DeclarationParams) {

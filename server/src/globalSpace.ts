@@ -1,4 +1,4 @@
-import type{ Document } from './document'
+import type{ Document, ModuleTerm } from './document'
 import { MultiMapSet } from './multimap_set'
 
 export type SomeSemanticType = 
@@ -9,7 +9,6 @@ export type SomeSemanticType =
 
 export let docsMap = new Map<string,Document>();
 export let moduleMap = new Map<string,Document>(); 
-export let moduleUriMap:Map<string,string> = new Map()
 export let funcMap = new MultiMapSet<string,Document>();
 export let predMap = new MultiMapSet<string,Document>();
 export let typeMap = new MultiMapSet<string,Document>();
@@ -19,5 +18,5 @@ export let refMap = new MultiMapSet<string,Document>();
 export let globalMap = {
     "func":funcMap,
     "pred":predMap,
-    "type":typeMap
+    "type":typeMap,
 }

@@ -4,7 +4,7 @@ import { OpInfo, adjust_priority_for_assoc, lookup_infix_op, lookup_op, lookup_o
 import { Term, string,applyCompound, atom, backquotedapplyCompound, binPrefixCompound, clause, float, functorCompound, implementation_defined, infixCompound, integer, negFloat, negInteger, prefixCompound, variable } from './term'
 import { MultiMap } from './multimap'
 import type{ Document } from './document'
-import { error, nameArity } from './utils'
+import { errorToken, nameArity } from './utils'
 
 type TermKind = "OrdinaryTerm"|"Argument"|"ListElem"
 class TokenIter {
@@ -63,8 +63,8 @@ function read_clause_from_TokenList(tokenList:TokenList,ps:ParserState) {
     // push lexer errors
     let tokens  = tokenList.tokens;
     let errors = tokenList.errors;
-    for (const errorToken of errors) {
-        error("invalid token",errorToken,ps);
+    for (const token of errors) {
+        errorToken("invalid token",token,ps);
     }
 
     // read term
@@ -73,11 +73,11 @@ function read_clause_from_TokenList(tokenList:TokenList,ps:ParserState) {
     // check tokens are left
     let lastToken  = r.p.val();
     if(lastToken.type!="EOF"){
-        error("need an infix operator ",lastToken,ps);
+        errorToken("need an infix operator ",lastToken,ps);
     }
     // check end_of_clause token
     if(!tokenList.end){
-        error("missing end of clause token",lastToken,ps);
+        errorToken("missing end of clause token",lastToken,ps);
     }
     let end  = tokenList.end?? tokenList.tokens[tokenList.tokens.length-1]
     let  clauseItem= new clause(r.term,end,ps.varmap);
@@ -149,16 +149,6 @@ function add_var(varTerm: Term, ps: ParserState) {
     ps.varmap.add(varTerm.name,varTerm);
 }
 
-function conjuntion_to_list(term: any) {
-	let list = [];
-	while(term.functor.value ==","&& term.children.length==2){
-		list.push(term.children[0]);
-		term = term.children[1]
-	}
-	list.push(term);
-	return list;
-}
-
 
 // do parse term
 function read(MaxPriority: number, termKind: TermKind,p1:TokenIter,ps:ParserState):readRes {
@@ -168,7 +158,7 @@ function read(MaxPriority: number, termKind: TermKind,p1:TokenIter,ps:ParserStat
 	let token2 = p2.val();
 	let opinfos;
 	if(token1.type=="EOF"){
-		error("unexpected end-of-file at start of sub-term",token1,ps);
+		errorToken("unexpected end-of-file at start of sub-term",token1,ps);
         let term = atom(token1);
 		return {term,p:p1};
 	}
@@ -247,7 +237,7 @@ function read(MaxPriority: number, termKind: TermKind,p1:TokenIter,ps:ParserStat
             }
 			else{
                 if(lookup_op(token1.value)&& MaxPriority<=max_priority){
-                    error("unexpected token at start of (sub)term",token1,ps)
+                    errorToken("unexpected token at start of (sub)term",token1,ps)
                     let term =  atom(token1);
                     baseterm= term;
                     basep = p2;
@@ -301,7 +291,7 @@ function read(MaxPriority: number, termKind: TermKind,p1:TokenIter,ps:ParserStat
                 basep = r1.p.next()
                 break;
             }
-            error("expecting `)' or operator",token,ps);
+            errorToken("expecting `)' or operator",token,ps);
             baseterm = r1.term;
             basep = r1.p
             break;
@@ -324,7 +314,7 @@ function read(MaxPriority: number, termKind: TermKind,p1:TokenIter,ps:ParserStat
             break;
         }
 		default:{
-            error("unexpected token at start of (sub)term",token2,ps);
+            errorToken("unexpected token at start of (sub)term",token2,ps);
             let term  =  atom(token1);
             baseterm = term;
             basep = p2;
@@ -368,7 +358,7 @@ function read_args(p: TokenIter, ps: ParserState) {
         args.push(r.term);
         let token = r.p.val();
         if(token.type=="EOF"){
-            error( "expected `,', `)', or operator",token,ps);
+            errorToken( "expected `,', `)', or operator",token,ps);
             return {args:args,p:r.p};
         }
       
@@ -380,7 +370,7 @@ function read_args(p: TokenIter, ps: ParserState) {
             pp=r.p.next();
             return {args:args,p:pp};
         }
-        error( "expected `,', `)', or operator",token,ps);
+        errorToken( "expected `,', `)', or operator",token,ps);
         pp=r.p.next();
         return {args:args,p:pp}
     }
@@ -395,7 +385,7 @@ function read_args_curly(p: TokenIter, ps: ParserState) {
         let token = r.p.val();
         
         if(token.type=="EOF"){
-            error( "expected `,', `}', or operator",token,ps);
+            errorToken( "expected `,', `}', or operator",token,ps);
             return {args:args,p:r.p};
         }
 
@@ -407,7 +397,7 @@ function read_args_curly(p: TokenIter, ps: ParserState) {
             pp=r.p.next();
             return {args:args,p:pp};
         }
-        error( "expected `,', `}', or operator",token,ps);
+        errorToken( "expected `,', `}', or operator",token,ps);
         pp=r.p;
         continue
     }
@@ -417,7 +407,7 @@ function read_list(p1: TokenIter, ps: ParserState):readRes {
     let token1 = p1.val();
     switch (token1.type) {
         case "EOF":{
-            error("unexpected end-of-file in list",token1,ps);
+            errorToken("unexpected end-of-file in list",token1,ps);
             let term =  atom(token1,"[]");
             return {term,p:p1};
         }
@@ -434,7 +424,7 @@ function read_list(p1: TokenIter, ps: ParserState):readRes {
             if(token.type == "close_list"){
                 return {term:r1.term,p:r1.p.next()};
             }else{
-                error("unexpected token",token1,ps);
+                errorToken("unexpected token",token1,ps);
                 let r2  = skipUntil("close_list",r1.p,ps);
                 return {term:r1.term,p:r2.p}
             }
@@ -445,7 +435,7 @@ function read_list(p1: TokenIter, ps: ParserState):readRes {
             return {term,p:p2};
         }
         default:{
-            error("missing comma",token1,ps);
+            errorToken("missing comma",token1,ps);
             let r1 = read(max_priority+1,"ListElem",p1,ps);
             let r2 = read_list(r1.p,ps);
             let term =  functorCompound(token1,[r1.term,r2.term],"[|]");
@@ -538,7 +528,7 @@ function parse_backquoted_operator(p1:TokenIter,ps:ParserState) {
             add_var(term,ps);
             let token2 = p2.val();
             if(token2.type!="backquote"){
-                error("expect '`'",token2,ps);
+                errorToken("expect '`'",token2,ps);
                 let r = skipUntil("backquote",p2.next(),ps);
                 return {
                     term:term,
@@ -557,7 +547,7 @@ function parse_backquoted_operator(p1:TokenIter,ps:ParserState) {
                         let nextnextp = nextp.next();
                         let nextnextToken = nextnextp.val();
                         if(nextnextToken.type!="name"){
-                            error("expect name token",nextnextToken,ps);
+                            errorToken("expect name token",nextnextToken,ps);
                             let r = skipUntil("backquote",nextnextp,ps);
                             return {
                                 term,
@@ -583,7 +573,7 @@ function parse_backquoted_operator(p1:TokenIter,ps:ParserState) {
                         }
                     }
                     default:{
-                        error("missing '.'",nextToken,ps);
+                        errorToken("missing '.'",nextToken,ps);
                         let r = skipUntil("backquote",nextp.next(),ps);
                         return {
                             term,
@@ -594,7 +584,7 @@ function parse_backquoted_operator(p1:TokenIter,ps:ParserState) {
             }
         }
         default:{
-            error("missing name token",token1,ps);
+            errorToken("missing name token",token1,ps);
             let term = atom(token1);
             let r = skipUntil("backquote",p1,ps);
             return{
@@ -611,7 +601,7 @@ function skipUntil(tokenType:TokenType, p1: TokenIter, ps: ParserState) {
         let tmp_token = tmp_p.val();
         switch (tmp_token.type) {
             case "EOF":
-                error(`missing ${tokenType}`,tmp_token,ps);
+                errorToken(`missing ${tokenType}`,tmp_token,ps);
                 return {p:tmp_p} 
             case tokenType:
                 return {p:tmp_p.next()}
