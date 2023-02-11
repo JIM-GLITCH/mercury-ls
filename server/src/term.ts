@@ -5,7 +5,7 @@ import { Token } from './lexer'
 import { MultiMap } from './multimap'
 import { SemanticType } from './analyser'
 import { tokenRange } from './utils'
-import { RefTerm } from './document'
+import { Document, RefTerm } from './document'
 
 type syntaxType=
     "variable"|
@@ -16,7 +16,7 @@ type syntaxType=
     "implementation_defined"
 
 export interface Term {
-    qualification?: string
+    document?: Document
     /**
      * term 是哪一个module里定义的
      */

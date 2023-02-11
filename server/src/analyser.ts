@@ -395,10 +395,7 @@ function addIncludeModule(term: Term, ps: AnalyseState) {
 }
 
 function addImportModule(term: Term, ps: AnalyseState) {
-    let moduleName  =  getModuleList(term,ps)
-    if(moduleName){
-        ps.document.includeModules.add(moduleName.join("."));
-    }
+    ps.document.importModules.add(term.name);
 }
 
 function parse_pred_declareation(node: Term, ps: AnalyseState) {
@@ -471,7 +468,10 @@ function parse_qualified_term(term: Term,ps:AnalyseState) {
     switch(nameArity(term)){
         // case ":/2":
         case "./2":
-            break;
+            let moduleTerm = try_parse_module_symbol_name(term.args[0],ps);
+            let rightHandTerm = term.args[0];
+            if(moduleTerm) qualified(moduleTerm,rightHandTerm);
+            return rightHandTerm
         default:
             return term;
     }
@@ -505,7 +505,7 @@ function parse_qualified_term(term: Term,ps:AnalyseState) {
                 break forloop;
         }
     }
-    right_term.qualification = list.reverse().join(".");
+    right_term.module = list.reverse().join(".");
     return right_term;
 }
 function getModuleList(term: Term,ps:AnalyseState) {
@@ -538,17 +538,6 @@ function getModuleList(term: Term,ps:AnalyseState) {
     return list.reverse();
 }
 
-function matchName(moduleName: string[], fileNameWithoutExt: string[]) {
-    let length = Math.min(moduleName.length,fileNameWithoutExt.length);
-    for (let index = 0; index < length; index++) {
-        const element1 = moduleName[moduleName.length-1-index];
-        const element2 = fileNameWithoutExt[fileNameWithoutExt.length-1-index];
-        if(element1 != element2){
-            return false;
-        }
-    }
-    return true;
-}
 
 function addModuleDef(moduleTerm:Term,ps:AnalyseState){
     moduleTerm.semanticType = "module";
@@ -578,6 +567,7 @@ function try_parse_module_symbol_name(term:Term,ps:AnalyseState) {
                 addModuleRef(term,ps)
                 return term;
             }
+            errorTerm("expect atom",term,ps);
         }
     }
 }
@@ -663,11 +653,18 @@ function qualified(module: Term | undefined, rightHandTerm: Term) {
 }
 
 function parse_import_module(term: Term, ps: AnalyseState) {
-    conjuntion_to_list(term).map(term=>try_parse_module_symbol_name(term,ps));
+    conjuntion_to_list(term).map(term=>{
+        try_parse_module_symbol_name(term,ps);
+        addImportModule(term,ps)
+    });
 }
 
 function parse_use_module(term: Term, ps: AnalyseState) {
-    conjuntion_to_list(term).map(term=>try_parse_module_symbol_name(term,ps));
+    conjuntion_to_list(term).map(term=>{
+        try_parse_module_symbol_name(term,ps);
+        addImportModule(term,ps)
+
+    });
 }
 function parse_include_module(term: Term, ps: AnalyseState){
     conjuntion_to_list(term).map(term=>try_parse_include_module_symbol_name(term,ps));

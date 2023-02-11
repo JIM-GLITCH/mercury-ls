@@ -48,3 +48,12 @@ export function sleep(ms: number){
     return new Promise(resolve => setTimeout(resolve, ms))
 }
 
+export function sameArity(term1:Term,term2:Term){
+	return term1.arity == term2.arity;
+}
+export function sameSemanticType(term1:Term,term2:Term){
+	return term1.semanticType == term2.semanticType;
+}
+export function sameModule(term1:Term,term2:Term){
+	return term1.module == term2.module;
+}

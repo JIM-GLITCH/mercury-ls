@@ -1,6 +1,6 @@
 import { DeclarationParams, Location } from 'vscode-languageserver'
 import { SomeSemanticType, docsMap, funcMap, predMap } from './globalSpace'
-import {  sleep } from './utils'
+import {  sleep, termTokenRange } from './utils'
 import { Term, termRange } from './term'
 
 export async function DeclarationProvider(params:DeclarationParams) {
@@ -49,7 +49,7 @@ function findDeclarations(SemanticType:SomeSemanticType,term:Term){
             if(funcTerm.arity!=term.arity) continue;
             collect.push({
                 uri:doc.uri,
-                range:termRange(funcTerm)
+                range:termTokenRange(funcTerm)
             })
         }
     }

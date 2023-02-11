@@ -1,29 +1,22 @@
 import { CallHierarchyIncomingCall, CallHierarchyIncomingCallsParams, CallHierarchyItem, CallHierarchyOutgoingCall, CallHierarchyOutgoingCallsParams, CallHierarchyPrepareParams, SymbolKind } from 'vscode-languageserver'
-import { SomeSemanticType, docsMap, funcMap, globalMap, predMap, refMap } from './globalSpace'
-import {  nameArity, sleep, termTokenRange, tokenRange } from './utils'
+import { SomeSemanticType, docsMap, funcMap, globalMap, moduleMap, predMap, refMap } from './globalSpace'
+import {  nameArity, sameArity, sameSemanticType, sleep, termTokenRange, tokenRange } from './utils'
 import { Term, termRange } from './term'
 import { SemanticType } from './analyser'
-import { DefMap, Document } from './document'
+import { DefMap, DefTerm, Document } from './document'
+import { stream } from './stream'
+import { findDefTerms, findTermAtTextDocumentPosition } from './provide-definition'
 
 export async function prepareCallHierarchyProvider(params:CallHierarchyPrepareParams){
-    let pos = params.position;
-    let uri = params.textDocument.uri;
-    let document;
-    while(!(document=docsMap.get(uri))){
-        await sleep(100);
+    let res  = await findTermAtTextDocumentPosition(params)
+    if(!res) return;
+    let res2 = (await findDefTerms(res)).head()
+    if(res2){
+        return [uriTermToCallHierarchyItem(res2)]
     }
-    let term= document.search(pos);
-    if(!term) return;
-    if(term.syntaxType=="variable"){
-        return 
-    }
-    return [{
-        name:nameArity(term),
-        kind:SymbolKind.Function,
-        uri,
-        range:termRange(term),
-        selectionRange:tokenRange(term.token)
-    }] as CallHierarchyItem[]
+    return [
+        uriTermToCallHierarchyItem(res)
+    ] as CallHierarchyItem[]
 
 }
 
@@ -212,3 +205,55 @@ function findOutGoingCalls(semanticType:SomeSemanticType,term:Term,document:Docu
     }
     return collect
 }
+
+function findDefinitionTermForCallItem(term: Term, document: Document) {
+    // 如果 term 有module属性 到 module文件里查找
+    if(term.module){
+        let doc = moduleMap.get(term.module);
+        if(!doc) return;
+        switch (term.semanticType) {
+            case 'func':
+            case 'pred':{
+                let defterms = doc.defMap[term.semanticType].get(term.name)
+                    .filter(x => sameArity(x,term));
+                let defterm = defterms[0] as Term|undefined
+                if(!defterm) return undefined;
+                return {
+                    term:defterm,
+                    uri:doc.uri
+                }
+            }
+            case 'module':{
+                let moduleDefTerm = doc.moduleDefMap.get(term.name);
+                if(!moduleDefTerm) return undefined;
+                return {
+                    term:moduleDefTerm,
+                    uri:doc.uri
+                };
+            }
+            case 'type':
+                return ;
+            // case "variable": never happen
+            default:
+                return undefined
+        }
+    }
+    // 在本文件 和 导入的文件查找
+    let defterms = document
+}
+
+function findTermAtPosition(params: CallHierarchyPrepareParams): Term | undefined {
+    throw new Error('Function not implemented.')
+}
+
+function uriTermToCallHierarchyItem(params: { uri: string; term: Term }):CallHierarchyItem {
+    let {term,uri} = params;
+    return {
+        name :nameArity(term),
+        kind :SemanticTypeToSymbolKind(term.semanticType),
+        uri,
+        range:termRange(term),
+        selectionRange:termTokenRange(term)
+    }
+}
+

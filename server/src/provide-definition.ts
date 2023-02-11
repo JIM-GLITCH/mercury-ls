@@ -1,100 +1,118 @@
-import { DefinitionParams, Location } from 'vscode-languageserver'
-import { SomeSemanticType, docsMap, funcMap, globalMap, moduleMap, predMap } from './globalSpace'
+import { DefinitionParams, Location, TextDocumentPositionParams } from 'vscode-languageserver'
+import { SomeSemanticType, docsMap as uriToDocumentMap, funcMap, globalMap, moduleMap, predMap } from './globalSpace'
 import { sleep, termTokenRange } from './utils'
 import { Term, termRange } from './term'
 import { Document } from './document'
+import { EMPTY_STREAM, Stream, stream } from './stream'
 
 export async function DefinitionProvider(params:DefinitionParams):Promise<Location[]> {
-    let pos = params.position;
-    let uri = params.textDocument.uri;
-    let document ;
-    while( !(document = docsMap.get(uri))){
-        await sleep(100);
-    }
+    // 先找到指定位置的term 
+    let termAndUri = await findTermAtTextDocumentPosition(params);
+    return findDefTerms(termAndUri)
+        .then(x=>x.map(uriTermToLocation).toArray())
+}
 
-    let term =document.search(pos);
-    if(!term) return [];
+function findDefinitionTermWithoutSamantic(term:Term,document:Document){
+    let defterm1 =findDefinitionTerm('func',term,document)
+    let defterm2 = findDefinitionTerm('pred',term,document)
+    return defterm1.concat(defterm2)
+}
+function findDefinitionTerm(semanticType:SomeSemanticType,term:Term,document:Document){
+    // term有module属性 在该module里找
+    if(term.module){
+        let doc = moduleMap.get(term.module)
+        if(!doc) return stream([]);
+        let res = findDefTermInThisDocument(semanticType,term,doc)
+        return res
+    }
+    // 在本文件查找
+    let defs1 = findDefTermInThisDocument(semanticType,term,document)
+    // 在其他文件里查找
+    let defs2 = findDefTermInOtherDocument(semanticType,term,document)
+    let res = defs1.concat(defs2);
+    return res;
+}
+
+function findDefTermInThisDocument(semanticType: SomeSemanticType, term: Term, document: Document) {
+    let uri = document.uri;
+    let res = stream(document.defMap[semanticType].get(term.name))
+        .map(term=>({uri,term}))
+    return res;
+
+}
+function findDefTermInOtherDocument(semanticType: SomeSemanticType, term: Term, document: Document){
+    let importModules = document.importModules;
+    let res = stream(importModules)
+    .map(x=>moduleMap.get(x))
+    .nonNullable()
+    .flatMap(doc=>findDefTermInThisDocument(semanticType,term,doc))
+    return res;
+}
+
+type UriAndTerm={
+    uri:string,
+    term:Term
+}
+
+function uriTermToLocation(uriTerm:UriAndTerm){
+    return {
+        uri:uriTerm.uri,
+        range:termTokenRange(uriTerm.term)
+    }
+}
+
+export async function findDefTerms(params?:UriAndTerm) {
+    if(!params) return stream([]);
+    let {term,uri} = params;
+    let document  = uriToDocumentMap.get(uri)!;
     switch (term.semanticType!) {
         case 'variable':{
             // 在 variable所在的clause里查找
             let node = term.clause!.varmap.get(term.name)[0];
-            if(!node) return [];
-            return [{
+            if(!node) return stream([]);
+            return stream([{
                 uri,
-                range:termRange(node)
-            }] as Location[];
+                term:node
+            }]);
         }
         case 'func':{
-            let defs=findDefinitions('func',term,document);
+            let defs=findDefinitionTerm('func',term,document)
             return defs
         }
         case 'pred':{
-            let defs=findDefinitions('pred',term,document);
+            let defs=findDefinitionTerm('pred',term,document)
             return defs
         }
         case 'type':
+            return stream([]);
         case 'module':{
             let document = moduleMap.get(term.name);
-            if(!document) return [];
+            if(!document) return stream([]);
             let moduleDefTerm = document.moduleDefMap.get(term.name)
-            if(!moduleDefTerm) return [];
-            return [{
+            if(!moduleDefTerm) return stream([]);
+            return stream([{
                 uri:document.uri,
-                range:termRange(moduleDefTerm)
-            }]
+                term:moduleDefTerm
+            }])
         }
         default:{
             // 查找所有map
-            let defs1=findDefinitions('func',term,document);
-            
-            let defs2=findDefinitions('pred',term,document);
-            defs1.push(...defs2);
-            return defs1
+            let defs =findDefinitionTermWithoutSamantic(term,document)
+            return defs
         }
     }
 }
-
-function findDefinitions(semanticType:SomeSemanticType,term:Term,document:Document){
-    let defs:Location[]=[];
-    // term有module属性 在该module里找
-    // if(term.module){
-    //     let doc = getDocumentFromModule(term.module);
-    //     if(!doc) return defs;
-    //     let funcTerms = doc.defMap[semanticType].get(term.name);
-    //     for (const funcTerm of funcTerms) {
-    //         defs.push({
-    //             uri:doc.uri,
-    //             range:termRange(funcTerm)
-    //         })
-    //     }
-    //     return defs;
-    // }
-    // 在本文件查找
-    findDefinitionInThisDocument(semanticType,term,document,defs)
-    // 在其他文件里查找
-    findDefinitionInOtherDocument(semanticType,term,document,defs)
-    return defs
-}
-
-function findDefinitionInThisDocument(semanticType: SomeSemanticType, term: Term, document: Document,defs:Location[]) {
-    let funcTerms = document.defMap[semanticType].get(term.name);
-    for (const funcTerm of funcTerms) {
-        if(funcTerm.arity != term.arity) continue;
-        defs.push({
-            uri:document.uri,
-            range:termTokenRange(funcTerm)
-        })
+export async function findTermAtTextDocumentPosition(params: TextDocumentPositionParams){
+    let pos = params.position;
+    let uri = params.textDocument.uri;
+    while( !uriToDocumentMap.get(uri)){
+        await sleep(100);
     }
-}
-function findDefinitionInOtherDocument(semanticType: SomeSemanticType, term: Term, document: Document,defs:Location[]){
-    for (const doc of globalMap[semanticType].get(term.name)) {
-        // 如果没有导入 跳过
-        // if (!document.importModules.has(doc.fileNameWithoutExt)){
-        //     continue
-        // }
-        // 跳过本文件
-        if(doc == document) continue;
-        //如果导入 进行查找
-        findDefinitionInThisDocument(semanticType,term,document,defs);
+    let document = uriToDocumentMap.get(uri)!
+    let term =  document.search(pos);
+    if (term) return{
+        uri ,
+        term
     }
+
 }

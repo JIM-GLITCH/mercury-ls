@@ -19,6 +19,7 @@ export type DefMap={
     "func":MultiMap<string,DefTerm>
     "pred":MultiMap<string,DefTerm>
     "type":MultiMap<string,DefTerm>
+    module:Map<string,ModuleTerm>
 }
 export type DeclMap={
     "func":MultiMap<string,DeclTerm>
@@ -85,7 +86,9 @@ export class Document{
         this.defMap={
             "func":this.funcDefMap,
             "pred":this.predDefMap,
-            "type":this.typeDefMap
+            "type":this.typeDefMap,
+            module:this.moduleDefMap
+            
         }
         this.declMap={
             "func":this.funcDeclMap,
