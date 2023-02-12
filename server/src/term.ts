@@ -16,7 +16,6 @@ type syntaxType=
     "implementation_defined"
 
 export interface Term {
-    document?: Document
     /**
      * term 是哪一个module里定义的
      */
@@ -210,7 +209,7 @@ export class clause  {
         this.endToken = end
         this.name = "clause"
         this.varmap = varmap
-        for (const [,varTerms] of varmap.map) {
+        for (const [,varTerms] of varmap.entriesGroupedByKey()) {
             varTerms.forEach(v =>v.clause = this);
         }
     }

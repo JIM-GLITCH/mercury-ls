@@ -1,119 +1,66 @@
 import { CallHierarchyIncomingCall, CallHierarchyIncomingCallsParams, CallHierarchyItem, CallHierarchyOutgoingCall, CallHierarchyOutgoingCallsParams, CallHierarchyPrepareParams, SymbolKind } from 'vscode-languageserver'
 import { SomeSemanticType, docsMap, funcMap, globalMap, moduleMap, predMap, refMap } from './globalSpace'
-import {  nameArity, sameArity, sameSemanticType, sleep, termTokenRange, tokenRange } from './utils'
+import {  moduleToDocument, nameArity, sameArity, sameSemanticType, sleep, termTokenRange, tokenRange } from './utils'
 import { Term, termRange } from './term'
 import { SemanticType } from './analyser'
-import { DefMap, DefTerm, Document } from './document'
+import { DefMap, DefTerm, Document, RefTerm } from './document'
 import { stream } from './stream'
-import { findDefTerms, findTermAtTextDocumentPosition } from './provide-definition'
-
+import { findDefTerms, findAtTextDocumentPositionTerm } from './provide-definition'
+/**
+ * find definition term as the callheirarchyItem
+ * @param params 
+ * @returns 
+ */
 export async function prepareCallHierarchyProvider(params:CallHierarchyPrepareParams){
-    let res  = await findTermAtTextDocumentPosition(params)
+    let res  = await findAtTextDocumentPositionTerm(params)
     if(!res) return;
-    let res2 = (await findDefTerms(res)).head()
+    let res2 = findDefinitionTerm(res)
     if(res2){
         return [uriTermToCallHierarchyItem(res2)]
     }
-    return [
-        uriTermToCallHierarchyItem(res)
-    ] as CallHierarchyItem[]
-
 }
 
-export async function outgoingCallsProvider(params:CallHierarchyOutgoingCallsParams){
-    let item  = params.item;
-    let uri = item.uri;
-    let pos = item.selectionRange.start;
-    let document  = docsMap.get(uri)
-    if(!document) return;
-    let term = document.search(pos);
-    if(!term) return ;
-    switch (term.semanticType!) {
-        case 'variable':{
-            return
-        }
-        case 'func':{
-            let collect = findOutGoingCalls("func",term,document);
-            return collect;
-        }
-        case 'pred':{
-            let collect = findOutGoingCalls("pred",term,document);
-            return collect;
-        }
-        case 'type':
-        case 'module':
-            break;
-        default:
-            let collect1 = findOutGoingCalls("func",term,document);
-            let collect2 = findOutGoingCalls("pred",term,document);
-            collect1.push(...collect2)
-            return collect1;
+
+function findDefinitionTerm(uriTerm:uriTerm){
+    return findDefTerms(uriTerm).head()
+}
+
+
+export async function outgoingCallsProvider(params:CallHierarchyOutgoingCallsParams):Promise<CallHierarchyOutgoingCall[]>{
+    let {item:{uri,selectionRange:{start:position}}} = params;
+    let res = await findAtTextDocumentPositionTerm({textDocument:{uri},position});
+    if(!res) return [];
+    let term = res.term
+    if (term.semanticType == "module"){
+        return findModuleOutgoingCalls(res)
     }
+    if(term.clause?.calleeNode != term)
+        return [];
+    let calledNodes = term.clause.calledNodes;
+    return stream(calledNodes).map(x=>uriTermToCallHierarchyOutgoingCall({uri,term:x})).nonNullable().toArray()
 
 }
 
 export async function incomingCallsProvider(params:CallHierarchyIncomingCallsParams) {
-    let item  = params.item;
-    let uri = item.uri;
-    let pos = item.selectionRange.start;
-    let document  = docsMap.get(uri)  
-    if(!document) return;
-    let term = document.search(pos);
-    if(!term) return ;
-    let colloct:CallHierarchyIncomingCall[]=[]
-    switch (term.semanticType) {
-        case 'variable':
-            return
-        case 'func':{
-            for (const doc of refMap.get(term.name)) {
-                if(doc!=document && !doc.importModules.has(document.fileNameWithoutExt)){
-                    continue;
-                }
-                for (const refTerm of doc.refMap.get(term.name)) {
-                    // refs.push({uri:doc.uri,range:termRange(refTerm)})
-                    let calleeTerm = refTerm.clause.calleeNode;
-                    colloct.push({
-                        from: {
-                            name:nameArity(calleeTerm),
-                            kind:SemanticTypeToSymbolKind('func'),
-                            uri:doc.uri,
-                            range:termRange(calleeTerm),
-                            selectionRange:tokenRange(calleeTerm.token)
-                        },
-                        fromRanges:[termRange(refTerm)]
-                    })
-                }
-            }
-            return colloct;
-        }
-        case 'pred':{
-            for (const doc of refMap.get(term.name)) {
-                for (const refTerm of doc.refMap.get(term.name)) {
-                    // refs.push({uri:doc.uri,range:termRange(refTerm)})
-                    let calleeTerm = refTerm.clause.calleeNode;
-                    colloct.push({
-                        from: {
-                            name:nameArity(calleeTerm),
-                            kind:SemanticTypeToSymbolKind("pred"),
-                            uri:doc.uri,
-                            range:termRange(calleeTerm),
-                            selectionRange:tokenRange(calleeTerm.token)
-                        },
-                        fromRanges:[termRange(refTerm)]
-                    })
-                }
-            }
-            return colloct;
-        }
-        case 'type':
-        case 'module':
-            
-            break;
-    
-        default:
-            break;
+    let {item:{uri,selectionRange:{start:position}}} = params;
+    let res = await findAtTextDocumentPositionTerm({textDocument:{uri},position});
+    if(!res) return [];
+    let term = res.term;
+    if(term.semanticType == "variable"){
+        return [];
     }
+    if(term.semanticType == "module"){
+        return findModuleIncmoingCalls(res)
+    }
+    return  stream(refMap.get(term.name))
+    .map(doc =>{
+        let uri = doc.uri
+        return stream(doc.refMap.get(term.name)).map(x=>({uri,term:x}))
+    })
+    .flat()
+    .map(uriTermToCallHierarchyIncomingItem).toArray()
 }
+
 
 function SemanticTypeToSymbolKind(semanticType?: SemanticType ): SymbolKind {
     switch (semanticType) {
@@ -131,122 +78,26 @@ function SemanticTypeToSymbolKind(semanticType?: SemanticType ): SymbolKind {
             return SymbolKind.Function
     }
 }
-
-function findOutGoingCalls(semanticType:SomeSemanticType,term:Term,document:Document){
-    let collect:CallHierarchyOutgoingCall[]=[];
-    // term有module属性 在该module里找
-    // if(term.module){
-    //     let doc = getDocumentFromModule(term.module);
-    //     if(!doc) return collect;
-    //     let terms = doc.defMap[semanticType].get(term.name);
-    //     for (const refNodes of terms.map(x=>x.clause!.calledNodes)) {
-    //         for (const refnode of refNodes) {
-    //             let refRange = termRange(refnode)
-    //             collect.push({
-    //                 to: {
-    //                     name:refnode.name,
-    //                     uri:doc.uri,
-    //                     range:refRange,
-    //                     kind:SemanticTypeToSymbolKind(refnode.semanticType)??SymbolKind.Function,
-    //                     selectionRange:tokenRange(refnode.token)
-    //                 },
-    //                 fromRanges: [refRange]
-    //             })
-    //         }
-    //     }
-    //     return collect;
-    // }
-    // 在本文件查找
+function findRefTermInDocument(semanticType:SomeSemanticType,term:Term,document:Document){
+    let uri = document.uri
     let terms = document.defMap[semanticType].get(term.name);
-    for (const refNodes of terms.filter((x)=>x.arity == term.arity).map(x=>x.clause!.calledNodes)) {
-        for (const refnode of refNodes) {
-            let refRange = termRange(refnode)
-            let kind = refnode.semanticType
-                ?   SemanticTypeToSymbolKind(refnode.semanticType)
-                :   SymbolKind.Function;
-            collect.push({
-                to: {
-                    name:nameArity(refnode),
-                    uri:document.uri,
-                    range:refRange,
-                    kind,
-                    selectionRange:tokenRange(refnode.token)
-                },
-                fromRanges: [refRange]
-            })
-        }
-    }
-    // 在全局的文件里查找
-    for (const doc of globalMap[semanticType].get(term.name)) {
-        // 如果没有导入 跳过
-        // if (!document.importModules.has(doc.fileNameWithoutExt)){
-        //     continue
-        // }
-        // 如果是自己文件 跳过 避免重复
-        if( doc  == document ) continue ;
-        //如果导入 进行查找
-        let terms = doc.defMap[semanticType].get(term.name);
-        for (const refNodes of terms.filter((x)=>x.arity == term.arity).map(x=>x.clause!.calledNodes)) {
-            for (const refnode of refNodes) {
-                let refRange = termTokenRange(refnode)
-                let kind = SemanticTypeToSymbolKind(refnode.semanticType);
-                collect.push({
-                    to: {
-                        name:nameArity(refnode),
-                        uri:doc.uri,
-                        range:refRange,
-                        kind,
-                        selectionRange:termTokenRange(refnode)
-                    },
-                    fromRanges: [refRange]
-                })
-            }
-        }
-    }
-    return collect
+    let refterms = stream(terms)
+    .filter(x=>sameArity(x,term))
+    .map(x=>x.clause.calledNodes)
+    .flat()
+    .map(x =>({
+        uri,
+        term:x
+    }))
+    return refterms
 }
 
-function findDefinitionTermForCallItem(term: Term, document: Document) {
-    // 如果 term 有module属性 到 module文件里查找
-    if(term.module){
-        let doc = moduleMap.get(term.module);
-        if(!doc) return;
-        switch (term.semanticType) {
-            case 'func':
-            case 'pred':{
-                let defterms = doc.defMap[term.semanticType].get(term.name)
-                    .filter(x => sameArity(x,term));
-                let defterm = defterms[0] as Term|undefined
-                if(!defterm) return undefined;
-                return {
-                    term:defterm,
-                    uri:doc.uri
-                }
-            }
-            case 'module':{
-                let moduleDefTerm = doc.moduleDefMap.get(term.name);
-                if(!moduleDefTerm) return undefined;
-                return {
-                    term:moduleDefTerm,
-                    uri:doc.uri
-                };
-            }
-            case 'type':
-                return ;
-            // case "variable": never happen
-            default:
-                return undefined
-        }
-    }
-    // 在本文件 和 导入的文件查找
-    let defterms = document
-}
 
-function findTermAtPosition(params: CallHierarchyPrepareParams): Term | undefined {
-    throw new Error('Function not implemented.')
+interface uriTerm {
+    uri:string,
+    term:Term
 }
-
-function uriTermToCallHierarchyItem(params: { uri: string; term: Term }):CallHierarchyItem {
+function uriTermToCallHierarchyItem(params: uriTerm):CallHierarchyItem {
     let {term,uri} = params;
     return {
         name :nameArity(term),
@@ -255,5 +106,47 @@ function uriTermToCallHierarchyItem(params: { uri: string; term: Term }):CallHie
         range:termRange(term),
         selectionRange:termTokenRange(term)
     }
+}
+
+function uriTermToCallHierarchyIncomingItem(params: uriTerm):CallHierarchyIncomingCall {
+    let {term,uri} = params;
+    return {
+        from:uriTermToCallHierarchyItem({uri ,term:term.clause!.calleeNode}),
+        fromRanges:[termTokenRange(term)]
+    }
+}
+
+function uriTermToCallHierarchyOutgoingCall(uriTerm: uriTerm):CallHierarchyOutgoingCall|undefined{
+    let toTerm = findDefinitionTerm(uriTerm)
+    if(!toTerm) return undefined;
+    let to = uriTermToCallHierarchyItem(toTerm)
+    return {
+        to,
+        fromRanges:[termTokenRange(uriTerm.term)]
+    }
+}
+
+function findModuleOutgoingCalls({ uri, term}:uriTerm): CallHierarchyOutgoingCall[]  {
+    let document = moduleToDocument(term.name)!;
+    return stream(document.importModules.values())
+        .concat(document.includeModules.values())
+        .map(x=>uriTermToCallHierarchyOutgoingCall({uri,term:x}))
+        .nonNullable().toArray()
+}
+
+function findModuleIncmoingCalls(uriTerm: { uri: string; term: Term }) {
+    let {uri,term} = uriTerm;
+    
+    return stream(refMap.get(term.name)).map(doc =>{
+        let calleeTerm :Term|undefined= doc.moduleDefMap.values().next().value;
+        let uri = doc.uri
+        if(calleeTerm ){
+            return {
+                from:uriTermToCallHierarchyItem({uri,term:calleeTerm}),
+                fromRanges:[stream(doc.refMap.get(term.name)).map(termTokenRange).head()!]
+            }
+        }
+    }).nonNullable().toArray()
+
 }
 

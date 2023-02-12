@@ -26,7 +26,7 @@ export function link(doc:Document) {
         for (const typeName of oldDoc.exportTypes) {
             funcMap.delete(typeName,oldDoc);
         }
-        for (const refName of oldDoc.refMap.map.keys()) {
+        for (const refName of oldDoc.refMap.keys()) {
             refMap.delete(refName,oldDoc);
         }
         for (const moudleName of oldDoc.moduleDefMap.keys()) {
@@ -43,7 +43,7 @@ export function link(doc:Document) {
     for (const typeName of doc.exportTypes) {
         funcMap.add(typeName,doc);
     }
-    for (const refName of doc.refMap.map.keys()) {
+    for (const refName of doc.refMap.keys()) {
         refMap.add(refName,doc);
     }
     for (const moudleName of doc.moduleDefMap.keys()) {

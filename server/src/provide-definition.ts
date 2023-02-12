@@ -7,9 +7,10 @@ import { EMPTY_STREAM, Stream, stream } from './stream'
 
 export async function DefinitionProvider(params:DefinitionParams):Promise<Location[]> {
     // 先找到指定位置的term 
-    let termAndUri = await findTermAtTextDocumentPosition(params);
+    let termAndUri = await findAtTextDocumentPositionTerm(params);
+    if(!termAndUri) return []
     return findDefTerms(termAndUri)
-        .then(x=>x.map(uriTermToLocation).toArray())
+        .map(uriTermToLocation).toArray()
 }
 
 function findDefinitionTermWithoutSamantic(term:Term,document:Document){
@@ -42,7 +43,7 @@ function findDefTermInThisDocument(semanticType: SomeSemanticType, term: Term, d
 }
 function findDefTermInOtherDocument(semanticType: SomeSemanticType, term: Term, document: Document){
     let importModules = document.importModules;
-    let res = stream(importModules)
+    let res = stream(importModules.keys())
     .map(x=>moduleMap.get(x))
     .nonNullable()
     .flatMap(doc=>findDefTermInThisDocument(semanticType,term,doc))
@@ -61,8 +62,7 @@ function uriTermToLocation(uriTerm:UriAndTerm){
     }
 }
 
-export async function findDefTerms(params?:UriAndTerm) {
-    if(!params) return stream([]);
+export  function findDefTerms(params:UriAndTerm) {
     let {term,uri} = params;
     let document  = uriToDocumentMap.get(uri)!;
     switch (term.semanticType!) {
@@ -102,7 +102,7 @@ export async function findDefTerms(params?:UriAndTerm) {
         }
     }
 }
-export async function findTermAtTextDocumentPosition(params: TextDocumentPositionParams){
+export async function findAtTextDocumentPositionTerm(params: TextDocumentPositionParams){
     let pos = params.position;
     let uri = params.textDocument.uri;
     while( !uriToDocumentMap.get(uri)){

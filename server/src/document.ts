@@ -49,8 +49,8 @@ export class Document{
     typeDefMap: MultiMap<string, DefTerm>
     typeRefMap: MultiMap<string, Term>
     typeDeclMap: MultiMap<string, DeclTerm>
-    includeModules:Set<string>
-    importModules: Set<string>
+    includeModules:MultiMap<string, Term>
+    importModules: MultiMap<string, Term>
     exportFuncs: Set<string>
     exportPreds: Set<string>
     exportTypes: Set<string>
@@ -70,8 +70,8 @@ export class Document{
         this.predDefMap= new MultiMap();
         this.predRefMap = new MultiMap()
         this.predDeclMap = new MultiMap()
-        this.includeModules = new Set();
-        this.importModules = new Set();
+        this.includeModules = new MultiMap()
+        this.importModules = new MultiMap()
         this.exportFuncs =new Set();
         this.exportPreds =new Set();
         this.exportTypes =new Set();

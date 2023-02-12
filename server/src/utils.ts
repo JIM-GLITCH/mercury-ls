@@ -3,7 +3,7 @@ import type{ ParserState } from './parser'
 import type{ Token } from './lexer'
 import type{ Document } from './document'
 import{ Term, termRange } from './term'
-import { docsMap } from './globalSpace'
+import { docsMap, moduleMap } from './globalSpace'
 
 export function errorToken(message:string,token:Token,ps:{errors:Diagnostic[]}) {
 	let range = tokenRange(token);
@@ -41,7 +41,7 @@ export function nameArity(term:Term){
     return term.name+'/'+term.arity;
 }
 export function showNameArity(term:Term){
-    return term.name+' /'+term.arity;
+    return term.name+'/'+term.arity;
 }
 
 export function sleep(ms: number){
@@ -57,3 +57,7 @@ export function sameSemanticType(term1:Term,term2:Term){
 export function sameModule(term1:Term,term2:Term){
 	return term1.module == term2.module;
 }
+export function  moduleToDocument(module:string) {
+    return moduleMap.get(module)
+}
+

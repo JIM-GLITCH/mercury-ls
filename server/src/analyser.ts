@@ -387,17 +387,14 @@ function addRef(term: Term, ps: AnalyseState) {
 //     ps.document.predRefMap.add(node.name,node)
 //     ps.clause.refTerms.push(node);
 // }
-function addIncludeModule(term: Term, ps: AnalyseState) {
-    let moduleName  =  getModuleList(term,ps)
-    if(moduleName){
-        ps.document.includeModules.add(moduleName.join("."));
-    }
-}
+
 
 function addImportModule(term: Term, ps: AnalyseState) {
-    ps.document.importModules.add(term.name);
+    ps.document.importModules.add(term.name,term);
 }
-
+function addIncludeModule(term: Term, ps: AnalyseState) {
+    ps.document.includeModules.add(term.name,term);
+}
 function parse_pred_declareation(node: Term, ps: AnalyseState) {
     switch (nameArity(node)) {
         case "is/2":
@@ -475,74 +472,14 @@ function parse_qualified_term(term: Term,ps:AnalyseState) {
         default:
             return term;
     }
-
-    let right_term = term.args[1];
-    term = term.args[0];
     let list = [];
-    forloop:
-    for(;;){
-        switch(nameArity(term)){
-            case ":/2":
-            case "./2":{
-                if(term.args[1].arity!=0){
-                    errorToken("invalid module name",term.args[1].token,ps)
-                    break forloop 
-                }
-                
-                term.args[1].semanticType = "module"
-                list.push(term.args[1].name);
-                
-                term = term.args[0];
-                continue;
-            }
-            default:
-                if(term.arity!=0){
-                    errorToken("invalid module name",term.args[1].token,ps)
-                    break forloop 
-                }
-                term.semanticType = "module";
-                list.push(term.name);
-                break forloop;
-        }
-    }
-    right_term.module = list.reverse().join(".");
-    return right_term;
-}
-function getModuleList(term: Term,ps:AnalyseState) {
-    let list = [];
-    forloop:
-    for(;;){
-        switch(nameArity(term)){
-            case ":/2":
-            case "./2":{
-                if(term.args[1].arity!=0){
-                    errorToken("invalid module name",term.args[1].token,ps)
-                    return 
-                }
-                
-                term.args[1].semanticType = "module"
-                list.push(term.args[1]);
-                
-                term = term.args[0];
-                continue;
-            }
-            default:
-                if(term.arity!=0){
-                    return 
-                }
-                term.semanticType = "module";
-                list.push(term);
-                break forloop;
-        }
-    }
-    return list.reverse();
 }
 
 
 function addModuleDef(moduleTerm:Term,ps:AnalyseState){
     moduleTerm.semanticType = "module";
     ps.document.moduleDefMap.has(moduleTerm.name)
-        ?   errorTerm("alreadt defined",moduleTerm,ps)
+        ?   errorTerm("already defined",moduleTerm,ps)
         :   ps.document.moduleDefMap.set(moduleTerm.name,moduleTerm)
 }
 function addModuleRef(moduleTerm:Term,ps:AnalyseState){
@@ -579,13 +516,13 @@ function try_parse_include_module_symbol_name(term:Term,ps:AnalyseState) {
             let rightHandTerm = term.args[1]
             let module =  try_parse_module_symbol_name(moduleTerm,ps);
             qualified(module,rightHandTerm)
-            addModuleDef(rightHandTerm,ps)
+            addModuleRef(rightHandTerm,ps)
             return rightHandTerm
         }
         default:{
             if (term.syntaxType=="atom"){
                 term.module = ps.moduleName
-                addModuleDef(term,ps)
+                addModuleRef(term,ps)
                 return term;
             }
         }
@@ -654,19 +591,27 @@ function qualified(module: Term | undefined, rightHandTerm: Term) {
 
 function parse_import_module(term: Term, ps: AnalyseState) {
     conjuntion_to_list(term).map(term=>{
-        try_parse_module_symbol_name(term,ps);
-        addImportModule(term,ps)
+        let module = try_parse_module_symbol_name(term,ps);
+        if(!module ) return 
+        addImportModule(module,ps)
     });
 }
 
 function parse_use_module(term: Term, ps: AnalyseState) {
     conjuntion_to_list(term).map(term=>{
-        try_parse_module_symbol_name(term,ps);
+        let module = try_parse_module_symbol_name(term,ps);
+        if(!module ) return 
         addImportModule(term,ps)
 
     });
 }
 function parse_include_module(term: Term, ps: AnalyseState){
-    conjuntion_to_list(term).map(term=>try_parse_include_module_symbol_name(term,ps));
+    conjuntion_to_list(term).map(term=>{
+        try_parse_include_module_symbol_name(term,ps)
+        if(!module ) return 
+        addIncludeModule(term,ps)
+    });
 }
+
+
 

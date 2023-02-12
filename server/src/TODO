@@ -2,5 +2,6 @@
 [X] fix toString depth 3
 [X] fix call hierarchy ranges 
 [X] module system
-[ ] module call heirarchy 
+[X] module call heirarchy 
 [ ] type system 
+[ ] fix memory leak
