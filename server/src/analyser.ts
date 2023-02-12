@@ -466,13 +466,12 @@ function parse_qualified_term(term: Term,ps:AnalyseState) {
         // case ":/2":
         case "./2":
             let moduleTerm = try_parse_module_symbol_name(term.args[0],ps);
-            let rightHandTerm = term.args[0];
+            let rightHandTerm = term.args[1];
             if(moduleTerm) qualified(moduleTerm,rightHandTerm);
             return rightHandTerm
         default:
             return term;
     }
-    let list = [];
 }
 
 
