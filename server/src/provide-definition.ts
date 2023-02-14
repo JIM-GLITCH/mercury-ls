@@ -2,7 +2,7 @@ import { DefinitionParams, Location, TextDocumentPositionParams } from 'vscode-l
 import { SomeSemanticType, docsMap as uriToDocumentMap, funcMap, globalMap, moduleMap, predMap } from './globalSpace'
 import { sleep, termTokenRange } from './utils'
 import { Term, termRange } from './term'
-import { Document } from './document'
+import { DefTerm, Document } from './document'
 import { EMPTY_STREAM, Stream, stream } from './stream'
 
 export async function DefinitionProvider(params:DefinitionParams):Promise<Location[]> {

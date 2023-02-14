@@ -1,6 +1,6 @@
 import { Diagnostic, SymbolKind, URI } from 'vscode-languageserver'
 // import { ParserState } from './parser'
-import { Term, clause, termRange } from './term'
+import { Term, Clause, termRange } from './term'
 import { DefTerm, Document, RefTerm } from './document'
 import { errorTerm, errorToken, nameArity } from './utils'
 import { parse_type_defn_item } from './parse_type_defn_item'
@@ -14,7 +14,7 @@ export type SemanticType =
     
 export interface AnalyseState{
     moduleName: string | undefined
-    clause:clause
+    clause:Clause
     document: Document
     interface: boolean;
     errors:Diagnostic[]

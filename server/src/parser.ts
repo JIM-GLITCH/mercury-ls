@@ -1,7 +1,7 @@
 import { Diagnostic } from 'vscode-languageserver'
 import { Token, TokenList, TokenType, lexer, } from './lexer';
 import { OpInfo, adjust_priority_for_assoc, lookup_infix_op, lookup_op, lookup_op_infos, max_priority } from './ops'
-import { Term, string,applyCompound, atom, backquotedapplyCompound, binPrefixCompound, clause, float, functorCompound, implementation_defined, infixCompound, integer, negFloat, negInteger, prefixCompound, variable } from './term'
+import { Term, string,applyCompound, atom, backquotedapplyCompound, binPrefixCompound, Clause, float, functorCompound, implementation_defined, infixCompound, integer, negFloat, negInteger, prefixCompound, variable } from './term'
 import { MultiMap } from './multimap'
 import type{ Document } from './document'
 import { errorToken, nameArity } from './utils'
@@ -14,6 +14,9 @@ class TokenIter {
 		this.tokens = tokens
 		this.idx = idx
 	}
+    /** The return value must be token and not undefined becasue we add "EOF" token in the lexer and process "EOF" token everywhere in parser.
+     *  we add "EOF" token to get the error location to report.
+    */
 	val(): Token  {
 		return this.tokens[this.idx]
 	}
@@ -45,7 +48,7 @@ export function parse_string(text:string){
 		varmap: new MultiMap()
 	} as ParserState
     let local_lexer =  lexer.clone().reset(text);
-    let clauses = [] as clause[];
+    let clauses = [] as Clause[];
     for(;;){
         let tokenList = local_lexer.getTokenList();
         if(!tokenList){
@@ -80,7 +83,7 @@ function read_clause_from_TokenList(tokenList:TokenList,ps:ParserState) {
         errorToken("missing end of clause token",lastToken,ps);
     }
     let end  = tokenList.end?? tokenList.tokens[tokenList.tokens.length-1]
-    let  clauseItem= new clause(r.term,end,ps.varmap);
+    let  clauseItem= new Clause(r.term,end,ps.varmap);
     return clauseItem;
 }
 

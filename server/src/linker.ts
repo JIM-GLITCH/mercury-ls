@@ -8,15 +8,6 @@ export function link(doc:Document) {
     let uri  =doc.uri;
     let oldDoc = docsMap.get(uri);
     if(oldDoc){
-        // for (const name_arity of oldDoc..map.keys()) {
-        //     declarationsMap.delete(name_arity,oldDoc);
-        // }
-        // for (const name_arity of oldDoc.defsMap.map.keys()) {
-        //     definitionsMap.delete(name_arity,oldDoc);
-        // }  
-        // for (const name_arity of oldDoc.refsMap.map.keys()) {
-        //     referencesMap.delete(name_arity,oldDoc);
-        // }
         for (const funcName of oldDoc.exportFuncs) {
             funcMap.delete(funcName,oldDoc);
         }

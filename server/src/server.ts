@@ -46,7 +46,7 @@ import {
 import * as parser from './parser'
 import { MultiMap } from './multimap'
 import { Document } from './document'
-import { Term, clause, termRange, tokenToRange } from './term'
+import { Term, Clause, termRange, tokenToRange } from './term'
 import * as analyser from './analyser'
 import * as linker from './linker' 
 import {URI as URI_obj,Utils}from "vscode-uri"
@@ -290,10 +290,10 @@ function isNewVersion(textDocument: TextDocument) {
     return false;
 }
 interface defTerm extends Term{
-    clause:clause
+    clause:Clause
 }
 interface refTerm extends Term{
-    clause:clause
+    clause:Clause
 }
 
 async function validateTextDocument(textDocument: TextDocument): Promise<void> {

@@ -1,14 +1,14 @@
 import { Diagnostic, Position, URI } from 'vscode-languageserver'
-import { Term, clause } from './term'
+import { Term, Clause } from './term'
 import { MultiMap } from './multimap'
 import { URI as URI_obj,Utils } from 'vscode-uri'
 import { TextDocument } from 'vscode-languageserver-textdocument'
 import { SemanticType } from './analyser'
 export interface RefTerm extends Term{
-    clause:clause
+    clause:Clause
 }
 export interface DefTerm extends Term{
-    clause:clause
+    clause:Clause
     semanticType:SemanticType
 }
 export interface DeclTerm extends Term{
@@ -39,7 +39,7 @@ export class Document{
     version: number
     uri:URI
     uri_obj:URI_obj
-    clauses:clause[];
+    clauses:Clause[];
     funcDefMap:MultiMap<string,DefTerm>
     funcRefMap: MultiMap<string, RefTerm>
     funcDeclMap:MultiMap<string, DeclTerm>

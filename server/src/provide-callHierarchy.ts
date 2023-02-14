@@ -12,32 +12,27 @@ import { findDefTerms, findAtTextDocumentPositionTerm } from './provide-definiti
  * @returns 
  */
 export async function prepareCallHierarchyProvider(params:CallHierarchyPrepareParams){
-    let res  = await findAtTextDocumentPositionTerm(params)
-    if(!res) return;
-    let res2 = findDefinitionTerm(res)
-    if(res2){
-        return [uriTermToCallHierarchyItem(res2)]
-    }
+    let uriAndTerm  = await findAtTextDocumentPositionTerm(params)
+    if(!uriAndTerm) return;
+    return findDefTerms(uriAndTerm)
+        .map(x => [uriTermToCallHierarchyItem(x)] )
+        .head()
+
 }
-
-
-function findDefinitionTerm(uriTerm:uriTerm){
-    return findDefTerms(uriTerm).head()
-}
-
 
 export async function outgoingCallsProvider(params:CallHierarchyOutgoingCallsParams):Promise<CallHierarchyOutgoingCall[]>{
     let {item:{uri,selectionRange:{start:position}}} = params;
     let res = await findAtTextDocumentPositionTerm({textDocument:{uri},position});
     if(!res) return [];
-    let term = res.term
+    let term = res.term as DefTerm
     if (term.semanticType == "module"){
         return findModuleOutgoingCalls(res)
     }
-    if(term.clause?.calleeNode != term)
-        return [];
-    let calledNodes = term.clause.calledNodes;
-    return stream(calledNodes).map(x=>uriTermToCallHierarchyOutgoingCall({uri,term:x})).nonNullable().toArray()
+    return findDefTerms({uri,term})
+        .map(x=>(x.term as DefTerm).clause.calledNodes)
+        .flat()
+        .map(ref =>uriTermToCallHierarchyOutgoingCall({uri,term:ref}))
+        .nonNullable().toArray()
 
 }
 
@@ -117,13 +112,13 @@ function uriTermToCallHierarchyIncomingItem(params: uriTerm):CallHierarchyIncomi
 }
 
 function uriTermToCallHierarchyOutgoingCall(uriTerm: uriTerm):CallHierarchyOutgoingCall|undefined{
-    let toTerm = findDefinitionTerm(uriTerm)
-    if(!toTerm) return undefined;
-    let to = uriTermToCallHierarchyItem(toTerm)
-    return {
-        to,
-        fromRanges:[termTokenRange(uriTerm.term)]
-    }
+    let to = findDefTerms(uriTerm).map(uriTermToCallHierarchyItem).head()
+    return to
+        ?   {
+                to,
+                fromRanges:[termTokenRange(uriTerm.term)]
+            }
+        :   undefined;
 }
 
 function findModuleOutgoingCalls({ uri, term}:uriTerm): CallHierarchyOutgoingCall[]  {
