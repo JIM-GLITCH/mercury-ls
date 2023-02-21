@@ -1,57 +1,52 @@
 import { DeclarationParams, Location } from 'vscode-languageserver'
-import { SomeSemanticType, docsMap, funcMap, predMap } from './globalSpace'
-import {  sleep, termTokenRange } from './utils'
+import { SomeSemanticType, documentMap, moduleToDocument } from './globalSpace'
+import {  sameArity, sameSemanticType, sleep, termTokenRange } from './utils'
 import { Term, termRange } from './term'
+import { stream } from './stream'
+import { DefinitionProvider } from './provide-definition'
 
 export async function DeclarationProvider(params:DeclarationParams) {
     let pos = params.position;
     let uri = params.textDocument.uri;
-    let document;
-    while(!(document=docsMap.get(uri))){
+    while(!documentMap.get(uri)){
         await sleep(100);
     }
+    let document = documentMap.get(uri)!
     let term = document.search(pos);
-    if(!term) return
-    switch (term.semanticType!) {
-        case 'variable':{
-            return;
-        }
-        case 'func':{
-            let collect = findDeclarations('func',term);
-            return collect
-        }
-        case 'pred':{
-            let collect = findDeclarations('pred',term);
-            return collect
-        }
-        case 'type':
-        case 'module':
-            
-            break;
+    if(!term) 
+        return
+    let semanticType = term.semanticType;
     
-        default:{
-            
-        }
+    if(semanticType == "variable"){
+        return ;
+    }
+    
+    if(semanticType=="module"){
+        let doc = moduleToDocument(term.name);
+        if(!doc)
+            return []
+        let defTerm = doc.moduleDefMap.get(term.name)!
+        return [uriTermToLocation({uri:doc.uri,term:defTerm})]
 
-            break;
+    }
+    if(term.module){
+        let doc  =  moduleToDocument(term.module)
+        if(!doc)
+            return [];
+        if(semanticType){
+            let uri = doc.uri
+            return stream(doc.declarationMap[semanticType].get(term.name))
+            .filter(x=>sameArity(x,term!)&&sameSemanticType(x,term!))
+            .map(term=>uriTermToLocation({uri,term}))
+            .toArray()
+        }
     }
 }
-function findDeclarations(SemanticType:SomeSemanticType,term:Term){
-    let collect:Location[]=[];
-    for (const doc of funcMap.get(term.name)) {
-        // // 如果没有导入 跳过
-        // if (!document.importModules.has(doc.fileNameWithoutExt)){
-        //     continue
-        // }
-        //如果导入 进行查找
-        let funcTerms = doc.declMap[SemanticType].get(term.name);
-        for (const funcTerm of funcTerms) {
-            if(funcTerm.arity!=term.arity) continue;
-            collect.push({
-                uri:doc.uri,
-                range:termTokenRange(funcTerm)
-            })
-        }
-    }
-    return collect
+
+function uriTermToLocation(uriTerm: { uri: string; term: Term}) {
+    let {uri,term} = uriTerm;
+    return Location.create(
+        uri,
+        termTokenRange(term)
+    )
 }

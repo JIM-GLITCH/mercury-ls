@@ -1,12 +1,12 @@
 import { Hover, HoverParams, MarkupContent } from 'vscode-languageserver'
-import { docsMap } from './globalSpace'
+import { documentMap } from './globalSpace'
 import { nameArity } from './utils'
 import { termRange } from './term'
 
 export async function HoverProvider(params:HoverParams) {
     let pos = params.position;
     let uri = params.textDocument.uri;
-    let term = docsMap.get(uri)?.search(pos);
+    let term = documentMap.get(uri)?.search(pos);
     if(!term) return;
     let msg;
     if(term.semanticType){

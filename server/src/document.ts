@@ -4,6 +4,24 @@ import { MultiMap } from './multimap'
 import { URI as URI_obj,Utils } from 'vscode-uri'
 import { TextDocument } from 'vscode-languageserver-textdocument'
 import { SemanticType } from './analyser'
+export enum DocumentState {
+    /** The text content has changed and needs to be parsed again. */
+    Changed = 0,
+    /** An AST has been created from the text content. */
+    Parsed = 1,
+    /** The `IndexManager` service has processed AST nodes of this document. */
+    IndexedContent = 2,
+    /** Pre-processing steps such as scope precomputation have been executed. */
+    Processed = 3,
+    /** The `Linker` service has processed this document. */
+    Linked = 4,
+    /** The `IndexManager` service has processed AST node references of this document. */
+    IndexedReferences = 5,
+    /** The `DocumentValidator` service has processed this document. */
+    Validated = 6
+}
+
+
 export interface RefTerm extends Term{
     clause:Clause
 }
@@ -28,10 +46,11 @@ export type DeclMap={
 }
 
 export class Document{
+    state=DocumentState.Parsed
     refMap: MultiMap<string,RefTerm>
     moduleDefMap: Map<string,Term>
     defMap: DefMap
-    declMap: DeclMap
+    declarationMap: DeclMap
     moduleRefMap: MultiMap<string,ModuleTerm>
     getText (): string  {
         return this.textDocument.getText();
@@ -90,7 +109,7 @@ export class Document{
             module:this.moduleDefMap
             
         }
-        this.declMap={
+        this.declarationMap={
             "func":this.funcDeclMap,
             "pred":this.predDeclMap,
             "type":this.typeDeclMap

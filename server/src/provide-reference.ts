@@ -1,5 +1,5 @@
 import { Location, ReferenceParams } from 'vscode-languageserver'
-import { docsMap, refMap } from './globalSpace'
+import { documentMap } from './globalSpace'
 import { sleep } from './utils'
 import { Term, termRange } from './term'
 
@@ -7,7 +7,7 @@ export async function ReferenceProvider(params:ReferenceParams) {
     let uri  = params.textDocument.uri;
     let pos = params.position
     let document ;
-    while( !(document = docsMap.get(uri))){
+    while( !(document = documentMap.get(uri))){
         await sleep(100);
     }
     let term = document.search(pos);
@@ -47,7 +47,7 @@ export async function ReferenceProvider(params:ReferenceParams) {
     return [];
 }
 function findReferences(term:Term,refs:Location[]){
-    for (const doc of refMap.get(term.name)) {
+    for (const doc of documentMap.values()) {
         for (const refTerm of doc.refMap.get(term.name)) {
             if(refTerm.arity!=term.arity) continue;
             refs.push({uri:doc.uri,range:termRange(refTerm)})

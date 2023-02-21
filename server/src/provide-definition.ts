@@ -1,5 +1,5 @@
 import { DefinitionParams, Location, TextDocumentPositionParams } from 'vscode-languageserver'
-import { SomeSemanticType, docsMap as uriToDocumentMap, funcMap, globalMap, moduleMap, predMap } from './globalSpace'
+import { SomeSemanticType, documentMap, moduleToDocument } from './globalSpace'
 import { sleep, termTokenRange } from './utils'
 import { Term, termRange } from './term'
 import { DefTerm, Document } from './document'
@@ -21,7 +21,7 @@ function findDefinitionTermWithoutSamantic(term:Term,document:Document){
 function findDefinitionTerm(semanticType:SomeSemanticType,term:Term,document:Document){
     // term有module属性 在该module里找
     if(term.module){
-        let doc = moduleMap.get(term.module)
+        let doc =moduleToDocument(term.module)
         if(!doc) return stream([]);
         let res = findDefTermInThisDocument(semanticType,term,doc)
         return res
@@ -44,7 +44,7 @@ function findDefTermInThisDocument(semanticType: SomeSemanticType, term: Term, d
 function findDefTermInOtherDocument(semanticType: SomeSemanticType, term: Term, document: Document){
     let importModules = document.importModules;
     let res = stream(importModules.keys())
-    .map(x=>moduleMap.get(x))
+    .map(moduleToDocument)
     .nonNullable()
     .flatMap(doc=>findDefTermInThisDocument(semanticType,term,doc))
     return res;
@@ -64,7 +64,7 @@ function uriTermToLocation(uriTerm:UriAndTerm){
 
 export  function findDefTerms(params:UriAndTerm) {
     let {term,uri} = params;
-    let document  = uriToDocumentMap.get(uri)!;
+    let document  = documentMap.get(uri)!;
     switch (term.semanticType!) {
         case 'variable':{
             // 在 variable所在的clause里查找
@@ -86,12 +86,13 @@ export  function findDefTerms(params:UriAndTerm) {
         case 'type':
             return stream([]);
         case 'module':{
-            let document = moduleMap.get(term.name);
+            let document = moduleToDocument(term.name);
             if(!document) return stream([]);
             let moduleDefTerm = document.moduleDefMap.get(term.name)
             if(!moduleDefTerm) return stream([]);
+            let uri = document.uri  ;
             return stream([{
-                uri:document.uri,
+                uri,
                 term:moduleDefTerm
             }])
         }
@@ -105,10 +106,10 @@ export  function findDefTerms(params:UriAndTerm) {
 export async function findAtTextDocumentPositionTerm(params: TextDocumentPositionParams){
     let pos = params.position;
     let uri = params.textDocument.uri;
-    while( !uriToDocumentMap.get(uri)){
+    while( !documentMap.get(uri)){
         await sleep(100);
     }
-    let document = uriToDocumentMap.get(uri)!
+    let document = documentMap.get(uri)!
     let term =  document.search(pos);
     if (term) return{
         uri ,

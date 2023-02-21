@@ -1,6 +1,6 @@
 // type term = functor|variable
 
-import { Position, Range } from 'vscode-languageserver'
+import { Location, Position, Range } from 'vscode-languageserver'
 import { Token } from './lexer'
 import { MultiMap } from './multimap'
 import { SemanticType } from './analyser'
@@ -17,7 +17,7 @@ type SyntaxType=
 
 export interface Term {
     /**
-     * term 是哪一个module里定义的
+     * term 是哪一个module里定义的 find definition reference 时用到
      */
     module?: string
     /**
@@ -40,13 +40,17 @@ export interface Term {
      */
     arity: number
     /**
-     *  semantic type
+     *  语义类型 provide hover时 find definition reference 时用到
      */
     semanticType?:SemanticType
     /**
      * the clause this term belong to 
      */
     clause?:Clause
+    /**
+     * 
+     * @param depth debug时 打印term args的深度
+     */
     toString(depth?:number):string
 }
 export class TermImpl implements Term{
@@ -177,7 +181,9 @@ export function infixCompound(token: Token, children: Term[], name?:string){
     fixArity(node);
     return node;
 }
- 
+/**
+ * clause 
+ */
 export class Clause  {
     startToken: Token
     endToken: Token
@@ -189,13 +195,13 @@ export class Clause  {
     }
     range() {
         if (this.term && this.end) {
-            return tokenToRange(this.term.startToken, this.end)
+            return StartEndTokenToRange(this.term.startToken, this.end)
         }
         else if (this.term) {
-            return tokenToRange(this.term.startToken, this.term.endToken)
+            return StartEndTokenToRange(this.term.startToken, this.term.endToken)
         }
         // else if(this.end)
-        return tokenToRange(this.end!, this.end!)
+        return StartEndTokenToRange(this.end!, this.end!)
     }
     term: Term
     end: Token
@@ -217,107 +223,82 @@ export class Clause  {
         return this.term.toString()+".";
     }
 }
-
-export function tokenToRange(startTk: Token, endTk: Token) {
+/**
+ * 将 startToken 和 endToken 转化为 Range
+ * @param startToken startToken提供Range.start
+ * @param endToken endToken提供Range.end
+ * @returns Range
+ */
+export function StartEndTokenToRange(startToken: Token, endToken: Token):Range {
     return {
         start: {
-            line: startTk.line - 1,
-            character: startTk.col - 1
+            line: startToken.line - 1,
+            character: startToken.col - 1
         },
         end: {
-            line: endTk.line + endTk.lineBreaks - 1,
-            character: endTk.lineBreaks
-                ? (endTk.text.length - endTk.text.lastIndexOf("\n") - 1)
-                : (endTk.col + endTk.text.length - 1)
+            line: endToken.line + endToken.lineBreaks - 1,
+            character: endToken.lineBreaks
+                ? (endToken.text.length - endToken.text.lastIndexOf("\n") - 1)
+                : (endToken.col + endToken.text.length - 1)
         }
     }
 }
-function checkFunctorRange(pos: Position, thisNode: { token: Token }, leftNode?: Term, rightNode?: Term): Term | undefined {
-    const functor = thisNode.token
-    if (functor == undefined) {
-        let node = search(leftNode,pos)
-        if (node) return node
-        node = search(rightNode,pos)
-        if (node) return node
-        return undefined
 
-    }
-    /**pos 在 functor 左 */
-    let range = tokenRange(functor)
-    if (range.start.line > pos.line
-        || (range.start.line == pos.line && range.start.character > pos.character)) {
-        return search(leftNode,pos)
-    }
-    /**pos 在 functor 右 */
-    else if (range.end.line < pos.line
-        || (range.end.line == pos.line && range.end.character < pos.character)) {
-        return search(rightNode,pos)
-    }
-    else {
-        return thisNode as any
-    }
-}
-
-
-function positionInRange(pos:Position,range:Range){
-    if (range.start.line > pos.line
-        || (range.start.line == pos.line && range.start.character > pos.character)) {
+/**
+ * 判断position是否在range内
+ * @param position 
+ * @param range 
+ * @returns 
+ */
+function positionInRange(position:Position,range:Range){
+    if (range.start.line > position.line
+        || (range.start.line == position.line && range.start.character > position.character)) {
         return false;
     }
-    else if (range.end.line < pos.line
-        || (range.end.line == pos.line && range.end.character <= pos.character)) {
+    else if (range.end.line < position.line
+        || (range.end.line == position.line && range.end.character <= position.character)) {
         return false;
     }
     return true;
 }
 
-function binarySearch( terms: Term[],pos: Position,): Term | undefined {
-    let low = 0, high = terms.length-1
-    const line = pos.line
-    while (low < high) {
-        const mid = Math.floor((low + high) / 2)
-        const term = terms[mid]
-        let range = termRange(term)
-        if (range.start.line > pos.line
-            || (range.start.line == pos.line && range.start.character > pos.character)) {
-            high = mid
-        }
-        /**pos 在 functor 右 */
-        else if (range.end.line < pos.line
-            || (range.end.line == pos.line && range.end.character < pos.character)) {
-            low = mid + 1
-        }
-        else {
-            return search(term,pos)
-        }
-    }
+
+/**
+ * 得到term的位置范围 range
+ * @param term term
+ * @returns 
+ */
+export function termRange(term: Term):Range {
+    return StartEndTokenToRange(term.startToken, term.endToken)
 }
-export function termRange(term: Term) {
-    return tokenToRange(term.startToken, term.endToken)
-}
-// 每一个 state variable 例如 !X 占两个参数位置
-function fixArity(node:Term){
-    for (const arg of node.args) {
+
+/**
+ * 将语法上的arity修正为语义上的arity,
+ * 每一个 state variable 例如 !X 语义上占两个参数位置
+ * @param term 
+ */
+function fixArity(term:Term){
+    for (const arg of term.args) {
         if(arg.name == "!" && arg.arity==1&&arg.args[0].token.type=="variable"){
-            node.arity++;
+            term.arity++;
         }
     }
 }
 /**
- * 
+ * 在term的范围内查找位置为position的term或subterm
  * @param term search position in this term
- * @param pos postition  to find a term
+ * @param position postition to find a term
  * @returns  term at the postion or undefined
  */
-function search(term: Term | undefined, pos: Position): Term | undefined {
+function search(term: Term | undefined, position: Position): Term | undefined {
     switch(term?.syntaxType){
         case "atom":{
             let token_range = tokenRange(term.token);
-            if(positionInRange(pos,token_range)){
+            if(positionInRange(position,token_range)){
                 return term;              
             }
             for (const arg of term.args) {
-                let res = search(arg,pos);
+                let res = search(arg,position);
                 if(res) return res;
             }
         }
@@ -327,13 +308,19 @@ function search(term: Term | undefined, pos: Position): Term | undefined {
         case "string":
         case "variable":{
             let term_range = termRange(term)
-            if(positionInRange(pos,term_range)){
+            if(positionInRange(position,term_range)){
                return term 
             }
             return undefined;
         }
     } 
 }
+/**
+ * 把term转换成string
+ * @param term 要打印的term
+ * @param depth 当前打印args的深度
+ * @returns 
+ */
 function termToString(term: Term,depth:number=1) {
     if(depth>3){
         return " ... ";

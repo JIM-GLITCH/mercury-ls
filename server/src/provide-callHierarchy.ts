@@ -1,5 +1,5 @@
-import { CallHierarchyIncomingCall, CallHierarchyIncomingCallsParams, CallHierarchyItem, CallHierarchyOutgoingCall, CallHierarchyOutgoingCallsParams, CallHierarchyPrepareParams, SymbolKind } from 'vscode-languageserver'
-import { SomeSemanticType, docsMap, funcMap, globalMap, moduleMap, predMap, refMap } from './globalSpace'
+import { CallHierarchyIncomingCall, CallHierarchyIncomingCallsParams, CallHierarchyItem, CallHierarchyOutgoingCall, CallHierarchyOutgoingCallsParams, CallHierarchyPrepareParams, CancellationToken, SymbolKind } from 'vscode-languageserver'
+import { SomeSemanticType, documentMap, } from './globalSpace'
 import {  moduleToDocument, nameArity, sameArity, sameSemanticType, sleep, termTokenRange, tokenRange } from './utils'
 import { Term, termRange } from './term'
 import { SemanticType } from './analyser'
@@ -11,7 +11,7 @@ import { findDefTerms, findAtTextDocumentPositionTerm } from './provide-definiti
  * @param params 
  * @returns 
  */
-export async function prepareCallHierarchyProvider(params:CallHierarchyPrepareParams){
+export async function prepareCallHierarchyProvider(params:CallHierarchyPrepareParams,token:CancellationToken){
     let uriAndTerm  = await findAtTextDocumentPositionTerm(params)
     if(!uriAndTerm) return;
     return findDefTerms(uriAndTerm)
@@ -47,7 +47,7 @@ export async function incomingCallsProvider(params:CallHierarchyIncomingCallsPar
     if(term.semanticType == "module"){
         return findModuleIncmoingCalls(res)
     }
-    return  stream(refMap.get(term.name))
+    return  stream(documentMap.values())
     .map(doc =>{
         let uri = doc.uri
         return stream(doc.refMap.get(term.name)).map(x=>({uri,term:x}))
@@ -132,16 +132,14 @@ function findModuleOutgoingCalls({ uri, term}:uriTerm): CallHierarchyOutgoingCal
 function findModuleIncmoingCalls(uriTerm: { uri: string; term: Term }) {
     let {uri,term} = uriTerm;
     
-    return stream(refMap.get(term.name)).map(doc =>{
-        let calleeTerm :Term|undefined= doc.moduleDefMap.values().next().value;
-        let uri = doc.uri
+    return stream(documentMap.values()).map(doc =>{
+        let calleeTerm = doc.moduleDefMap.get(term.name);
         if(calleeTerm ){
             return {
-                from:uriTermToCallHierarchyItem({uri,term:calleeTerm}),
+                from:uriTermToCallHierarchyItem({uri: doc.uri, term:calleeTerm}),
                 fromRanges:[stream(doc.refMap.get(term.name)).map(termTokenRange).head()!]
             }
         }
     }).nonNullable().toArray()
-
 }
 

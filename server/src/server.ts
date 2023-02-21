@@ -5,8 +5,6 @@
 import {
     createConnection,
     TextDocuments,
-    Diagnostic,
-    DiagnosticSeverity,
     ProposedFeatures,
     InitializeParams,
     DidChangeConfigurationNotification,
@@ -15,26 +13,8 @@ import {
     TextDocumentPositionParams,
     TextDocumentSyncKind,
     InitializeResult,
-    Range,
     Position,
-    URI,
-    Hover,
-    MarkupContent,
-    Definition,
-    Location,
-    DocumentSymbol,
-    SymbolKind,
-    WorkspaceFolder,
-    DocumentSymbolParams,
-    DefinitionParams,
-    ReferenceParams,
-    HoverParams,
-    CallHierarchyPrepareParams,
-    CallHierarchyItem,
-    CallHierarchyIncomingCallsParams,
-    CallHierarchyIncomingCall,
-    DeclarationParams,
-    CallHierarchyOutgoingCall,
+    WorkspaceFolder,                                     
     CallHierarchyPrepareRequest,
     CallHierarchyIncomingCallsRequest,
     CallHierarchyOutgoingCallsRequest
@@ -44,18 +24,13 @@ import {
     TextDocument
 } from 'vscode-languageserver-textdocument';
 import * as parser from './parser'
-import { MultiMap } from './multimap'
 import { Document } from './document'
-import { Term, Clause, termRange, tokenToRange } from './term'
+import { Term, Clause } from './term'
 import * as analyser from './analyser'
-import * as linker from './linker' 
 import {URI as URI_obj,Utils}from "vscode-uri"
 import fs = require("fs")
 import path = require('path')
-import { P } from 'ts-pattern'
-import { nameArity, sleep, tokenRange } from './utils'
-import * as globalSpace from"./globalSpace"
-import { docsMap } from './globalSpace'
+import { documentMap } from './globalSpace'
 import { DefinitionProvider } from './provide-definition'
 import { DeclarationProvider } from './provide-declaration'
 import { incomingCallsProvider, outgoingCallsProvider, prepareCallHierarchyProvider } from './provide-callHierarchy'
@@ -67,7 +42,7 @@ import { DocumentSymbolProvider } from './provide-documentSymbol'
 const connection = createConnection(ProposedFeatures.all);
 
 // Create a simple text document manager.
-const documents: TextDocuments<TextDocument> = new TextDocuments(TextDocument);
+export const documents: TextDocuments<TextDocument> = new TextDocuments(TextDocument);
 
 let hasConfigurationCapability = false;
 let hasWorkspaceFolderCapability = false;
@@ -151,7 +126,7 @@ async function validateWorkspaceTextDocuments() {
         connection.sendNotification("$/statusBar/text",`Cached files: ${file_count}/${file_number}`);
     }
     connection.sendNotification("$/statusBar/text","Mercury");
-    connection.sendNotification("$/statusBar/tooltip",{cached:docsMap.size,usage:process.memoryUsage.rss()/1000000});
+    connection.sendNotification("$/statusBar/tooltip",{cached:documentMap.size,usage:process.memoryUsage.rss()/1000000});
 
 }
 // The example settings     
@@ -278,11 +253,11 @@ function getDoc(moduleName: string, document: Document) {
         Utils.dirname(uri_obj),
         moduleName+".m"
     ).toString()
-    return docsMap.get(moduleURI_string);
+    return documentMap.get(moduleURI_string);
 }
 
 function isNewVersion(textDocument: TextDocument) {
-    let old_doc =docsMap.get( textDocument.uri)
+    let old_doc =documentMap.get( textDocument.uri)
     if(!old_doc) 
         return true;
     if(textDocument.version> old_doc.version) 
@@ -307,16 +282,13 @@ async function validateTextDocument(textDocument: TextDocument): Promise<void> {
     parser.parse(document);
     // 2. analyse ast node's semantic info
     analyser.analyse(document);
-    // 3. link the definition and references in global scope
-    linker.link(document);
+    // // 3. link the definition and references in global scope
+    // linker.link(document);
     // 4. store this document
-    docsMap.set(document.uri , document)
+    documentMap.set(document.uri , document)
     // Send the computed diagnostics to VSCode.
     connection.sendDiagnostics({ uri: document.uri, diagnostics:document.errors });
-    connection.sendNotification("$/statusBar/tooltip",{cached:docsMap.size,usage:process.memoryUsage.rss()/1000000});
+    connection.sendNotification("$/statusBar/tooltip",{cached:documentMap.size,usage:process.memoryUsage.rss()/1000000});
 }
 
-function getTerm(uri: string, pos: Position) {
-    return docsMap.get(uri)?.search(pos);
-}
 

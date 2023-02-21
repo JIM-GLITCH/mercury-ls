@@ -1,13 +1,13 @@
 import { DocumentSymbol, DocumentSymbolParams, SymbolInformation, SymbolKind } from 'vscode-languageserver'
 import { nameArity, showNameArity, sleep } from './utils'
-import { docsMap } from './globalSpace'
-import { termRange, tokenToRange } from './term'
+import { documentMap } from './globalSpace'
+import { termRange, StartEndTokenToRange } from './term'
 import { stream } from './stream'
 
 export async function DocumentSymbolProvider(params: DocumentSymbolParams) {
     let uri  = params.textDocument.uri;
     let document ;
-    while( !(document = docsMap.get(uri))){
+    while( !(document = documentMap.get(uri))){
         await sleep(100);
     }
     let symbols :DocumentSymbol[]=[];
@@ -40,7 +40,7 @@ export async function DocumentSymbolProvider(params: DocumentSymbolParams) {
         symbols.push({
             name: showNameArity(funcTerm),
             kind:SymbolKind.Operator,
-            range: tokenToRange(funcTerms[0].clause!.startToken,funcTerms[funcTerms.length-1].clause!.endToken),
+            range: StartEndTokenToRange(funcTerms[0].clause!.startToken,funcTerms[funcTerms.length-1].clause!.endToken),
             selectionRange: termRange(funcTerm),
             children:children,
         })
@@ -63,7 +63,7 @@ export async function DocumentSymbolProvider(params: DocumentSymbolParams) {
         symbols.push({
             name: showNameArity(funcTerm),
             kind:SymbolKind.Function,
-            range: tokenToRange(predTerms[0].clause.startToken,predTerms[predTerms.length-1].clause!.endToken),
+            range: StartEndTokenToRange(predTerms[0].clause.startToken,predTerms[predTerms.length-1].clause!.endToken),
             selectionRange: termRange(funcTerm),
             children:children,
         })

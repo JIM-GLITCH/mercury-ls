@@ -3,7 +3,7 @@ import type{ ParserState } from './parser'
 import type{ Token } from './lexer'
 import type{ Document } from './document'
 import{ Term, termRange } from './term'
-import { docsMap, moduleMap } from './globalSpace'
+import { documentMap, moduleMap } from './globalSpace'
 
 export function errorToken(message:string,token:Token,ps:{errors:Diagnostic[]}) {
 	let range = tokenRange(token);
