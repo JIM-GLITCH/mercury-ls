@@ -5,3 +5,4 @@
 [X] module call heirarchy 
 [ ] type system 
 [ ] fix memory leak
+[ ] fix read/2,3 io.m mercury_term_parser.m same name different module pred bug?

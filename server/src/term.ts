@@ -16,6 +16,11 @@ type SyntaxType=
     "implementation_defined"
 
 export interface Term {
+    /** 
+     * The index in args in the container 
+     * */
+    index?:number
+    container?:Term
     /**
      * term 是哪一个module里定义的 find definition reference 时用到
      */
@@ -24,6 +29,9 @@ export interface Term {
      * syntaxType
      */
     syntaxType:SyntaxType
+    /**
+     * term's subterms
+     */
     args: Term[]
     /**which token represents this term */
     token: Token
@@ -64,6 +72,10 @@ export class TermImpl implements Term{
         this.endToken = endToken;
         this.name = name;
         this.arity = args.length
+        args.forEach((x,index)=>{
+            x.container = this
+            x.index = index
+        })
     }
     module?: string | undefined
     clause?: Clause
@@ -184,11 +196,11 @@ export function infixCompound(token: Token, children: Term[], name?:string){
 /**
  * clause 
  */
-export class Clause  {
+export class Clause {
     startToken: Token
     endToken: Token
     name: string
-	calleeNode!: Term
+	calleeNode?: Term
     calledNodes:RefTerm[]=[]
     search(pos: Position) {
         return search(this.term,pos);
@@ -218,6 +230,7 @@ export class Clause  {
         for (const [,varTerms] of varmap.entriesGroupedByKey()) {
             varTerms.forEach(v =>v.clause = this);
         }
+        term.index = 0;
     }
     toString(){
         return this.term.toString()+".";

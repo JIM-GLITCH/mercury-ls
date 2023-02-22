@@ -4,7 +4,7 @@ import { Term, Clause, termRange } from './term'
 import { DefTerm, Document, RefTerm } from './document'
 import { errorTerm, errorToken, nameArity } from './utils'
 import { parse_type_defn_item } from './parse_type_defn_item'
-import {   } from './globalSpace'
+import { moduleMap } from './globalSpace'
 export type SemanticType = 
     "func"|
     "pred"|
@@ -36,28 +36,28 @@ export function analyse(document:Document) {
 function parse_item_or_marker(node:Term,ps:AnalyseState){
     switch (nameArity(node)) {
         case ":-/1":{
-                        parse_decl_item_or_marker(node.args[0],ps)
-            break;
-		}
-		case ":-/2":{
-			ruleHead(node.args[0],ps);
-			ruleBody(node.args[1],ps);
-			return 
-		}
-
-		case "-->/2":{
-			DCGHead(node.args[0],ps);
-			DCGBody(node.args[1],ps);
-			return ;
-		}
-        case "=/2":{
-			funcRuleHead(node.args[0],ps);
+            parse_decl_item_or_marker(node.args[0],ps)
             break;
         }
-		
-		default:
-			addPredDef(node,ps);
-			break;
+        case ":-/2":{
+            ruleHead(node.args[0],ps);
+            ruleBody(node.args[1],ps);
+            return 
+        }
+
+        case "-->/2":{
+            DCGHead(node.args[0],ps);
+            DCGBody(node.args[1],ps);
+            return ;
+        }
+        case "=/2":{
+            funcRuleHead(node.args[0],ps);
+            break;
+        }
+        
+        default:
+            addPredDef(node,ps);
+            break;
     }
 }
 
@@ -479,7 +479,9 @@ function addModuleDef(moduleTerm:Term,ps:AnalyseState){
     moduleTerm.semanticType = "module";
     ps.document.moduleDefMap.has(moduleTerm.name)
         ?   errorTerm("already defined",moduleTerm,ps)
-        :   ps.document.moduleDefMap.set(moduleTerm.name,moduleTerm)
+        :   (   ps.document.moduleDefMap.set(moduleTerm.name,moduleTerm),
+                moduleMap.set(moduleTerm.name,ps.document)
+            )
 }
 function addModuleRef(moduleTerm:Term,ps:AnalyseState){
     moduleTerm.semanticType = "module";
@@ -553,13 +555,13 @@ function parse_incl_imp_use_items(term: Term,IIU:IIU,ps: AnalyseState) {
     termList.map(term=>try_parse_module_symbol_name(term,ps))
 }
 function conjuntion_to_list(term: Term) {
-	let list = [];
-	while(nameArity(term) == ",/2"){
-		list.push(term.args[0]);
-		term = term.args[1]
-	}
-	list.push(term);
-	return list;
+    let list = [];
+    while(nameArity(term) == ",/2"){
+        list.push(term.args[0]);
+        term = term.args[1]
+    }
+    list.push(term);
+    return list;
 }
 
 function parse_symbol_name(term: Term, ps: AnalyseState): any {

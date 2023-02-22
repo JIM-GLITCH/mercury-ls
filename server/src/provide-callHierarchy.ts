@@ -5,7 +5,7 @@ import { Term, termRange } from './term'
 import { SemanticType } from './analyser'
 import { DefMap, DefTerm, Document, RefTerm } from './document'
 import { stream } from './stream'
-import { findDefTerms, findAtTextDocumentPositionTerm } from './provide-definition'
+import { findDefTerms, findAtTextDocumentPositionTerm, uriTerm } from './provide-definition'
 /**
  * find definition term as the callheirarchyItem
  * @param params 
@@ -28,7 +28,7 @@ export async function outgoingCallsProvider(params:CallHierarchyOutgoingCallsPar
     if (term.semanticType == "module"){
         return findModuleOutgoingCalls(res)
     }
-    return findDefTerms({uri,term})
+    return findDefTerms(uriTerm.create(uri,term))
         .map(x=>(x.term as DefTerm).clause.calledNodes)
         .flat()
         .map(ref =>uriTermToCallHierarchyOutgoingCall({uri,term:ref}))
@@ -88,10 +88,6 @@ function findRefTermInDocument(semanticType:SomeSemanticType,term:Term,document:
 }
 
 
-interface uriTerm {
-    uri:string,
-    term:Term
-}
 function uriTermToCallHierarchyItem(params: uriTerm):CallHierarchyItem {
     let {term,uri} = params;
     return {
@@ -106,7 +102,7 @@ function uriTermToCallHierarchyItem(params: uriTerm):CallHierarchyItem {
 function uriTermToCallHierarchyIncomingItem(params: uriTerm):CallHierarchyIncomingCall {
     let {term,uri} = params;
     return {
-        from:uriTermToCallHierarchyItem({uri ,term:term.clause!.calleeNode}),
+        from:uriTermToCallHierarchyItem({uri ,term:term.clause!.calleeNode!}),
         fromRanges:[termTokenRange(term)]
     }
 }

@@ -1,6 +1,6 @@
 import { DefinitionParams, Location, TextDocumentPositionParams } from 'vscode-languageserver'
 import { SomeSemanticType, documentMap, moduleToDocument } from './globalSpace'
-import { sleep, termTokenRange } from './utils'
+import { sameArity, sleep, termTokenRange } from './utils'
 import { Term, termRange } from './term'
 import { DefTerm, Document } from './document'
 import { EMPTY_STREAM, Stream, stream } from './stream'
@@ -26,18 +26,20 @@ function findDefinitionTerm(semanticType:SomeSemanticType,term:Term,document:Doc
         let res = findDefTermInThisDocument(semanticType,term,doc)
         return res
     }
-    // 在本文件查找
+    // 在本文件查找 如果找到就返回
     let defs1 = findDefTermInThisDocument(semanticType,term,document)
-    // 在其他文件里查找
+    if (!defs1.isEmpty())
+        return defs1;
+    // 在本文件没找到 在其他文件里查找
     let defs2 = findDefTermInOtherDocument(semanticType,term,document)
-    let res = defs1.concat(defs2);
-    return res;
+    return defs2;
 }
 
-function findDefTermInThisDocument(semanticType: SomeSemanticType, term: Term, document: Document) {
+function findDefTermInThisDocument(semanticType: SomeSemanticType, term: Term, document: Document){
     let uri = document.uri;
     let res = stream(document.defMap[semanticType].get(term.name))
-        .map(term=>({uri,term}))
+        .filter(x=>sameArity(x,term))
+        .map(term=>(uriTerm.create(uri,term)))
     return res;
 
 }
@@ -50,19 +52,25 @@ function findDefTermInOtherDocument(semanticType: SomeSemanticType, term: Term, 
     return res;
 }
 
-type UriAndTerm={
+export interface uriTerm{
     uri:string,
     term:Term
 }
-
-function uriTermToLocation(uriTerm:UriAndTerm){
-    return {
-        uri:uriTerm.uri,
-        range:termTokenRange(uriTerm.term)
+export namespace uriTerm{
+    export function create(uri:string,term:Term):uriTerm{
+        return{
+            uri,term
+        }
     }
 }
+export function uriTermToLocation(uriTerm:uriTerm){
+    return Location.create(
+        uriTerm.uri,
+        termTokenRange(uriTerm.term)
+    )
+}
 
-export  function findDefTerms(params:UriAndTerm) {
+export  function findDefTerms(params:uriTerm) {
     let {term,uri} = params;
     let document  = documentMap.get(uri)!;
     switch (term.semanticType!) {
@@ -87,9 +95,11 @@ export  function findDefTerms(params:UriAndTerm) {
             return stream([]);
         case 'module':{
             let document = moduleToDocument(term.name);
-            if(!document) return stream([]);
+            if(!document) 
+                return stream([]);
             let moduleDefTerm = document.moduleDefMap.get(term.name)
-            if(!moduleDefTerm) return stream([]);
+            if(!moduleDefTerm) 
+                return stream([]);
             let uri = document.uri  ;
             return stream([{
                 uri,
@@ -103,6 +113,7 @@ export  function findDefTerms(params:UriAndTerm) {
         }
     }
 }
+
 export async function findAtTextDocumentPositionTerm(params: TextDocumentPositionParams){
     let pos = params.position;
     let uri = params.textDocument.uri;
@@ -115,5 +126,4 @@ export async function findAtTextDocumentPositionTerm(params: TextDocumentPositio
         uri ,
         term
     }
-
 }
