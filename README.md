@@ -14,7 +14,7 @@
 ## Find declaration
 ![img](./gifs/find-declaration.png)
 ## Show call hierarchy
-![img](./gifs/callheirarchy.png)
+![img](./gifs/callhierarchy.png)
 
 
 
