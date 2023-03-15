@@ -2,7 +2,7 @@ import { CallHierarchyIncomingCall, CallHierarchyIncomingCallsParams, CallHierar
 import { SomeSemanticType, documentMap, } from './globalSpace'
 import {  moduleToDocument, nameArity, sameArity, sameSemanticType, sleep, termTokenRange, tokenRange } from './utils'
 import { Term, termRange } from './term'
-import { SemanticType } from './analyser'
+import { SemanticType } from "./document-visitor"
 import { DefMap, DefTerm, Document, RefTerm } from './document'
 import { stream } from './stream'
 import { findDefTerms, findAtTextDocumentPositionTerm, uriTerm } from './provide-definition'
@@ -53,7 +53,7 @@ export async function incomingCallsProvider(params:CallHierarchyIncomingCallsPar
         return stream(doc.refMap.get(term.name)).map(x=>({uri,term:x}))
     })
     .flat()
-    .map(uriTermToCallHierarchyIncomingItem).toArray()
+    .map(x=>uriTermToCallHierarchyIncomingItem(x)).toArray()
 }
 
 

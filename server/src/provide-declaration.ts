@@ -1,9 +1,12 @@
 import { DeclarationParams, Location } from 'vscode-languageserver'
-import { SomeSemanticType, documentMap, moduleToDocument } from './globalSpace'
+import { SomeSemanticType, documentMap } from './globalSpace'
 import {  sameArity, sameSemanticType, sleep, termTokenRange } from './utils'
 import { Term, termRange } from './term'
 import { stream } from './stream'
 import { DefinitionProvider, findAtTextDocumentPositionTerm } from './provide-definition'
+import { moduleManager } from './document-moduleManager'
+import { mercuryDocuments } from './documents'
+import { URI } from 'vscode-uri'
 
 export async function DeclarationProvider(params:DeclarationParams) {
     let uriTerm = await findAtTextDocumentPositionTerm(params)
@@ -17,39 +20,46 @@ export async function DeclarationProvider(params:DeclarationParams) {
     }
     
     if(semanticType=="module"){
-        let doc = moduleToDocument(term.name);
+        let doc = moduleManager.get(term);
         if(!doc)
             return []
-        let defTerm = doc.moduleDefMap.get(term.name)!
-        return [uriTermToLocation({uri:doc.uri,term:defTerm})]
+        let defTerm = doc.visitResult!.module!
+        return [uriTermToLocation({uri:doc.uri.toString(),term:defTerm})]
 
     }
     /* 如果有module属性 在 module里查找 */
-    if(term.module){
-        let doc  =  moduleToDocument(term.module)
+    if(term.qualified){
+        let doc  =  moduleManager.get(term.qualified)
         if(!doc)
             return [];
-        let uri = doc.uri
-        return stream(Object.values(doc.declarationMap))
-        .map(x=>x.get(term.name)).flat()
-        .filter(x=>sameArity(x,term!))
-        .map(term=>uriTermToLocation({uri,term}))
-        .toArray()
+        let uri = doc.uri.toString()
+        let candidates  =  doc.visitResult?.exports.get(term.name)
+        if(candidates){
+            let res = stream(candidates).filter(x=>sameArity(x,term))
+            .map(term=>uriTermToLocation({uri,term})).toArray()
+            return res
+        }
     }
     /* 在本文件查找 */
     let uri = uriTerm.uri;
-    let doc  = documentMap.get(uri)!;
-    let res =  stream(Object.values(doc.declarationMap))
-        .map(x=>x.get(term.name)).flat()
-        .filter(x=>sameArity(x,term!))
+    let doc  = mercuryDocuments.getOrCreateDocument(URI.parse(uri));
+    let candidates = doc.visitResult!.declaration.get(term.name);
+    let res = stream(candidates)
+        .filter(x=>sameArity(x,term))
         .map(term=>uriTermToLocation({uri,term}))
         .toArray()
-
     if(res.length>0)
         return res
 
     /**如果本文件没查找到 在导入的文件里找 */
-    // TODO
+    // res = stream(doc.visitResult!.imports)
+    //     .map(x=>moduleManager.get(x))
+    //     .nonNullable()
+    //     .map(targetDoc=>targetDoc.visitResult?.exports)
+    //     .nonNullable()
+    //     .map(map=>{
+    //         map.get()
+    //     })
 }
 
 function uriTermToLocation(uriTerm: { uri: string; term: Term}) {

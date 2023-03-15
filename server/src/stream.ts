@@ -4,6 +4,8 @@
  * terms of the MIT License, which is available in the project root.
  ******************************************************************************/
 
+import { MultiMap } from './multimap'
+
 /**
  * A stream is a read-only sequence of values. While the contents of an array can be accessed
  * both sequentially and randomly (via index), a stream allows only sequential access.
@@ -48,6 +50,7 @@ export interface Stream<T> extends Iterable<T> {
      * @param valueFn The function to derive map values. If omitted, the stream elements are used as values.
      */
     toMap<K = T, V = T>(keyFn?: (e: T) => K, valueFn?: (e: T) => V): Map<K, V>;
+    toMultiMap<K = T, V = T>(keyFn?: (e: T) => K, valueFn?: (e: T) => V): MultiMap<K, V>;
 
     /**
      * Returns a string representation of a stream.
@@ -320,7 +323,13 @@ export class StreamImpl<S, T> implements Stream<T> {
         ]);
         return new Map(entryStream);
     }
-
+    toMultiMap<K = T, V = T>(keyFn?: (e: T) => K, valueFn?: (e: T) => V): MultiMap<K, V> {
+        const entryStream = this.map(element => <[K, V]>[
+            keyFn ? keyFn(element) : element,
+            valueFn ? valueFn(element) : element
+        ]);
+        return new MultiMap(entryStream);
+    }
     toString(): string {
         return this.join();
     }

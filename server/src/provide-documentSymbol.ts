@@ -26,7 +26,7 @@ export async function DocumentSymbolProvider(params: DocumentSymbolParams) {
     for (const [name ,funcTerms] of document.funcDefMap.entriesGroupedByKey()) {
         let children:DocumentSymbol[] = []
         for (const funcTerm of funcTerms ) {
-            for (const [varName,varTerms] of funcTerm.clause.varmap.entriesGroupedByKey()) {
+            for (const [varName,varTerms] of funcTerm.clause.varMap.entriesGroupedByKey()) {
                 let varRange  = termRange(varTerms[0]);
                 children.push({
                     name: varName,
@@ -49,7 +49,7 @@ export async function DocumentSymbolProvider(params: DocumentSymbolParams) {
     for (const [name ,predTerms] of document.predDefMap.entriesGroupedByKey()) {
         let children:DocumentSymbol[] = []
         for (const funcTerm of predTerms) {
-            for (const [varName,varTerms] of funcTerm.clause.varmap.entriesGroupedByKey()) {
+            for (const [varName,varTerms] of funcTerm.clause.varMap.entriesGroupedByKey()) {
                 let varRange  = termRange(varTerms[0]);
                 children.push({
                     name: varName,

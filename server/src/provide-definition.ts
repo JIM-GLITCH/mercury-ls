@@ -1,5 +1,5 @@
 import { DefinitionParams, Location, TextDocumentPositionParams } from 'vscode-languageserver'
-import { SomeSemanticType, documentMap, moduleToDocument } from './globalSpace'
+import { SomeSemanticType, documentMap } from './globalSpace'
 import { sameArity, sleep, termTokenRange } from './utils'
 import { Term, termRange } from './term'
 import { DefTerm, Document } from './document'
@@ -76,7 +76,7 @@ export  function findDefTerms(params:uriTerm) {
     switch (term.semanticType!) {
         case 'variable':{
             // 在 variable所在的clause里查找
-            let node = term.clause!.varmap.get(term.name)[0];
+            let node = term.clause!.varMap.get(term.name)[0];
             if(!node) return stream([]);
             return stream([{
                 uri,

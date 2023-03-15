@@ -60,10 +60,7 @@ export async function activate(context: ExtensionContext) {
     bar.show();
     bar.command ="Mercury.statusBar";
     client.start();
-    // NOTE : when client state is 3 ，client is ready
-    while((client as any).state <3){
-        await sleep(100);
-    }
+    await client.onReady()
     vscode.commands.registerCommand(bar.command,()=>{
         client.sendNotification('$/status/click');
     })

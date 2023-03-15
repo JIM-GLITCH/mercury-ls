@@ -20,6 +20,3 @@ export let moduleMap = new Map<string,Document>();
 //     "pred":predMap,
 //     "type":typeMap,
 // }
-export function moduleToDocument(module:string){
-    return moduleMap.get(module);
-}

@@ -23,11 +23,10 @@ import {
 import {
     TextDocument
 } from 'vscode-languageserver-textdocument';
-import * as parser from './parser'
+import {Parser} from './parser'
 import { Document } from './document'
 import { Term, Clause } from './term'
-import * as analyser from './analyser'
-import {URI as URI_obj,Utils}from "vscode-uri"
+import {URI,Utils}from "vscode-uri"
 import fs = require("fs")
 import path = require('path')
 import { documentMap } from './globalSpace'
@@ -37,12 +36,14 @@ import { incomingCallsProvider, outgoingCallsProvider, prepareCallHierarchyProvi
 import { ReferenceProvider } from './provide-reference'
 import { HoverProvider } from './provide-hover'
 import { DocumentSymbolProvider } from './provide-documentSymbol'
+import { mutex } from './promise-util'
+import { documentBuilder } from './document-builder'
 // Create a connection for the server, using Node's IPC as a transport.
 // Also include all preview / proposed LSP features.
 const connection = createConnection(ProposedFeatures.all);
 
 // Create a simple text document manager.
-export const documents: TextDocuments<TextDocument> = new TextDocuments(TextDocument);
+export const textDocuments: TextDocuments<TextDocument> = new TextDocuments(TextDocument);
 
 let hasConfigurationCapability = false;
 let hasWorkspaceFolderCapability = false;
@@ -112,13 +113,13 @@ async function validateWorkspaceTextDocuments() {
     let workspaceFolder = workspaceFolders?workspaceFolders[0]:undefined;
     if(!workspaceFolder) return undefined;
 
-    let rootPath = URI_obj.parse(workspaceFolder.uri).fsPath;
+    let rootPath = URI.parse(workspaceFolder.uri).fsPath;
     let filenames = fs.readdirSync(rootPath);
     let file_number = filenames.length;
     for (const file_name of filenames) {
         if(path.extname(file_name) !=".m") continue;
         let file_path = path.join(rootPath,file_name);
-        let file_uri_string = URI_obj.file(file_path).toString();
+        let file_uri_string = URI.file(file_path).toString();
         let file_content = fs.readFileSync(file_path).toString();
         let file_textDocument = TextDocument.create(file_uri_string,"mercury",1,file_content)
         await validateTextDocument(file_textDocument);
@@ -156,7 +157,7 @@ connection.onDidChangeConfiguration(change => {
     }
 
     // Revalidate all open text documents
-    documents.all().forEach(validateTextDocument);
+    // textDocuments.all().forEach(validateTextDocument);
 });
 
 function getDocumentSettings(resource: string): Thenable<ExampleSettings> {
@@ -174,14 +175,15 @@ function getDocumentSettings(resource: string): Thenable<ExampleSettings> {
     return result;
 }
 // Only keep settings for open documents
-documents.onDidClose(e => {
+textDocuments.onDidClose(e => {
     documentSettings.delete(e.document.uri);
 });
 
 // The content of a text document has changed. This event is emitted
 // when the text document first opened or when its content has changed.
-documents.onDidChangeContent(change => {
-    validateTextDocument(change.document);
+textDocuments.onDidChangeContent(change => {
+    let changed = URI.parse(change.document.uri);
+    mutex.lock(token=>documentBuilder.update([changed],[],token))
 });
 
 
@@ -242,19 +244,10 @@ connection.onCompletionResolve(
 
 // Make the text document manager listen on the connection
 // for open, change and close text document events
-documents.listen(connection);
+textDocuments.listen(connection);
 
 // Listen on the connection
 connection.listen();
-function getDoc(moduleName: string, document: Document) {
-    let uri = document.uri;
-    let uri_obj = URI_obj.parse(uri);
-    let moduleURI_string = Utils.joinPath(
-        Utils.dirname(uri_obj),
-        moduleName+".m"
-    ).toString()
-    return documentMap.get(moduleURI_string);
-}
 
 function isNewVersion(textDocument: TextDocument) {
     let old_doc =documentMap.get( textDocument.uri)
@@ -271,24 +264,24 @@ interface refTerm extends Term{
     clause:Clause
 }
 
-async function validateTextDocument(textDocument: TextDocument): Promise<void> {
-    // In this simple example we get the settings for every validate run.
-    let document = new Document(textDocument);
+// async function validateTextDocument(textDocument: TextDocument): Promise<void> {
+//     // In this simple example we get the settings for every validate run.
+//     let document = new Document(textDocument);
 
-    if(!isNewVersion(textDocument)){
-        return;
-    }
-    // 1. parse string to ast
-    parser.parse(document);
-    // 2. analyse ast node's semantic info
-    analyser.analyse(document);
-    // // 3. link the definition and references in global scope
-    // linker.link(document);
-    // 4. store this document
-    documentMap.set(document.uri , document)
-    // Send the computed diagnostics to VSCode.
-    connection.sendDiagnostics({ uri: document.uri, diagnostics:document.errors });
-    connection.sendNotification("$/statusBar/tooltip",{cached:documentMap.size,usage:process.memoryUsage.rss()/1000000});
-}
+//     if(!isNewVersion(textDocument)){
+//         return;
+//     }
+//     // 1. parse string to ast
+//     Parser.parse_document(document);
+//     // 2. analyse ast node's semantic info
+//     analyser.analyse(document);
+//     // // 3. link the definition and references in global scope
+//     // linker.link(document);
+//     // 4. store this document
+//     documentMap.set(document.uri , document)
+//     // Send the computed diagnostics to VSCode.
+//     connection.sendDiagnostics({ uri: document.uri, diagnostics:document.errors });
+//     connection.sendNotification("$/statusBar/tooltip",{cached:documentMap.size,usage:process.memoryUsage.rss()/1000000});
+// }
 
 

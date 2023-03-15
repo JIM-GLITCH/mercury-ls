@@ -17,7 +17,7 @@ export async function ReferenceProvider(params:ReferenceParams) {
         case 'variable':{
             // 查找 variable的引用 只需要在这个varaible在的clause范围里查找
             let refs:Location[] = [];
-            for( const refTerm of term.clause!.varmap.get(term.name)){
+            for( const refTerm of term.clause!.varMap.get(term.name)){
                 refs.push({uri,range:termRange(refTerm)});
             }
             return refs;

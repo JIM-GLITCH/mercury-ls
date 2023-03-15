@@ -31,9 +31,9 @@ interface Token extends moo.Token{
 const moolexer = moo.compile({
     end: {
         /**
-             EOF  $(?![\r\n])
+            match EOF  $(?![\r\n])
          */
-        match: /\.(?=\s|$(?![\r\n])|%)/
+        match: /\.(?=\s|%|$(?![\r\n]))/
     },
     line_number_directive: /#[1-9][0-9]*/,
     comment: [

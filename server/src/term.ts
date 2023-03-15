@@ -3,24 +3,31 @@
 import { Location, Position, Range } from 'vscode-languageserver'
 import { Token } from './lexer'
 import { MultiMap } from './multimap'
-import { SemanticType } from './analyser'
+import { SemanticType } from "./document-visitor"
 import { tokenRange } from './utils'
 import { Document, RefTerm } from './document'
+import { MercuryDocument } from './documents'
 
-type SyntaxType=
-    "variable"|
-    "atom"|
-    "integer"|
-    "string"|
-    "float"|
-    "implementation_defined"
+type SyntaxType =
+    "variable" |
+    "atom" |
+    "integer" |
+    "string" |
+    "float" |
+    "implementation_defined" |
+    '$clause'|
+    '$rootNode'
+
 
 export interface Term {
+    definition?: Term
+    qualified?: Term
+    /** The container node in the AST; every node except the root node has a container. */
+    container?: Term
     /** 
      * The index in args in the container 
      * */
-    index?:number
-    container?:Term
+    containerIndex?: number
     /**
      * term 是哪一个module里定义的 find definition reference 时用到
      */
@@ -28,7 +35,7 @@ export interface Term {
     /**
      * syntaxType
      */
-    syntaxType:SyntaxType
+    syntaxType: SyntaxType
     /**
      * term's subterms
      */
@@ -47,119 +54,93 @@ export interface Term {
      *  this term's arity
      */
     arity: number
+    nameArity:string
     /**
      *  语义类型 provide hover时 find definition reference 时用到
      */
-    semanticType?:SemanticType
+    semanticType?: SemanticType
     /**
      * the clause this term belong to 
      */
-    clause?:Clause
+    clause?: Clause
+    document?:MercuryDocument
     /**
      * 
      * @param depth debug时 打印term args的深度
      */
-    toString(depth?:number):string
+    toString(depth?: number): string
+    range:Range
 }
-export class TermImpl implements Term{
-    semanticType?: SemanticType 
-    
-    constructor(TermType:SyntaxType,token:Token,args:Term[]=[],startToken:Token=token,endToken:Token=token,name:string=token.value){
+export class TermImpl implements Term {
+    semanticType?: SemanticType
+    nameArity:string
+    constructor(TermType: SyntaxType, token: Token, args: Term[] = [], startToken: Token = token, endToken: Token = token, name: string = token.value) {
         this.syntaxType = TermType
-        this.token = token;
-        this.args = args;
-        this.startToken = startToken;
-        this.endToken = endToken;
-        this.name = name;
+        this.token = token
+        this.args = args
+        this.startToken = startToken
+        this.endToken = endToken
+        this.name = name
         this.arity = args.length
-        args.forEach((x,index)=>{
+        this.nameArity = this.name +'/'+ this.arity
+        args.forEach((x, index) => {
             x.container = this
-            x.index = index
+            x.containerIndex = index
         })
     }
+    arity:number
+    name:string
+    
+    document?: MercuryDocument | undefined
+    get range():Range {
+        return termRange(this);
+    }
+    container?: Term | undefined
+    containerIndex?: number | undefined
     module?: string | undefined
     clause?: Clause
-    syntaxType:SyntaxType
+    syntaxType: SyntaxType
     args: Term[]
     token: Token
     startToken: Token
     endToken: Token
-    name: string
-    arity: number
-    toString(depth=1): string {
-        return termToString(this,depth);
+    toString(depth = 1): string {
+        return termToString(this, depth)
     }
+    qualified?: Term;
 }
 
-export function atom(token:Token,name?:string){
-    return new TermImpl("atom",token,undefined,undefined,undefined,name);
+export function atom(token: Token, name?: string) {
+    return new TermImpl("atom", token, undefined, undefined, undefined, name)
 }
-export function variable(token:Token){
-    let term = new TermImpl("variable",token);
-    term.semanticType ="variable"
+export function variable(token: Token) {
+    let term = new TermImpl("variable", token)
+    term.semanticType = "variable"
     return term
 }
 
-export function integer(token:Token){
-    return new TermImpl("integer",token);
+export function integer(token: Token) {
+    return new TermImpl("integer", token)
 }
-export function negInteger(token:Token,sign:Token){
-    return new TermImpl("integer",token,[],sign,token,'-'+token.value);
+export function negInteger(token: Token, sign: Token) {
+    return new TermImpl("integer", token, [], sign, token, '-' + token.value)
 }
-export function string(token:Token){
-    return new TermImpl("string",token);
-}
-
-export function float(token:Token){
-    return new TermImpl("float",token);
+export function string(token: Token) {
+    return new TermImpl("string", token)
 }
 
-export function negFloat(token:Token,sign:Token){
-    return new TermImpl("float",token,[],sign,token,'-'+token.value);
-}
-export function implementation_defined(token:Token){
-    return new TermImpl("implementation_defined",token);
+export function float(token: Token) {
+    return new TermImpl("float", token)
 }
 
-export function binPrefixCompound(token: Token, children: Term[]){
-    let node =  new TermImpl(
-        "atom",
-        token,
-        children,
-        token,
-        children[children.length-1].endToken
-    );
-    fixArity(node);
-    return node;
-
+export function negFloat(token: Token, sign: Token) {
+    return new TermImpl("float", token, [], sign, token, '-' + token.value)
+}
+export function implementation_defined(token: Token) {
+    return new TermImpl("implementation_defined", token)
 }
 
-export function prefixCompound(token: Token, children: Term[]){
-    let node =  new TermImpl(
-        "atom",
-        token,
-        children,
-        token,
-        children[children.length - 1].endToken
-    );
-    fixArity(node);
-    return node;
-
-}
-export function functorCompound(token: Token, children: Term[],name?:string){
-    let node =  new TermImpl(
-        "atom",
-        token,
-        children,
-        token,
-        children[children.length - 1].endToken,
-        name
-    );
-    fixArity(node);
-    return node;
-
-}
-export function applyCompound(token: Token, children: Term[]){
+export function binPrefixCompound(token: Token, children: Term[]) {
     let node = new TermImpl(
         "atom",
         token,
@@ -167,74 +148,114 @@ export function applyCompound(token: Token, children: Term[]){
         token,
         children[children.length - 1].endToken
     )
-    fixArity(node);
-    return node;
+    fixArity(node)
+    return node
+
 }
-export function backquotedapplyCompound(token: Token, children: Term[]){
-    let node =  new TermImpl(
+
+export function prefixCompound(token: Token, children: Term[]) {
+    let node = new TermImpl(
+        "atom",
+        token,
+        children,
+        token,
+        children[children.length - 1].endToken
+    )
+    fixArity(node)
+    return node
+
+}
+export function functorCompound(token: Token, children: Term[], name?: string) {
+    let node = new TermImpl(
+        "atom",
+        token,
+        children,
+        token,
+        children[children.length - 1].endToken,
+        name
+    )
+    fixArity(node)
+    return node
+
+}
+export function applyCompound(token: Token, children: Term[]) {
+    let node = new TermImpl(
+        "atom",
+        token,
+        children,
+        token,
+        children[children.length - 1].endToken
+    )
+    fixArity(node)
+    return node
+}
+export function backquotedapplyCompound(token: Token, children: Term[]) {
+    let node = new TermImpl(
         "atom",
         token,
         children,
         children[0].startToken,
         children[1].endToken
     )
-    fixArity(node);
-    return node;
+    fixArity(node)
+    return node
 }
 
-export function infixCompound(token: Token, children: Term[], name?:string){
-    let node =  new TermImpl(
+export function infixCompound(token: Token, children: Term[], name?: string) {
+    let node = new TermImpl(
         "atom",
         token,
         children,
         children[0].startToken,
         children[children.length - 1].endToken
     )
-    fixArity(node);
-    return node;
+    fixArity(node)
+    return node
 }
 /**
  * clause 
  */
-export class Clause {
-    startToken: Token
-    endToken: Token
-    name: string
-	calleeNode?: Term
-    calledNodes:RefTerm[]=[]
-    search(pos: Position) {
-        return search(this.term,pos);
-    }
-    range() {
-        if (this.term && this.end) {
-            return StartEndTokenToRange(this.term.startToken, this.end)
-        }
-        else if (this.term) {
-            return StartEndTokenToRange(this.term.startToken, this.term.endToken)
-        }
-        // else if(this.end)
-        return StartEndTokenToRange(this.end!, this.end!)
-    }
+
+export class Clause extends TermImpl {
     term: Term
     end: Token
-    token
-    varmap: MultiMap<string, Term>
-    constructor(term: Term, end: Token,varmap: MultiMap<string, Term> ) {
+    varMap: MultiMap<string, Term>
+    callee?: Term
+    called = new Array<Term>()
+    calledNodes: any
+    calleeNode?: Term
+    constructor(term: Term, end: Token, varmap: MultiMap<string, Term>) {
+        super("$clause",end,[term],term.startToken,end);
         this.term = term
         this.end = end
-        this.token = this.end
-        this.startToken = term.startToken
-        this.endToken = end
-        this.name = "clause"
-        this.varmap = varmap
-        for (const [,varTerms] of varmap.entriesGroupedByKey()) {
-            varTerms.forEach(v =>v.clause = this);
+        this.varMap = varmap
+        for (const [, varTerms] of varmap.entriesGroupedByKey()) {
+            varTerms.forEach(v => v.clause = this)
         }
-        term.index = 0;
+        this.syntaxType = "$clause"
     }
-    toString(){
-        return this.term.toString()+".";
+
+    syntaxType: SyntaxType
+    toString() {
+        return this.term.toString() + "."
     }
+}
+
+export class RootNode extends TermImpl {
+    constructor(clauses:Clause[]){
+        let token:Token = {
+            type:"EOF",
+            line:0,
+            col:0,
+            value:"",
+            text:"",
+            offset:-1,
+            lineBreaks:0
+        }
+        super("$rootNode",token,clauses)
+    }
+    declare args:Clause[]
+    
 }
 /**
  * 将 startToken 和 endToken 转化为 Range
@@ -242,7 +263,7 @@ export class Clause {
  * @param endToken endToken提供Range.end
  * @returns Range
  */
-export function StartEndTokenToRange(startToken: Token, endToken: Token):Range {
+export function StartEndTokenToRange(startToken: Token, endToken: Token): Range {
     return {
         start: {
             line: startToken.line - 1,
@@ -263,16 +284,16 @@ export function StartEndTokenToRange(startToken: Token, endToken: Token):Range {
  * @param range 
  * @returns 
  */
-function positionInRange(position:Position,range:Range){
+function positionInRange(position: Position, range: Range) {
     if (range.start.line > position.line
         || (range.start.line == position.line && range.start.character > position.character)) {
-        return false;
+        return false
     }
     else if (range.end.line < position.line
         || (range.end.line == position.line && range.end.character <= position.character)) {
-        return false;
+        return false
     }
-    return true;
+    return true
 }
 
 
@@ -281,7 +302,7 @@ function positionInRange(position:Position,range:Range){
  * @param term term
  * @returns 
  */
-export function termRange(term: Term):Range {
+export function termRange(term: Term): Range {
     return StartEndTokenToRange(term.startToken, term.endToken)
 }
 
@@ -290,10 +311,10 @@ export function termRange(term: Term):Range {
  * 每一个 state variable 例如 !X 语义上占两个参数位置
  * @param term 
  */
-function fixArity(term:Term){
+function fixArity(term: Term) {
     for (const arg of term.args) {
-        if(arg.name == "!" && arg.arity==1&&arg.args[0].token.type=="variable"){
-            term.arity++;
+        if (arg.name == "!" && arg.arity == 1 && arg.args[0].token.type == "variable") {
+            term.arity++
         }
     }
 }
@@ -303,30 +324,30 @@ function fixArity(term:Term){
  * @param position postition to find a term
  * @returns  term at the postion or undefined
  */
-function search(term: Term | undefined, position: Position): Term | undefined {
-    switch(term?.syntaxType){
-        case "atom":{
-            let token_range = tokenRange(term.token);
-            if(positionInRange(position,token_range)){
-                return term;              
+export function search(term: Term | undefined, position: Position): Term | undefined {
+    switch (term?.syntaxType) {
+        case "atom": {
+            let token_range = tokenRange(term.token)
+            if (positionInRange(position, token_range)) {
+                return term
             }
             for (const arg of term.args) {
-                let res = search(arg,position);
-                if(res) return res;
+                let res = search(arg, position)
+                if (res) return res
             }
         }
         case "float":
         case "implementation_defined":
         case "integer":
         case "string":
-        case "variable":{
+        case "variable": {
             let term_range = termRange(term)
-            if(positionInRange(position,term_range)){
-               return term 
+            if (positionInRange(position, term_range)) {
+                return term
             }
-            return undefined;
+            return undefined
         }
-    } 
+    }
 }
 /**
  * 把term转换成string
@@ -334,25 +355,20 @@ function search(term: Term | undefined, position: Position): Term | undefined {
  * @param depth 当前打印args的深度
  * @returns 
  */
-function termToString(term: Term,depth:number=1) {
-    if(depth>3){
-        return " ... ";
+function termToString(term: Term, depth: number = 1) {
+    if (depth > 3) {
+        return " ... "
     }
-    switch(term.syntaxType){
-        case 'atom':{
-            if(term.args.length == 0){
-                return term.name;
+    switch (term.syntaxType) {
+        case 'atom': {
+            if (term.args.length == 0) {
+                return term.name
             }
-            let argsString  = term.args.map(x=>x.toString(depth+1)).join(', ')
+            let argsString = term.args.map(x => x.toString(depth + 1)).join(', ')
             return `${term.name}(${argsString})`
         }
-        case 'string':
-        case 'variable':
-        case 'integer':
-        case 'float':
-        case 'implementation_defined':{
-            return term.name;
-        }
+        default:
+            return  term.name
     }
 }
 
