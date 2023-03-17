@@ -59,8 +59,7 @@ export async function activate(context: ExtensionContext) {
     bar.text = "Mercury";
     bar.show();
     bar.command ="Mercury.statusBar";
-    client.start();
-    await client.onReady()
+    await client.start()
     vscode.commands.registerCommand(bar.command,()=>{
         client.sendNotification('$/status/click');
     })

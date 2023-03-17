@@ -17,30 +17,41 @@ import {
     WorkspaceFolder,                                     
     CallHierarchyPrepareRequest,
     CallHierarchyIncomingCallsRequest,
-    CallHierarchyOutgoingCallsRequest
+    CallHierarchyOutgoingCallsRequest,
+    FileChangeType,
+    InitializedParams,
+    CancellationToken,
+    CancellationTokenSource,
+    HandlerResult,
+    TextDocumentIdentifier,
+    RequestHandler,
+    ResponseError,
+    LSPErrorCodes
 } from 'vscode-languageserver/node';
 
 import {
     TextDocument
 } from 'vscode-languageserver-textdocument';
-import {Parser} from './parser'
+import {Parser} from './mercury-parser'
 import { Document } from './document'
 import { Term, Clause } from './term'
 import {URI,Utils}from "vscode-uri"
 import fs = require("fs")
 import path = require('path')
-import { documentMap } from './globalSpace'
 import { DefinitionProvider } from './provide-definition'
 import { DeclarationProvider } from './provide-declaration'
 import { incomingCallsProvider, outgoingCallsProvider, prepareCallHierarchyProvider } from './provide-callHierarchy'
 import { ReferenceProvider } from './provide-reference'
 import { HoverProvider } from './provide-hover'
 import { DocumentSymbolProvider } from './provide-documentSymbol'
-import { mutex } from './promise-util'
+import { MutexLock, isOperationCancelled } from './promise-util'
 import { documentBuilder } from './document-builder'
+import { DocumentState, mercuryDocuments } from './document-manager'
+import { stream } from './stream'
 // Create a connection for the server, using Node's IPC as a transport.
 // Also include all preview / proposed LSP features.
-const connection = createConnection(ProposedFeatures.all);
+export const connection = createConnection(ProposedFeatures.all);
+export const mutex = new MutexLock;
 
 // Create a simple text document manager.
 export const textDocuments: TextDocuments<TextDocument> = new TextDocuments(TextDocument);
@@ -48,8 +59,8 @@ export const textDocuments: TextDocuments<TextDocument> = new TextDocuments(Text
 let hasConfigurationCapability = false;
 let hasWorkspaceFolderCapability = false;
 let hasDiagnosticRelatedInformationCapability = false;    
-let workspaceFolders:WorkspaceFolder[]|null;
-connection.onInitialize((params: InitializeParams) => {
+let workspaceFolders:WorkspaceFolder[]|null|undefined;
+function onInitialize(params: InitializeParams) {
     
     workspaceFolders = params.workspaceFolders;
 
@@ -92,9 +103,9 @@ connection.onInitialize((params: InitializeParams) => {
         };
     }
     return result;
-});
+};
 
-connection.onInitialized(async() => {
+function onInitialized(params:InitializedParams){
     if (hasConfigurationCapability) {
         // Register for all configuration changes.
         connection.client.register(DidChangeConfigurationNotification.type, undefined);
@@ -104,30 +115,30 @@ connection.onInitialized(async() => {
             connection.console.log('Workspace folder change event received.');
         });
     }
-});
+    
+};
 connection.onNotification("$/validateWorkspaceTextDocuments",async()=>{
-    validateWorkspaceTextDocuments()
+    initializeWorkspace()
 })
-async function validateWorkspaceTextDocuments() {
+async function initializeWorkspace() {
+    connection.sendNotification("$/statusBar/text","initializing");
     let file_count = 0;
-    let workspaceFolder = workspaceFolders?workspaceFolders[0]:undefined;
-    if(!workspaceFolder) return undefined;
-
-    let rootPath = URI.parse(workspaceFolder.uri).fsPath;
+    let folders = workspaceFolders??[]
+    // await Promise.all(
+    //     folders.map(wf =>[wf,URI.parse(wf.uri)])
+    //     .map(async entry=>traverseFolder(...entry ,fileExtenstions ,coll))
+    // )
+    let rootPath = URI.parse(folders[0].uri).fsPath;
     let filenames = fs.readdirSync(rootPath);
     let file_number = filenames.length;
-    for (const file_name of filenames) {
-        if(path.extname(file_name) !=".m") continue;
-        let file_path = path.join(rootPath,file_name);
-        let file_uri_string = URI.file(file_path).toString();
-        let file_content = fs.readFileSync(file_path).toString();
-        let file_textDocument = TextDocument.create(file_uri_string,"mercury",1,file_content)
-        await validateTextDocument(file_textDocument);
-        file_count++;
-        connection.sendNotification("$/statusBar/text",`Cached files: ${file_count}/${file_number}`);
-    }
+    let docs = stream(filenames).filter(filename=>path.extname(filename) ==".m")
+    .map(filename=>mercuryDocuments.getOrCreateDocument( URI.file(path.join(rootPath,filename))))
+    .toArray()
+    let mutex = new MutexLock;
+    mutex.lock(token =>documentBuilder.build(docs,token))
+
     connection.sendNotification("$/statusBar/text","Mercury");
-    connection.sendNotification("$/statusBar/tooltip",{cached:documentMap.size,usage:process.memoryUsage.rss()/1000000});
+    connection.sendNotification("$/statusBar/tooltip",{cached:mercuryDocuments.size,usage:process.memoryUsage.rss()/1000000});
 
 }
 // The example settings     
@@ -174,35 +185,8 @@ function getDocumentSettings(resource: string): Thenable<ExampleSettings> {
     }
     return result;
 }
-// Only keep settings for open documents
-textDocuments.onDidClose(e => {
-    documentSettings.delete(e.document.uri);
-});
-
-// The content of a text document has changed. This event is emitted
-// when the text document first opened or when its content has changed.
-textDocuments.onDidChangeContent(change => {
-    let changed = URI.parse(change.document.uri);
-    mutex.lock(token=>documentBuilder.update([changed],[],token))
-});
 
 
-connection.onDocumentSymbol(DocumentSymbolProvider);
-connection.onHover(HoverProvider);
-connection.onDefinition(DefinitionProvider);
-connection.onReferences(ReferenceProvider);
-connection.onImplementation(DefinitionProvider);
-connection.onDeclaration(DeclarationProvider);
-connection.onImplementation(DefinitionProvider);
-// connection.onTypeDefinition(TypeDefinitionProvider);
-connection.onRequest(CallHierarchyPrepareRequest.method,prepareCallHierarchyProvider);
-connection.onRequest(CallHierarchyIncomingCallsRequest.method,incomingCallsProvider);
-connection.onRequest(CallHierarchyOutgoingCallsRequest.method,outgoingCallsProvider);
-
-connection.onDidChangeWatchedFiles(_change => {
-    // Monitored files have change in VSCode
-    connection.console.log('We received an file change event');
-});
 
 // This handler provides the initial list of the completion items.
 connection.onCompletion(
@@ -242,27 +226,15 @@ connection.onCompletionResolve(
 
 
 
-// Make the text document manager listen on the connection
-// for open, change and close text document events
-textDocuments.listen(connection);
 
-// Listen on the connection
-connection.listen();
-
-function isNewVersion(textDocument: TextDocument) {
-    let old_doc =documentMap.get( textDocument.uri)
-    if(!old_doc) 
-        return true;
-    if(textDocument.version> old_doc.version) 
-        return true;
-    return false;
-}
-interface defTerm extends Term{
-    clause:Clause
-}
-interface refTerm extends Term{
-    clause:Clause
-}
+// function isNewVersion(textDocument: TextDocument) {
+//     let old_doc =documentMap.get( textDocument.uri)
+//     if(!old_doc) 
+//         return true;
+//     if(textDocument.version> old_doc.version) 
+//         return true;
+//     return false;
+// }
 
 // async function validateTextDocument(textDocument: TextDocument): Promise<void> {
 //     // In this simple example we get the settings for every validate run.
@@ -284,4 +256,71 @@ interface refTerm extends Term{
 //     connection.sendNotification("$/statusBar/tooltip",{cached:documentMap.size,usage:process.memoryUsage.rss()/1000000});
 // }
 
+function addDocumentHander(){
+    function onDidChange(changed:URI[],deleted:URI[]){
+        mutex.lock(token=>documentBuilder.update(changed,deleted,token));
+    }
+    textDocuments.onDidChangeContent(change => {
+        onDidChange([URI.parse(change.document.uri)],[])
+    });
+    connection.onDidChangeWatchedFiles(params => {
+        const changedUris: URI[] = [];
+        const deletedUris: URI[] = [];
+        for (const change of params.changes) {
+            const uri = URI.parse(change.uri);
+            if (change.type === FileChangeType.Deleted) {
+                deletedUris.push(uri);
+            } else {
+                changedUris.push(uri);
+            }
+        }
+        onDidChange(changedUris, deletedUris);
+    });
+    connection.onDidChangeWatchedFiles(params => {
+        const changedUris = params.changes.filter(e => e.type !== FileChangeType.Deleted).map(e => URI.parse(e.uri));
+        const deletedUris = params.changes.filter(e => e.type === FileChangeType.Deleted).map(e => URI.parse(e.uri));
+        onDidChange(changedUris, deletedUris);
+    });
+}
 
+function  cancelableRequest<P extends { textDocument: TextDocumentIdentifier }, R, E = void>(
+    serviceCall: ( params: P, cancelToken: CancellationToken) => HandlerResult<R, E>
+): RequestHandler<P, R | null, E> {
+    return async (params: P, cancelToken: CancellationToken)=>{
+        try {
+            return await serviceCall(params, cancelToken);
+        } catch (err) {
+            return responseError<E>(err);
+    }
+    }
+}
+function responseError<E = void>(err: unknown): ResponseError<E> {
+    if (isOperationCancelled(err)) {
+        return new ResponseError(LSPErrorCodes.RequestCancelled, 'The request has been cancelled.');
+    }
+    if (err instanceof ResponseError) {
+        return err;
+    }
+    throw err;
+}
+
+connection.onInitialize(params=>onInitialize(params))
+connection.onInitialized(params=>onInitialized(params))
+addDocumentHander()
+    // Only keep settings for open documents
+textDocuments.onDidClose(e => {documentSettings.delete(e.document.uri);});
+connection.onDocumentSymbol(cancelableRequest(DocumentSymbolProvider));
+connection.onHover(cancelableRequest(HoverProvider));
+connection.onDefinition(cancelableRequest(DefinitionProvider));
+connection.onReferences(cancelableRequest(ReferenceProvider));
+connection.onImplementation(cancelableRequest(DefinitionProvider));
+connection.onDeclaration(cancelableRequest(DeclarationProvider));
+connection.onImplementation(cancelableRequest(DefinitionProvider));
+// connection.onTypeDefinition(TypeDefinitionProvider);
+connection.onRequest(CallHierarchyPrepareRequest.method,cancelableRequest(prepareCallHierarchyProvider));
+connection.onRequest(CallHierarchyIncomingCallsRequest.method,incomingCallsProvider);
+connection.onRequest(CallHierarchyOutgoingCallsRequest.method,outgoingCallsProvider);
+
+
+textDocuments.listen(connection)
+connection.listen()

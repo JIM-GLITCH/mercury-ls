@@ -1,5 +1,5 @@
 import { CancellationToken, Diagnostic, DiagnosticSeverity } from 'vscode-languageserver'
-import { MercuryDocument } from './documents'
+import { MercuryDocument } from './document-manager'
 import { stream } from './stream'
 import { equalQualified, moduleManager } from './document-moduleManager'
 import { label } from './document-visitor'
@@ -27,7 +27,7 @@ export interface Linker {
 
 export class DefaultLinker implements Linker{
     errors = [] as Diagnostic[]
-    async link(document: MercuryDocument, cancelToken = CancellationToken.None ) {
+    async link(document: MercuryDocument, cancelToken:CancellationToken ) {
         let importedSymbolMap = stream(document.visitResult!.imports)
             .map(importTerm =>{
                 let targetDoc = moduleManager.get(importTerm);

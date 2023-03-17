@@ -1,12 +1,12 @@
 import { TextDocument } from 'vscode-languageserver-textdocument'
 import { URI } from 'vscode-uri'
-import { ParseResult, Parser } from './parser'
+import { ParseResult, Parser } from './mercury-parser'
 import { Clause, Term } from './term'
 import { textDocuments } from './server'
 import { readFileSync } from 'fs'
 import { Stream, stream } from './stream'
 import { VisitResult } from './document-visitor'
-import { Diagnostic } from 'vscode-languageserver'
+import { Diagnostic, Position } from 'vscode-languageserver'
 
 export enum DocumentState {
     /**
@@ -52,6 +52,7 @@ export enum DocumentState {
     Validated 
 }
 export interface MercuryDocument{
+
     importedByDocs: MercuryDocument[]
     
     /** The Uniform Resource Identifier (URI) of the document */
@@ -180,7 +181,6 @@ export class DefaultMercuryDocumentFactory implements MercuryDocumentFactory{
 
         document.parseResult = this.parse(document.uri,text);
         document.parseResult.value.document = document;
-        document.state = DocumentState.Parsed;
         return document
     }
     protected createTextDocumentGetter(uri:URI,text?:string){
@@ -251,6 +251,9 @@ export interface MercuryDocuments {
 
 export class DefaultMercuryDocuments implements MercuryDocuments{
     protected readonly documentMap:Map<string,MercuryDocument>= new Map()
+    get size(){
+        return this.documentMap.size
+    }
     get all(): Stream<MercuryDocument>{
         return stream(this.documentMap.values())
     }

@@ -1,10 +1,9 @@
 import type{ Diagnostic, Range } from 'vscode-languageserver'
-import type{  } from './parser'
-import type{ Token } from './lexer'
+import type{  } from './mercury-parser'
+import type{ Token } from './mercury-lexer'
 import type{ Document } from './document'
 import{ RootNode, Term, termRange } from './term'
-import { documentMap, moduleMap } from './globalSpace'
-import { MercuryDocument } from './documents'
+import { MercuryDocument } from './document-manager'
 
 export function errorToken(message:string,token:Token,ps:{errors:Diagnostic[]}) {
     let range = tokenRange(token);
@@ -55,12 +54,7 @@ export function sameArity(term1:Term,term2:Term){
 export function sameSemanticType(term1:Term,term2:Term){
     return term1.semanticType == term2.semanticType;
 }
-export function sameModule(term1:Term,term2:Term){
-    return term1.module == term2.module;
-}
-export function  moduleToDocument(module:string) {
-    return moduleMap.get(module)
-}
+
 
 export function getDocument(node: Term): MercuryDocument {
     const rootNode = findRootNode(node);

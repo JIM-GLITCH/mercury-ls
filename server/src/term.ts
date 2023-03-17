@@ -1,12 +1,12 @@
 // type term = functor|variable
 
 import { Location, Position, Range } from 'vscode-languageserver'
-import { Token } from './lexer'
+import { Token } from './mercury-lexer'
 import { MultiMap } from './multimap'
 import { SemanticType } from "./document-visitor"
 import { tokenRange } from './utils'
 import { Document, RefTerm } from './document'
-import { MercuryDocument } from './documents'
+import { MercuryDocument } from './document-manager'
 
 type SyntaxType =
     "variable" |
@@ -28,10 +28,6 @@ export interface Term {
      * The index in args in the container 
      * */
     containerIndex?: number
-    /**
-     * term 是哪一个module里定义的 find definition reference 时用到
-     */
-    module?: string
     /**
      * syntaxType
      */
@@ -219,11 +215,9 @@ export function infixCompound(token: Token, children: Term[], name?: string) {
 export class Clause extends TermImpl {
     term: Term
     end: Token
-    varMap: MultiMap<string, Term>
+    varMap: MultiMap<string, Term>= new MultiMap()
     callee?: Term
     called = new Array<Term>()
-    calledNodes: any
-    calleeNode?: Term
     constructor(term: Term, end: Token, varmap: MultiMap<string, Term>) {
         super("$clause",end,[term],term.startToken,end);
         this.term = term
@@ -326,6 +320,28 @@ function fixArity(term: Term) {
  */
 export function search(term: Term | undefined, position: Position): Term | undefined {
     switch (term?.syntaxType) {
+        case "$rootNode":{
+            let clauses = (term as RootNode).args
+            let low = 0, high =clauses.length-1;
+            const line = position.line;
+            while (low <= high){
+                const mid = Math.floor((low + high)/2)
+                const clause = clauses[mid];
+                let clauseRange = clause.range;
+                if (clauseRange.start.line>line){
+                    high = mid-1;
+                }
+                else if(clauseRange.end.line<line){
+                    low = mid + 1;
+                }
+                else{
+                        return search(clause,position);
+
+                }
+            }
+            break;
+        }
+        case "$clause":
         case "atom": {
             let token_range = tokenRange(term.token)
             if (positionInRange(position, token_range)) {
@@ -335,6 +351,7 @@ export function search(term: Term | undefined, position: Position): Term | undef
                 let res = search(arg, position)
                 if (res) return res
             }
+            break;
         }
         case "float":
         case "implementation_defined":

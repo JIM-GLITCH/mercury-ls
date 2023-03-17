@@ -1,23 +1,23 @@
 import { Hover, HoverParams, MarkupContent } from 'vscode-languageserver'
-import { documentMap } from './globalSpace'
 import { nameArity } from './utils'
-import { termRange } from './term'
+import { search, termRange } from './term'
+import { mercuryDocuments } from './document-manager'
+import { URI } from 'vscode-uri'
 
 export async function HoverProvider(params:HoverParams) {
     let pos = params.position;
     let uri = params.textDocument.uri;
-    let term = documentMap.get(uri)?.search(pos);
-    if(!term) return;
+    let doc = mercuryDocuments.getOrCreateDocument(URI.parse(uri));
+    let  term  = search(doc.parseResult.value,pos)
+    if(!term)
+        return 
     let msg;
     if(term.semanticType){
         switch (term.semanticType){
             case 'func':
-                msg = nameArity(term)
-                break;
             case 'pred':
-                msg = nameArity(term)
-                break ;
             case 'type':
+            case "inst":
                 msg = nameArity(term)
                 break ;
             case 'module':

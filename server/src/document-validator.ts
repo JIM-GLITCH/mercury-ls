@@ -1,5 +1,5 @@
 import { CancellationToken, Diagnostic } from 'vscode-languageserver'
-import { MercuryDocument } from './documents'
+import { MercuryDocument } from './document-manager'
 import { interruptAndCheck } from './promise-util'
 import { stream } from './stream'
 
@@ -16,15 +16,15 @@ export interface DocumentValidator {
 export class DefaultDocumentValidator implements DocumentValidator {
 
 
-    async validateDocument(document: MercuryDocument, cancelToken = CancellationToken.None): Promise<Diagnostic[]> {
+    async validateDocument(document: MercuryDocument, cancelToken:CancellationToken): Promise<Diagnostic[]> {
         let parseErrors = document.parseResult.errors;
         let visitErrors = document.visitResult!.errors
         let linkeErrors = document.linkResult!.errors
-        await interruptAndCheck(cancelToken);
+        // await interruptAndCheck(cancelToken);
 
         let diagnostics = stream(parseErrors,visitErrors,linkeErrors).toArray()
 
-        await interruptAndCheck(cancelToken);
+        // await interruptAndCheck(cancelToken);
 
         return diagnostics;
     }

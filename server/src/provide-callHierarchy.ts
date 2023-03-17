@@ -1,11 +1,12 @@
 import { CallHierarchyIncomingCall, CallHierarchyIncomingCallsParams, CallHierarchyItem, CallHierarchyOutgoingCall, CallHierarchyOutgoingCallsParams, CallHierarchyPrepareParams, CancellationToken, SymbolKind } from 'vscode-languageserver'
-import { SomeSemanticType, documentMap, } from './globalSpace'
-import {  moduleToDocument, nameArity, sameArity, sameSemanticType, sleep, termTokenRange, tokenRange } from './utils'
+import {   nameArity, sameArity, sameSemanticType, sleep, termTokenRange, tokenRange } from './utils'
 import { Term, termRange } from './term'
 import { SemanticType } from "./document-visitor"
-import { DefMap, DefTerm, Document, RefTerm } from './document'
 import { stream } from './stream'
 import { findDefTerms, findAtTextDocumentPositionTerm, uriTerm } from './provide-definition'
+import { MercuryDocument, mercuryDocuments } from './document-manager'
+import { equalQualified, moduleManager } from './document-moduleManager'
+import { URI } from 'vscode-uri'
 /**
  * find definition term as the callheirarchyItem
  * @param params 
@@ -21,15 +22,16 @@ export async function prepareCallHierarchyProvider(params:CallHierarchyPreparePa
 }
 
 export async function outgoingCallsProvider(params:CallHierarchyOutgoingCallsParams):Promise<CallHierarchyOutgoingCall[]>{
-    let {item:{uri,selectionRange:{start:position}}} = params;
-    let res = await findAtTextDocumentPositionTerm({textDocument:{uri},position});
+    let {item:{uri:uriString,selectionRange:{start:position}}} = params;
+    let uri = URI.parse(uriString)
+    let res = await findAtTextDocumentPositionTerm({textDocument:{uri:uriString},position});
     if(!res) return [];
-    let term = res.term as DefTerm
+    let term = res.term
     if (term.semanticType == "module"){
         return findModuleOutgoingCalls(res)
     }
     return findDefTerms(uriTerm.create(uri,term))
-        .map(x=>(x.term as DefTerm).clause.calledNodes)
+        .map(x=>(x.term.clause?.called??[]))
         .flat()
         .map(ref =>uriTermToCallHierarchyOutgoingCall({uri,term:ref}))
         .nonNullable().toArray()
@@ -47,10 +49,10 @@ export async function incomingCallsProvider(params:CallHierarchyIncomingCallsPar
     if(term.semanticType == "module"){
         return findModuleIncmoingCalls(res)
     }
-    return  stream(documentMap.values())
+    return  stream(mercuryDocuments.all)
     .map(doc =>{
         let uri = doc.uri
-        return stream(doc.refMap.get(term.name)).map(x=>({uri,term:x}))
+        return stream(doc.visitResult?.reference.get(term.name)??[]).map(x=>({uri,term:x}))
     })
     .flat()
     .map(x=>uriTermToCallHierarchyIncomingItem(x)).toArray()
@@ -73,12 +75,12 @@ function SemanticTypeToSymbolKind(semanticType?: SemanticType ): SymbolKind {
             return SymbolKind.Function
     }
 }
-function findRefTermInDocument(semanticType:SomeSemanticType,term:Term,document:Document){
-    let uri = document.uri
-    let terms = document.defMap[semanticType].get(term.name);
-    let refterms = stream(terms)
+function findRefTermInDocument(term:Term,document:MercuryDocument){
+    let uri = document.uri.toString()
+    let terms = document.visitResult?.reference.get(term.name);
+    let refterms = stream(terms??[])
     .filter(x=>sameArity(x,term))
-    .map(x=>x.clause.calledNodes)
+    .map(x=>x.clause?.called??[])
     .flat()
     .map(x =>({
         uri,
@@ -93,7 +95,7 @@ function uriTermToCallHierarchyItem(params: uriTerm):CallHierarchyItem {
     return {
         name :nameArity(term),
         kind :SemanticTypeToSymbolKind(term.semanticType),
-        uri,
+        uri:uri.toString(),
         range:termRange(term),
         selectionRange:termTokenRange(term)
     }
@@ -102,7 +104,7 @@ function uriTermToCallHierarchyItem(params: uriTerm):CallHierarchyItem {
 function uriTermToCallHierarchyIncomingItem(params: uriTerm):CallHierarchyIncomingCall {
     let {term,uri} = params;
     return {
-        from:uriTermToCallHierarchyItem({uri ,term:term.clause!.calleeNode!}),
+        from:uriTermToCallHierarchyItem({uri ,term:term.clause!.callee!}),
         fromRanges:[termTokenRange(term)]
     }
 }
@@ -118,24 +120,29 @@ function uriTermToCallHierarchyOutgoingCall(uriTerm: uriTerm):CallHierarchyOutgo
 }
 
 function findModuleOutgoingCalls({ uri, term}:uriTerm): CallHierarchyOutgoingCall[]  {
-    let document = moduleToDocument(term.name)!;
-    return stream(document.importModules.values())
-        .concat(document.includeModules.values())
-        .map(x=>uriTermToCallHierarchyOutgoingCall({uri,term:x}))
+    let document = moduleManager.get(term);
+    if(!document)
+        return []
+    return stream(document.visitResult?.imports??[])
+        .map(x=>moduleManager.get(x)?.visitResult?.module)
+        .nonNullable()
+        .map(moduleTerm=>uriTermToCallHierarchyOutgoingCall({uri,term:moduleTerm}))
         .nonNullable().toArray()
 }
 
-function findModuleIncmoingCalls(uriTerm: { uri: string; term: Term }) {
+function findModuleIncmoingCalls(uriTerm: { uri: URI; term: Term }) {
     let {uri,term} = uriTerm;
-    
-    return stream(documentMap.values()).map(doc =>{
-        let calleeTerm = doc.moduleDefMap.get(term.name);
-        if(calleeTerm ){
+    let doc = mercuryDocuments.getOrCreateDocument(uri)
+    let candidates = doc.importedByDocs
+    let res =  stream(candidates).map(candidateDoc =>{
+        let module = candidateDoc.visitResult?.module
+        if(module){
             return {
-                from:uriTermToCallHierarchyItem({uri: doc.uri, term:calleeTerm}),
-                fromRanges:[stream(doc.refMap.get(term.name)).map(termTokenRange).head()!]
+                from:uriTermToCallHierarchyItem({uri: doc.uri, term:module}),
+                fromRanges:[termTokenRange(doc.visitResult?.imports.find(x=>equalQualified(x,term))!)]
             }
         }
-    }).nonNullable().toArray()
+    }).nonNullable()
+    return res
 }
 

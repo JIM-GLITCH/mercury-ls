@@ -1,11 +1,10 @@
 import { DeclarationParams, Location } from 'vscode-languageserver'
-import { SomeSemanticType, documentMap } from './globalSpace'
 import {  sameArity, sameSemanticType, sleep, termTokenRange } from './utils'
 import { Term, termRange } from './term'
 import { stream } from './stream'
-import { DefinitionProvider, findAtTextDocumentPositionTerm } from './provide-definition'
+import { DefinitionProvider, findAtTextDocumentPositionTerm, uriTerm } from './provide-definition'
 import { moduleManager } from './document-moduleManager'
-import { mercuryDocuments } from './documents'
+import { mercuryDocuments } from './document-manager'
 import { URI } from 'vscode-uri'
 
 export async function DeclarationProvider(params:DeclarationParams) {
@@ -24,7 +23,7 @@ export async function DeclarationProvider(params:DeclarationParams) {
         if(!doc)
             return []
         let defTerm = doc.visitResult!.module!
-        return [uriTermToLocation({uri:doc.uri.toString(),term:defTerm})]
+        return [uriTermToLocation({uri:doc.uri,term:defTerm})]
 
     }
     /* 如果有module属性 在 module里查找 */
@@ -32,7 +31,7 @@ export async function DeclarationProvider(params:DeclarationParams) {
         let doc  =  moduleManager.get(term.qualified)
         if(!doc)
             return [];
-        let uri = doc.uri.toString()
+        let uri = doc.uri
         let candidates  =  doc.visitResult?.exports.get(term.name)
         if(candidates){
             let res = stream(candidates).filter(x=>sameArity(x,term))
@@ -42,7 +41,7 @@ export async function DeclarationProvider(params:DeclarationParams) {
     }
     /* 在本文件查找 */
     let uri = uriTerm.uri;
-    let doc  = mercuryDocuments.getOrCreateDocument(URI.parse(uri));
+    let doc  = mercuryDocuments.getOrCreateDocument(uri);
     let candidates = doc.visitResult!.declaration.get(term.name);
     let res = stream(candidates)
         .filter(x=>sameArity(x,term))
@@ -62,10 +61,10 @@ export async function DeclarationProvider(params:DeclarationParams) {
     //     })
 }
 
-function uriTermToLocation(uriTerm: { uri: string; term: Term}) {
+function uriTermToLocation(uriTerm: uriTerm) {
     let {uri,term} = uriTerm;
     return Location.create(
-        uri,
+        uri.toString(),
         termTokenRange(term)
     )
 }

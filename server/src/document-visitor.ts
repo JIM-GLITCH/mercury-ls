@@ -1,8 +1,8 @@
 import { CancellationToken, Diagnostic, DiagnosticSeverity } from 'vscode-languageserver'
-import { MercuryDocument } from './documents'
+import { MercuryDocument } from './document-manager'
 import { MultiMap } from './multimap'
 import { TreeStreamImpl, stream } from './stream'
-import { Clause, RootNode, Term } from './term'
+import { Clause, RootNode, Term, termRange } from './term'
 import { sameArity } from './utils'
 import { interruptAndCheck } from './promise-util'
 export interface Vistor {
@@ -27,7 +27,7 @@ export class Visitor {
     reference = new MultiMap<string, Term>()
     declaration = new MultiMap<string, Term>()
     export= new MultiMap<string, Term>()
-    visit(doc: MercuryDocument, cancelToken: CancellationToken) {
+    async visit(doc: MercuryDocument, cancelToken: CancellationToken) {
         let rootNode = doc.parseResult.value
         for (const clause of rootNode.args) {
             interruptAndCheck(cancelToken)
@@ -206,26 +206,26 @@ export class Visitor {
         label(term,"integer")
     }
     visitSpecialDataTerm(term: Term) {
-        switch (term.semanticType as SpecialDataTerm){
-            case 'conditional':
-                this.visitRuleBody(term.args[0])
-                this.visitRuleBody(term.args[1])
-                break
-            case 'record':
-                this.visitRecord(term)
-                break
-            case 'apply':
-                this.visitApply(term)
-                break
-            case 'lambda':
-                this.visitLambda(term);
-                break
-            case 'unification':
-                this.visitUnification(term)
-                break
-            case 'explicitType':
-                this.visitExpliciType(term)
-        }
+        // switch (term.semanticType as SpecialDataTerm){
+        //     case 'conditional':
+        //         this.visitRuleBody(term.args[0])
+        //         this.visitRuleBody(term.args[1])
+        //         break
+        //     case 'record':
+        //         this.visitRecord(term)
+        //         break
+        //     case 'apply':
+        //         this.visitApply(term)
+        //         break
+        //     case 'lambda':
+        //         this.visitLambda(term);
+        //         break
+        //     case 'unification':
+        //         this.visitUnification(term)
+        //         break
+        //     case 'explicitType':
+        //         this.visitExpliciType(term)
+        // }
     }
     visitExpliciType(term: Term) {
         this.visitDataFunctor(term.args[0])
@@ -415,90 +415,93 @@ export class Visitor {
         term.clause = this.currentClause
         this.currentClause.varMap.add(term.name, term)
     }
-    addReference(term: Term) {
-        this.reference.add(term.name, term)
-    }
+
 
     visitFuncRuleHead(term: Term) {
         let [func, funcReturn] = term.args
-        this.visitFunc(func)
+        this.visitFuncDef(func)
         this.visitFuncReturn(funcReturn)
         this.currentClause.callee = func
+    }
+    visitFuncDef(func: Term) {
+        label(func,"func")
+        this.addDefinition(func)
     }
     visitFuncReturn(funcReturn: Term) {
         // throw new Error('Method not implemented.')
     }
 
-    visitFunc(func: Term) {
-        func.semanticType = 'func'
-    }
-    addDefinition(term: Term) {
-        this.definition.add(term.name, term)
+    visitFuncDeclFunc(func: Term) {
+        label(func,"func")
+        this.addDeclaration(func)
     }
 
+
     visitDecl(term: Term) {
-        let decl = term.args[0]
-        switch (decl.nameArity) {
+
+        switch (term.nameArity) {
             case "pred/1":
-                this.visitPredDecl(decl.args[0])
+                this.visitPredDecl(term.args[0])
                 break
             case "func/1":
-                this.visitFuncDecl(decl.args[0])
+                this.visitFuncDecl(term.args[0])
                 break
             case "use_module/1":
-                this.visitUseModuleDecl(decl.args[0])
+                this.visitUseModuleDecl(term.args[0])
                 break
             case "import_module/1":
-                this.visitImportModuleDecl(decl.args[0])
+                this.visitImportModuleDecl(term.args[0])
                 break
             case "include_module/1":
-                this.visitIncludeModuleDecl(decl.args[0])
+                this.visitIncludeModuleDecl(term.args[0])
                 break
             case "module/1":
-                this.visitModuleDecl(decl.args[0])
+                this.visitModuleDecl(term.args[0])
                 break
             case "end_module/1":
-                this.visitEndModuleDecl(decl.args[0])
+                this.visitEndModuleDecl(term.args[0])
                 break
             case "type/1":
-                this.visitTypeDecl(decl.args[0])
+                this.visitTypeDecl(term.args[0])
                 break
             case "interface/0":
-                this.visitInterfaceDecl(decl)
+                this.visitInterfaceDecl(term)
                 break
             case "implemtation/0":
-                this.visitImplementationDecl(decl)
+                this.visitImplementationDecl(term)
                 break
             case "solver/1":
-                let arg = decl.args[0]
+                let arg = term.args[0]
                 if (nameArity(arg, 'type/1')) {
                     // this.visitSolverType(decl)
                 }
                 break
             case "inst/1":
-                this.visitInstDecl(decl)
+                this.visitInstDecl(term.args[0])
                 break
             case "mode/1":
-                this.visitModeDecl(decl)
+                this.visitModeDecl(term.args[0])
                 break
             case "typesclass/1":
-                this.visitTypeclassDecl(decl)
+                this.visitTypeclassDecl(term)
                 break
             case "pragma/1":
-                this.visitPragmaDecl(decl)
+                this.visitPragmaDecl(term)
                 break
             case "promise/1":
-                this.visitPromiseDecl(decl)
+                this.visitPromiseDecl(term)
                 break
             case "initialise/1":
-                this.visitInitialiseDecl(decl)
+                this.visitInitialiseDecl(term)
                 break
             case "finalise/1":
-                this.visitFinaliseDecl(decl)
+                this.visitFinaliseDecl(term)
                 break
             case "mutable/1":
-                this.visitMutableDecl(decl)
+                this.visitMutableDecl(term)
                 break
+            case "<=/2":
+                this.visitDecl(term.args[0])
             default:
                 break
         }
@@ -516,18 +519,20 @@ export class Visitor {
             this.visitTypeName(term.args[0])
             this.visitTypeConstrutor(term.args[1])
         }
-        // Abstract types
-        this.visitTypeName(term)
+        else{
+            // Abstract types
+            this.visitTypeName(term)
+        }
     }
     visitTypeConstrutors(term: Term) {
-        let list = stream(SmicolonBinaryTermToList(term))
+        let list = stream(semicolonBinaryTermToList(term))
         list.forEach(x => {
             this.visitTypeConstrutor(x)
-            this.addDefinition(x)
         })
     }
     visitTypeConstrutor(term: Term) {
-        term.semanticType == "type"
+        label(term,"type")
+        this.addDefinition(term)
     }
     visitTypeNameOrSubtype(term: Term) {
         if (nameArity(term, "=</2")) {
@@ -542,24 +547,14 @@ export class Visitor {
         this.tryAddExport(term)
 
     }
-    tryAddExport(term:Term){
-        if(this.section == "interface"){
-            this.addExport(term);
-        }
-    }
-    addExport(term: Term) {
-        term.qualified = this.module
-        this.export.add(term.name ,term)
-    }
+
 
     visitIncludeModuleDecl(term: Term) {
         let module = this.visitModule(term)
         this.addReference(module)
         this.addImport(module)
     }
-    addImport(module: Term) {
-        this.imports.push(module)
-    }
+
     visitImportModuleDecl(term: Term) {
         let module = this.visitModule(term)
         this.addReference(module)
@@ -574,11 +569,10 @@ export class Visitor {
        this.section == "implementation"
     }
     visitInterfaceDecl(decl: Term) {
-    this.section = "interface"
+        this.section = "interface"
     }
     visitModuleDecl(term: Term) {
         let module = this.visitModule(term)
-        this.addDefinition(module)
         if(!this.module){
             this.module= module
         } 
@@ -607,51 +601,87 @@ export class Visitor {
         }
         return term
     }
-    addError(msg: string, term: Term) {
-        this.errors.push(Diagnostic.create(
-            term.range,
-            msg,
-            DiagnosticSeverity.Error,
-            undefined,
-            'visitor'
-        ))
-    }
+
     visitMutableDecl(decl: Term) {
-        throw new Error('Method not implemented.')
+        // throw new Error('Method not implemented.')
     }
     visitFinaliseDecl(decl: Term) {
-        throw new Error('Method not implemented.')
+        // throw new Error('Method not implemented.')
     }
     visitInitialiseDecl(decl: Term) {
-        throw new Error('Method not implemented.')
+        // throw new Error('Method not implemented.')
     }
     visitPromiseDecl(decl: Term) {
-        throw new Error('Method not implemented.')
+        // throw new Error('Method not implemented.')
     }
     visitPragmaDecl(decl: Term) {
-        throw new Error('Method not implemented.')
+        // throw new Error('Method not implemented.')
     }
     visitTypeclassDecl(decl: Term) {
-        throw new Error('Method not implemented.')
+        // throw new Error('Method not implemented.')
     }
-    visitModeDecl(decl: Term) {
-        throw new Error('Method not implemented.')
+    visitModeDecl(term: Term) {
+        if(nameArity(term,"==/2")){
+                this.visitMode(term)
+        } else if (nameArity(term,"is/2")){
+            this.visitFuncOrPredModeDecl(term.args[0])
+        }
     }
-    visitInstDecl(decl: Term) {
-        throw new Error('Method not implemented.')
+    visitFuncOrPredModeDecl(term: Term) {
+        if(nameArity(term,"=/2")){
+            this.visitFuncMode(term.args[0])
+        }else{
+            this.visitPredMode(term)
+        }
+    }
+    visitPredMode(term: Term) {
+        label(term,"pred");
+    }
+    visitFuncMode(term: Term) {
+        label(term,"func");
+    }
+    visitMode(term: Term) {
+        label(term,"mode")
+    }
+    visitInstDecl(term: Term) {
+        if(nameArity(term,"==/2")){
+            this.visitInstOrForBlock(term.args[0])
+            this.visitInstOrBound(term.args[1])
+        }else if(nameArity(term,"-->/2")){
+            this.visitInstOrForBlock(term.args[0])
+            this.visitInsts(term.args[1])
+        }
+    }
+    visitInsts(term: Term) {
+        for (const inst of semicolonBinaryTermToList(term)) {
+            this.visitInst(inst)
+        }
+    }
+    visitInstOrBound(term: Term) {
+        if(nameArity(term,"bound/2")){
+            // TODO
+        }else{
+            this.visitInst(term)
+        }
+    }
+    visitInstOrForBlock(term: Term) {
+        if(nameArity(term,"for/2")){
+            this.visitInst(term.args[0])
+        }else{
+            this.visitInst(term)
+        }
+    }
+    visitInst(term: Term) {
+        label(term,"inst")
     }
     visitFuncDecl(term: Term) {
         if (nameArity(term, "=/2")) {
             let [func, ret] = term.args
-            label(term,"func")
+            this.visitFuncDeclFunc(func)
             this.visitFuncReturn(ret)
-
-            this.addDeclaration(func)
-        } else {
-
-            label(term,"func")
-            this.addDeclaration(term)
-
+        } 
+        else {
+            this.visitFuncDeclFunc(term)
         }
     }
 
@@ -667,12 +697,51 @@ export class Visitor {
             this.addDeclaration(term)
         }
     }
+    addReference(term: Term) {
+        this.reference.add(term.name, term)
+        this.addCalled(term)
+    }
     addDeclaration(term: Term) {
         this.declaration.add(term.name, term)
         this.tryAddExport(term)
+        this.addCallee(term)
+    }
+    addDefinition(term: Term) {
+        this.definition.add(term.name, term)
+        this.addCallee(term)
+    }
+    
+    addExport(term: Term) {
+        term.qualified = this.module
+        this.export.add(term.name ,term)
+    }
+    addImport(module: Term) {
+        this.imports.push(module)
+    }
+    addError(msg: string, term: Term) {
+        this.errors.push(Diagnostic.create(
+            term.range,
+            msg,
+            DiagnosticSeverity.Error,
+            undefined,
+            'visitor'
+            ))
+    }
+    addCalled(term: Term) {
+        term.clause = this.currentClause
+        this.currentClause.called.push(term)
+    }
+    addCallee(term: Term) {
+        term.clause = this.currentClause
+        this.currentClause.callee = term
+    }
+    tryAddExport(term:Term){
+        if(this.section == "interface"){
+            this.addExport(term);
+        }
     }
     visitDeterminism(determinism: Term) {
-        throw new Error('Method not implemented.')
+        // throw new Error('Method not implemented.')
     }
     visitSolverDecl(decl: Term) {
         if (decl.arity === 1 && decl.args[0].name === "type") {
@@ -680,12 +749,11 @@ export class Visitor {
         }
     }
     visitSolverTypeDecl(arg0: Term) {
-        throw new Error('Method not implemented.')
+        // throw new Error('Method not implemented.')
     }
 
 }
 
-export let visitor = new Visitor()
 
 function nameArity(term: Term, nameArity: string) {
     return term.nameArity == nameArity
@@ -696,7 +764,7 @@ function name(term: Term, name: string) {
 function arity(term: Term, arity: number) {
     return term.arity === arity
 }
-function* SmicolonBinaryTermToList(term: Term) {
+function* semicolonBinaryTermToList(term: Term) {
     for (; ;) {
         if (nameArity(term, ";/2")) {
             yield term.args[0]
@@ -780,6 +848,8 @@ export type SemanticType =
     "func"|
     "pred"|
     "type"|
+    "inst"|
+    "mode"|
     "module"|
     "variable"|
     "float"|

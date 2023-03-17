@@ -7,7 +7,7 @@ export type SomeSemanticType =
     "type"
 
 
-export let documentMap = new Map<string,Document>();
+// export let documentMap = new Map<string,Document>();
 export let moduleMap = new Map<string,Document>(); 
 // export let funcMap = new MultiMapSet<string,Document>();
 // export let predMap = new MultiMapSet<string,Document>();

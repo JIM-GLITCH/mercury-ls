@@ -1,4 +1,4 @@
-import { MercuryDocument } from './documents'
+import { MercuryDocument } from './document-manager'
 import { moduleMap } from './globalSpace'
 import { MultiMap } from './multimap'
 import { Term } from './term'

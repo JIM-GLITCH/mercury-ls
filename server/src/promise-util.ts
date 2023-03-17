@@ -136,4 +136,3 @@ export class Deferred<T = void> {
         this.reject = (err) => (reject(err), this);
     });
 }
-export let mutex = new MutexLock();

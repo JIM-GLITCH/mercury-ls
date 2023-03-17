@@ -3,7 +3,7 @@ import { Term, Clause, search, } from './term'
 import { MultiMap } from './multimap'
 import { URI as URI_obj,Utils } from 'vscode-uri'
 import { TextDocument } from 'vscode-languageserver-textdocument'
-import { DocumentState } from './documents'
+import { DocumentState } from './document-manager'
 import { SemanticType } from './document-visitor'
 
 

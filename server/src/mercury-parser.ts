@@ -1,5 +1,5 @@
 import { Diagnostic } from 'vscode-languageserver'
-import { Token, TokenList, TokenType, lexer, } from './lexer'
+import { Token, TokenList, TokenType, lexer, } from './mercury-lexer'
 import { OpInfo, adjust_priority_for_assoc, lookup_infix_op, lookup_op, lookup_op_infos, max_priority } from './ops'
 import { Term, string, applyCompound, atom, backquotedapplyCompound, binPrefixCompound, Clause, float, functorCompound, implementation_defined, infixCompound, integer, negFloat, negInteger, prefixCompound, variable, RootNode } from './term'
 import { MultiMap } from './multimap'
@@ -64,7 +64,6 @@ export namespace Parser {
                 break
             }
             let clause = read_clause_from_TokenList(tokenList, ps)
-            clause.varMap = ps.varmap
             ps.varmap = new MultiMap()
             clauses.push(clause)
         }
