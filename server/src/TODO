@@ -2,7 +2,7 @@
 [X] fix toString depth 3
 [X] fix call hierarchy ranges 
 [X] module system
-[X] module call heirarchy 
+[ ] module call heirarchy 
 [ ] type system 
-[ ] fix memory leak
-[ ] fix read/2,3 io.m mercury_term_parser.m same name different module pred bug?
+[x] fix memory leak
+[x] fix read/2,3 io.m mercury_term_parser.m same name different module pred bug?
