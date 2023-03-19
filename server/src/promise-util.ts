@@ -83,7 +83,11 @@ export async function interruptAndCheck(token: CancellationToken): Promise<void>
         throw OperationCancelled;
     }
 }
-
+export async function checkCancel(token:CancellationToken){
+    if (token.isCancellationRequested) {
+        throw OperationCancelled;
+    }
+}
 /**
  * Utility class to execute mutually exclusive actions.
  */

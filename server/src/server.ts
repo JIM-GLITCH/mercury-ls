@@ -26,7 +26,10 @@ import {
     TextDocumentIdentifier,
     RequestHandler,
     ResponseError,
-    LSPErrorCodes
+    LSPErrorCodes,
+    WorkDoneProgress,
+    WorkDoneProgressCreateRequest,
+    WorkDoneProgressCancelNotification
 } from 'vscode-languageserver/node';
 
 import {
@@ -117,11 +120,33 @@ function onInitialized(params:InitializedParams){
     }
     
 };
-connection.onNotification("$/validateWorkspaceTextDocuments",async()=>{
+connection.onNotification("$/initialWorkspace",async()=>{
     initializeWorkspace()
 })
+export namespace sendBarText{
+    
+    export function initializing(){
+        return connection.sendNotification("$/statusBar/text","$(sync~spin)initializing");
+    }
+    export function Mercury(){
+        return connection.sendNotification("$/statusBar/text","Mercury");
+    }
+    export function parsing(){
+        return connection.sendNotification("$/statusBar/text","$(sync~spin)parsing");
+    }
+    export function linking(){
+        return connection.sendNotification("$/statusBar/text","$(sync~spin)linking");
+    }
+    export function validating(){
+        return connection.sendNotification("$/statusBar/text","$(sync~spin)validating");
+    }
+
+}
+export function sendMemoryUsage(){
+    return connection.sendNotification("$/statusBar/tooltip",{cached:mercuryDocuments.size,usage:process.memoryUsage.rss()/1000000});
+}
 async function initializeWorkspace() {
-    connection.sendNotification("$/statusBar/text","initializing");
+    sendBarText.initializing()
     let file_count = 0;
     let folders = workspaceFolders??[]
     // await Promise.all(
@@ -131,15 +156,14 @@ async function initializeWorkspace() {
     let rootPath = URI.parse(folders[0].uri).fsPath;
     let filenames = fs.readdirSync(rootPath);
     let file_number = filenames.length;
+    
+    sendBarText.parsing()
     let docs = stream(filenames).filter(filename=>path.extname(filename) ==".m")
     .map(filename=>mercuryDocuments.getOrCreateDocument( URI.file(path.join(rootPath,filename))))
     .toArray()
-    let mutex = new MutexLock;
-    mutex.lock(token =>documentBuilder.build(docs,token))
 
-    connection.sendNotification("$/statusBar/text","Mercury");
-    connection.sendNotification("$/statusBar/tooltip",{cached:mercuryDocuments.size,usage:process.memoryUsage.rss()/1000000});
-
+    await documentBuilder.build(docs,CancellationToken.None);
+    sendBarText.Mercury()
 }
 // The example settings     
 interface ExampleSettings {
@@ -324,3 +348,4 @@ connection.onRequest(CallHierarchyOutgoingCallsRequest.method,outgoingCallsProvi
 
 textDocuments.listen(connection)
 connection.listen()
+setInterval(()=>sendMemoryUsage(),1000)

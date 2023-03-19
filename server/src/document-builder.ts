@@ -1,15 +1,15 @@
-import { CancellationToken, Disposable, FormattingOptions } from 'vscode-languageserver'
+import { CancellationToken, Disposable, FormattingOptions, WorkDoneProgressCreateRequest } from 'vscode-languageserver'
 import { DocumentState, MercuryDocument, mercuryDocumentFactory, mercuryDocuments } from './document-manager'
 import { interruptAndCheck } from './promise-util'
 import { MultiMap } from './multimap'
 import { URI } from 'vscode-uri'
 import { validator } from './document-validator'
 import { Visitor } from './document-visitor'
-import { moduleMap } from './globalSpace'
+// import { moduleMap } from './globalSpace'
 import { equalQualified, moduleManager } from './document-moduleManager'
 import { linker } from './document-linker'
 import { stream } from './stream'
-import { connection } from './server'
+import { connection, sendBarText as changClientBarText, sendMemoryUsage } from './server'
 export type DocumentBuildListener = (built: MercuryDocument[], cancelToken: CancellationToken) => void | Promise<void>
 export type DocumentUpdateListener = (changed: URI[], deleted: URI[]) => void
 
@@ -23,28 +23,39 @@ export class DefaultDocumentBuilder{
         // 0. Parse content
         //  parsing is done initially for each document, but
         //  re-parsing after changes reported by the client might have been canceled by subsequent changes, so re-parse now
-       for (const doc of documents) {
-            mercuryDocumentFactory.update(doc);
-            let visitor = new Visitor;
-            await visitor.visit(doc,cancelToken);
-            let visitResult = doc.visitResult!
-            if(visitResult.module){
-                moduleManager.set(visitResult.module,doc);
+        for (const doc of documents) {
+            if(doc.state <DocumentState.Parsed){
+                mercuryDocumentFactory.update(doc);
+                doc.state = DocumentState.Parsed
+                await interruptAndCheck((cancelToken))
             }
-            doc.state = DocumentState.Visited;
+            if(doc.state <DocumentState.Visited){
+                let visitor = new Visitor;
+                await visitor.visit(doc,cancelToken);
+                let visitResult = doc.visitResult!
+                if(visitResult.module){
+                    moduleManager.set(visitResult.module,doc);
+                }
+                doc.state = DocumentState.Visited;
+                await interruptAndCheck((cancelToken))
+            }
         }
-
+        changClientBarText.linking()
         // 3. linking
         for (const doc of documents) {
             await linker.link(doc,cancelToken);
             doc.state = DocumentState.Linked
+            await interruptAndCheck((cancelToken))
         }
         // 4.vlaidate  
+        connection.sendNotification("$/statusBar/text","$(sync~spin)validating")
         for (const doc of documents) {
             await this.validate(doc,cancelToken);
             doc.state = DocumentState.Validated
             connection.sendDiagnostics({uri:doc.uri.toString(),diagnostics:doc.diagnostics??[]})
+            await interruptAndCheck((cancelToken))
         }
+        changClientBarText.Mercury()
     }
     async update(changed: URI[], deleted: URI[], cancelToken:CancellationToken): Promise<void> {
         let deletedDocuments = []
@@ -57,11 +68,12 @@ export class DefaultDocumentBuilder{
                 deletedDocuments.push(deletedDocument)
             }
         }
-        // for (const changedUri of changed) {
-        //     mercuryDocuments.invalidateDocument(changedUri)
-        // }
+        for (const changedUri of changed) {
+            mercuryDocuments.invalidateDocument(changedUri)
+        }
         await interruptAndCheck(cancelToken);
-        let changedDocuments = changed.map(e=>mercuryDocuments.getOrCreateDocument(e))
+        changClientBarText.parsing()
+        let changedDocuments = changed.map(uri=>mercuryDocuments.getOrCreateDocument(uri))
         let affectedDocuments = this.collectDocuments(changedDocuments,deletedDocuments)
         await this.buildDocuments(affectedDocuments,cancelToken)
     }
@@ -70,6 +82,11 @@ export class DefaultDocumentBuilder{
         .map(doc=>doc.importedByDocs)
         .flat()
         .concat(changedDocuments)
+        .concat(mercuryDocuments.all.filter(doc =>doc.state<DocumentState.Validated ))
+        .map(doc =>{
+            doc.state = Math.min(doc.state,DocumentState.Visited)
+            return doc
+        })
         .toSet()
 
         return Array.from(docSet)

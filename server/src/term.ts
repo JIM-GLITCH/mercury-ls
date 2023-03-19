@@ -311,6 +311,7 @@ function fixArity(term: Term) {
             term.arity++
         }
     }
+    term.nameArity = term.name +'/'+ term.arity
 }
 /**
  * 在term的范围内查找位置为position的term或subterm

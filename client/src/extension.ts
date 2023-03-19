@@ -72,7 +72,7 @@ mermory usage: ${msg.usage}MB
     client.onNotification("$/statusBar/text",(msg)=>{
         bar.text = msg
     })
-    client.sendNotification("$/validateWorkspaceTextDocuments");
+    client.sendNotification("$/initialWorkspace");
 
 }
 export function deactivate(): Thenable<void> | undefined {

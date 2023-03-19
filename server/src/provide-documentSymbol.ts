@@ -1,18 +1,21 @@
 import { CancellationToken, DocumentSymbol, DocumentSymbolParams, SymbolInformation, SymbolKind } from 'vscode-languageserver'
 import { nameArity, showNameArity, sleep } from './utils'
-import { termRange, StartEndTokenToRange } from './term'
+import { termRange, StartEndTokenToRange, Term } from './term'
 import { stream } from './stream'
 import { DefaultMercuryDocuments, mercuryDocuments } from './document-manager'
 import { URI } from 'vscode-uri'
 import { SemanticType } from './document-visitor'
-import { delayNextTick, interruptAndCheck } from './promise-util'
-
+import { checkCancel } from './promise-util'
+import { MultiMap } from './multimap'
+type a=1;
 export async function DocumentSymbolProvider(params: DocumentSymbolParams,cancelToken:CancellationToken) {
     let uri  = params.textDocument.uri;
     let document =mercuryDocuments.getOrCreateDocument(URI.parse(uri))
     let symbols :DocumentSymbol[]=[];
-    while(!document.visitResult)
-        await interruptAndCheck(cancelToken)
+    while(!document.visitResult){
+        await sleep(10)
+        await checkCancel(cancelToken)
+    }
     let visitResult = document.visitResult
     let module = visitResult.module;
     if(module){
@@ -24,10 +27,13 @@ export async function DocumentSymbolProvider(params: DocumentSymbolParams,cancel
             selectionRange: range
         })
     }
-    let definition = document.visitResult.definition
-    for (const [name ,funcTerms] of definition.entriesGroupedByKey()) {
-        let children:DocumentSymbol[] = []
+    let definition = document.visitResult.definition;
+    let KeyValuePairs = definition.values().map(x=>[x.nameArity,x] as [string ,Term]);
+    let map  = new MultiMap(KeyValuePairs)
+    for (const [nameArity,funcTerms] of map.entriesGroupedByKey()) {
+        let subFuncs:DocumentSymbol[]=[] 
         for (const funcTerm of funcTerms ) {
+            let children:DocumentSymbol[]=[] 
             for (const [varName,varTerms] of funcTerm.clause?.varMap.entriesGroupedByKey()??[]) {
                 let varRange  = termRange(varTerms[0]);
                 children.push({
@@ -36,18 +42,30 @@ export async function DocumentSymbolProvider(params: DocumentSymbolParams,cancel
                     range: varRange,
                     selectionRange: varRange
                 })	
-            } 
+            }
+            let range = termRange(funcTerm.clause!)
+            subFuncs.push({
+                name: nameArity,
+                kind: typeToKind(funcTerm.semanticType),
+                selectionRange: funcTerm.range,
+                children,
+                range
+            }) 
         }
-        let funcTerm = funcTerms[0];
-        let range= StartEndTokenToRange(funcTerms[0].clause!.startToken,funcTerms[funcTerms.length-1].clause!.endToken);
-
-        symbols.push({
-            name: showNameArity(funcTerm),
-            kind:typeToKind(funcTerm.semanticType),
-            range,
-            selectionRange: termRange(funcTerm),
-            children:children,
-        })
+        if(subFuncs.length==1){
+            symbols.push(subFuncs[0])
+        }
+        else{
+            let funcTerm = funcTerms[0];
+            let range= StartEndTokenToRange(funcTerms[0].clause!.startToken,funcTerms[funcTerms.length-1].clause!.endToken);
+            symbols.push({
+                name: nameArity,
+                kind:typeToKind(funcTerm.semanticType),
+                range,
+                selectionRange: termRange(funcTerm),
+                children:subFuncs,
+            })            
+        }
     }
     return symbols;
 } 
@@ -56,11 +74,11 @@ function typeToKind(type:SemanticType|undefined):SymbolKind{
         case 'string':
             return SymbolKind.String
         case 'func':
-            return SymbolKind.Operator
-        case 'pred':
             return SymbolKind.Function
+        case 'pred':
+            return SymbolKind.Boolean
         case 'type':
-            return SymbolKind.TypeParameter
+            return SymbolKind.Struct
         case 'module':
             return SymbolKind.Module
         case 'variable':

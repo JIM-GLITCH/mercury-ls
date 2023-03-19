@@ -63,7 +63,7 @@ const moolexer = moo.compile({
         { match: /[_A-Z][_0-9a-zA-Z]*/ },
     ],
     float: {
-        /* 	
+        /* 
             decimal digits part     [0-9](?:[0-9_]*[0-9])? 
                 An arbitrary number of underscores (‘_’) may be inserted between the digits in
                 a floating point literal. Underscores may not occur adjacent to any non-digit

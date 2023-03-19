@@ -5,9 +5,7 @@ import { TreeStreamImpl, stream } from './stream'
 import { Clause, RootNode, Term, termRange } from './term'
 import { sameArity } from './utils'
 import { interruptAndCheck } from './promise-util'
-export interface Vistor {
-    visit(doc: MercuryDocument, cancelToken: CancellationToken): void
-}
+
 export type VisitResult = {
     module?:Term
     errors:Diagnostic[]
@@ -30,7 +28,7 @@ export class Visitor {
     async visit(doc: MercuryDocument, cancelToken: CancellationToken) {
         let rootNode = doc.parseResult.value
         for (const clause of rootNode.args) {
-            interruptAndCheck(cancelToken)
+            await interruptAndCheck(cancelToken)
             this.visitClause(clause)
         }
         doc.visitResult = {
@@ -74,7 +72,6 @@ export class Visitor {
     visitDcgHead(term: Term) {
         this.DcgFixArity(term)
         this.visitPredDef(term)
-        this.addDefinition(term)
     }
     visitDcgBody(term: Term) {
         switch (term.nameArity) {
@@ -169,8 +166,8 @@ export class Visitor {
     visitDataTerm(term: Term) {
         if(isVariable(term)){
             this.visitVariable(term);
-        }else if(isSpecialDataTerm(term)){
-            this.visitSpecialDataTerm(term)
+        // }else if(isSpecialDataTerm(term)){
+        //     this.visitSpecialDataTerm(term)
         }else {
             this.visitDataFunctor(term);
         }
@@ -197,7 +194,8 @@ export class Visitor {
         throw new Error('Method not implemented.')
     }
     visitFuncOrPredOrConstr(term: Term) {
-        this.addReference(term)
+        let rightTerm = this.visitQualifiedTerm(term)
+        this.addReference(rightTerm)
     }
     visitFloat(term: Term) {
         label(term,"float")
@@ -262,7 +260,6 @@ export class Visitor {
             this.visitFuncRuleHead(term)
         } else {
             this.visitPredDef(term)
-            this.addDefinition(term)
         }
     }
     visitPredDef(term: Term) {
@@ -385,7 +382,8 @@ export class Visitor {
                 break
             }
             default: {
-                this.visitPredRef(term)
+                let rightTerm = this.visitQualifiedTerm(term)
+                this.visitPredRef(rightTerm)
 
 
             }
@@ -462,7 +460,7 @@ export class Visitor {
                 this.visitEndModuleDecl(term.args[0])
                 break
             case "type/1":
-                this.visitTypeDecl(term.args[0])
+                this.visitTypeDeclOrDef(term.args[0])
                 break
             case "interface/0":
                 this.visitInterfaceDecl(term)
@@ -507,22 +505,25 @@ export class Visitor {
         }
     }
 
-    visitTypeDecl(term: Term) {
+    visitTypeDeclOrDef(term: Term) {
         // Discriminated unions
         if (nameArity(term, "--->/2")) {
             this.visitTypeNameOrSubtype(term.args[0])
-            this.visitTypeConstrutors(term.args[1])
+            // this.visitTypeConstrutors(term.args[1])
         }
         // Equivalence types
 
         else if (nameArity(term, "==/2")) {
             this.visitTypeName(term.args[0])
-            this.visitTypeConstrutor(term.args[1])
+            // this.visitTypeConstrutor(term.args[1])
         }
         else{
             // Abstract types
-            this.visitTypeName(term)
+            this.visitTypeDeclType(term)
         }
+    }
+    visitTypeDeclType(term: Term) {
+        this.addDeclaration(term)
     }
     visitTypeConstrutors(term: Term) {
         let list = stream(semicolonBinaryTermToList(term))
@@ -582,7 +583,7 @@ export class Visitor {
         this.addReference(module)
     }
     visitModule(term: Term) {
-        let right = this.visitQualifiedTerm(term)
+        let right = this.visitQualifiedModule(term)
         label(right, "module")
         return right
     }
@@ -591,11 +592,22 @@ export class Visitor {
         if (nameArity(term, "./2")) {
             let [left, right] = term.args
             right.qualified = left
-            let module = this.visitQualifiedTerm(left)
+            let module = this.visitQualifiedModule(left)
             label(module, "module")
             this.addReference(left)
             return right
-        }
+        } 
+        return term
+    }
+    visitQualifiedModule(term:Term){
+        if (nameArity(term, "./2")) {
+            let [left, right] = term.args
+            right.qualified = left
+            let module = this.visitQualifiedModule(left)
+            label(module, "module")
+            this.addReference(left)
+            return right
+        } 
         if (term.arity !== 0) {
             this.addError("module term's arity should be zero", term)
         }
