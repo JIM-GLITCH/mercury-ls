@@ -551,20 +551,26 @@ export class Visitor {
 
 
     visitIncludeModuleDecl(term: Term) {
-        let module = this.visitModule(term)
-        this.addReference(module)
-        this.addImport(module)
+        for (const moduleTerm of commaSeparatedTermToList(term)) {
+            let module = this.visitModule(moduleTerm)
+            this.addReference(module)
+            this.addImport(module)
+        }
     }
 
     visitImportModuleDecl(term: Term) {
-        let module = this.visitModule(term)
-        this.addReference(module)
-        this.addImport(module)
+        for (const moduleTerm of commaSeparatedTermToList(term)) {
+            let module = this.visitModule(moduleTerm)
+            this.addReference(module)
+            this.addImport(module)
+        }
     }
     visitUseModuleDecl(term: Term) {
-        let module = this.visitModule(term)
-        this.addReference(module)
-        this.addImport(module)
+        for (const moduleTerm of commaSeparatedTermToList(term)) {
+            let module = this.visitModule(moduleTerm)
+            this.addReference(module)
+            this.addImport(module)
+        }
     }
     visitImplementationDecl(decl: Term) {
        this.section == "implementation"
@@ -779,6 +785,19 @@ function arity(term: Term, arity: number) {
 function* semicolonBinaryTermToList(term: Term) {
     for (; ;) {
         if (nameArity(term, ";/2")) {
+            yield term.args[0]
+            term = term.args[1]
+        } else {
+            yield term
+            break;
+        }
+    }
+    return undefined
+}
+
+function* commaSeparatedTermToList(term: Term) {
+    for (; ;) {
+        if (nameArity(term, ",/2")) {
             yield term.args[0]
             term = term.args[1]
         } else {
