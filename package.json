@@ -17,10 +17,32 @@
 		"vscode": "^1.63.0"
 	},
 	"activationEvents": [
-		"onLanguage:mercury"
+		"onStartupFinished",
+		"onLanguage:mercury",
+		"workspaceContains:**/*.m"
 	],
 	"main": "./client/out/extension.js",
 	"contributes": {
+		"languages": [
+			{
+				"id": "mercury",
+				"aliases": [
+					"Mercury",
+					"mercury"
+				],
+				"extensions": [
+					".m"
+				],
+				"configuration": "./language-configuration.json"
+			}
+		],
+		"grammars": [
+			{
+				"language": "mercury",
+				"scopeName": "source.mercury",
+				"path": "./syntaxes/mercury.tmLanguage.json"
+			}
+		],
 		"configuration": {
 			"type": "object",
 			"title": "Example configuration",

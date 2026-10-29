@@ -1,0 +1,26 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vscode/main/extensions/theme-defaults/schemas/tmLanguage.schema.json",
+  "name": "Mercury",
+  "scopeName": "source.mercury",
+  "patterns": [
+    {
+      "name": "comment.line.percent.mercury",
+      "match": "%.*$"
+    },
+    {
+      "name": "keyword.control.mercury",
+      "match": "\\b(module|import|use|include|pred|func|type|inst|mode|instance|end)\\b"
+    },
+    {
+      "name": "string.quoted.double.mercury",
+      "begin": "\"",
+      "end": "\"",
+      "patterns": [{ "include": "#string" }]
+    }
+  ],
+  "repository": {
+    "string": {
+      "patterns": [{ "match": "\\\\.", "name": "constant.character.escape.mercury" }]
+    }
+  }
+}

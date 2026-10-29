@@ -17,63 +17,74 @@ import {
 let client: LanguageClient;
 let bar: vscode.StatusBarItem;
 export async function activate(context: ExtensionContext) {
-    // The server is implemented in node
-    const serverModule = context.asAbsolutePath(
-        path.join('server', 'out', 'server.js')
-    );
-    // The debug options for the server
-    // --inspect=6009: runs the server in Node's Inspector mode so VS Code can attach to the server for debugging
-    const debugOptions = { execArgv: ['--nolazy', '--inspect=6009'] };
-
-    // If the extension is launched in debug mode then the debug server options are used
-    // Otherwise the run options are used
-    const serverOptions: ServerOptions = {
-        run: { module: serverModule, transport: TransportKind.ipc },
-        debug: {
-            module: serverModule,
-            transport: TransportKind.ipc,
-            options: debugOptions
-        }
-    };
-
-    // Options to control the language client
-    const clientOptions: LanguageClientOptions = {
-        // Register the server for plain text documents
-        documentSelector: [{ scheme: 'file', language: 'mercury' }],
-        synchronize: {
-            // Notify the server about file changes to '.clientrc files contained in the workspace
-            fileEvents: workspace.createFileSystemWatcher('**/.clientrc')
-        }
-    };
-
-    // Create the language client and start the client.
-    client = new LanguageClient(
-        'languageServerExample',
-        'Language Server Example',
-        serverOptions,
-        clientOptions
-    );
-
-    // Start the client. This will also launch the server
-    bar = vscode.window.createStatusBarItem(1,1);
-    bar.text = "Mercury";
+    bar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
+    bar.text = '$(sync~spin) Mercury';
+    bar.tooltip = 'Starting Mercury language server...';
     bar.show();
-    bar.command ="Mercury.statusBar";
-    await client.start()
-    vscode.commands.registerCommand(bar.command,()=>{
-        client.sendNotification('$/status/click');
-    })
-    client.onNotification("$/statusBar/tooltip",(msg)=>{
-        bar.tooltip = 
+    context.subscriptions.push(bar);
+
+    try {
+        // The server is implemented in node
+        const serverModule = context.asAbsolutePath(
+            path.join('server', 'out', 'server.js')
+        );
+        // The debug options for the server
+        // --inspect=6009: runs the server in Node's Inspector mode so VS Code can attach to the server for debugging
+        const debugOptions = { execArgv: ['--nolazy', '--inspect=6009'] };
+
+        // If the extension is launched in debug mode then the debug server options are used
+        // Otherwise the run options are used
+        const serverOptions: ServerOptions = {
+            run: { module: serverModule, transport: TransportKind.ipc },
+            debug: {
+                module: serverModule,
+                transport: TransportKind.ipc,
+                options: debugOptions
+            }
+        };
+
+        // Options to control the language client
+        const clientOptions: LanguageClientOptions = {
+            // Register the server for plain text documents
+            documentSelector: [{ scheme: 'file', language: 'mercury' }],
+            synchronize: {
+                // Notify the server about file changes to '.clientrc files contained in the workspace
+                fileEvents: workspace.createFileSystemWatcher('**/.clientrc')
+            }
+        };
+
+        // Create the language client and start the client.
+        client = new LanguageClient(
+            'languageServerExample',
+            'Language Server Example',
+            serverOptions,
+            clientOptions
+        );
+
+        // Start the client. This will also launch the server
+        await client.start();
+        bar.text = 'Mercury';
+        bar.command = 'Mercury.statusBar';
+        vscode.commands.registerCommand(bar.command, ()=>{
+            client.sendNotification('$/status/click');
+        });
+        client.onNotification("$/statusBar/tooltip",(msg)=>{
+            bar.tooltip = 
 `cached files: ${msg.cached}
 mermory usage: ${msg.usage}MB
 `
-    });
-    client.onNotification("$/statusBar/text",(msg)=>{
-        bar.text = msg
-    })
-    client.sendNotification("$/initialWorkspace");
-
+        });
+        client.onNotification("$/statusBar/text",(msg)=>{
+            bar.text = msg
+        });
+        client.sendNotification("$/initialWorkspace");
+    } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        bar.text = '$(error) Mercury';
+        bar.tooltip = `Mercury failed to start: ${message}`;
+        console.error('Mercury extension activation failed', error);
+        throw error;
+    }
 }
 export function deactivate(): Thenable<void> | undefined {
     if (!client) {
