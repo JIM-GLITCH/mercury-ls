@@ -1,0 +1,46 @@
+{
+  "lockfileVersion": 2,
+  "configVersion": 0,
+  "workspaces": {
+    "": {
+      "name": "lsp-sample-server",
+      "dependencies": {
+        "moo": "^0.5.2",
+        "vscode-languageserver": "^8.1.0",
+        "vscode-languageserver-textdocument": "^1.0.8",
+        "vscode-uri": "^3.0.7",
+      },
+      "devDependencies": {
+        "@types/bun": "^1.4.4",
+        "@types/moo": "^0.5.5",
+      },
+    },
+  },
+  "packages": {
+    "@types/bun": ["@types/bun@1.4.4", "https://registry.npmmirror.com/@types/bun/-/bun-1.4.4.tgz", { "dependencies": { "bun-types": "1.4.4" } }, "sha512-9wkRDXUXK124pEnAutE6n/l18j+i9GC5IAHK8TmX/2nlySETmky0OU6yL5U8pW1AoKh++AN9auDCr647BfurjQ=="],
+
+    "@types/moo": ["@types/moo@0.5.5", "https://registry.npmmirror.com/@types/moo/-/moo-0.5.5.tgz", {}, "sha512-eXQpwnkI4Ntw5uJg6i2PINdRFWLr55dqjuYQaLHNjvqTzF14QdNWbCbml9sza0byyXNA0hZlHtcdN+VNDcgVHA=="],
+
+    "@types/node": ["@types/node@26.6.6", "https://registry.npmmirror.com/@types/node/-/node-26.6.6.tgz", { "dependencies": { "undici-types": "~8.9.0" } }, "sha512-MzQj+8Kx3XI40OmUAE6Qoh58ZMNstNNMwn2nfd3qWsfe7nDNSqJNzes4njhz6AHwrSHOffSLwXU6yb474Q4aog=="],
+
+    "bun-types": ["bun-types@1.4.4", "https://registry.npmmirror.com/bun-types/-/bun-types-1.4.4.tgz", { "dependencies": { "@types/node": "*", "undici-types": "*" } }, "sha512-yjrJh5oGX7mMPKGd19YXyIjmEuj4G4zNC30bs7PM9Az7NQ3ndF3j6hbeRdvJTRQEhJ/FYQwW0a2moweEi2hMxQ=="],
+
+    "moo": ["moo@0.5.2", "https://registry.npmmirror.com/moo/-/moo-0.5.2.tgz", {}, "sha512-iSAJLHYKnX41mKcJKjqvnAN9sf0LMDTXDEvFv+ffuRR9a1MIuXLjMNL6EsnDHSkKLTWNqQQ5uo61P4EbU4NU+Q=="],
+
+    "undici-types": ["undici-types@8.12.3", "https://registry.npmmirror.com/undici-types/-/undici-types-8.12.3.tgz", {}, "sha512-EXE4ydL3S76dFb27UFjNVZHTyv/TLdATj/KUe29ptdcg6qXL48J2tZ3126E5kICj5jn781OR+XlVH1N6Mz8jbA=="],
+
+    "vscode-jsonrpc": ["vscode-jsonrpc@8.1.0", "https://registry.npmmirror.com/vscode-jsonrpc/-/vscode-jsonrpc-8.1.0.tgz", {}, "sha512-6TDy/abTQk+zDGYazgbIPc+4JoXdwC8NHU9Pbn4UJP1fehUyZmM4RHp5IthX7A6L5KS30PRui+j+tbbMMMafdw=="],
+
+    "vscode-languageserver": ["vscode-languageserver@8.1.0", "https://registry.npmmirror.com/vscode-languageserver/-/vscode-languageserver-8.1.0.tgz", { "dependencies": { "vscode-languageserver-protocol": "3.17.3" }, "bin": { "installServerIntoExtension": "bin/installServerIntoExtension" } }, "sha512-eUt8f1z2N2IEUDBsKaNapkz7jl5QpskN2Y0G01T/ItMxBxw1fJwvtySGB9QMecatne8jFIWJGWI61dWjyTLQsw=="],
+
+    "vscode-languageserver-protocol": ["vscode-languageserver-protocol@3.17.3", "https://registry.npmmirror.com/vscode-languageserver-protocol/-/vscode-languageserver-protocol-3.17.3.tgz", { "dependencies": { "vscode-jsonrpc": "8.1.0", "vscode-languageserver-types": "3.17.3" } }, "sha512-924/h0AqsMtA5yK22GgMtCYiMdCOtWTSGgUOkgEDX+wk2b0x4sAfLiO4NxBxqbiVtz7K7/1/RgVrVI0NClZwqA=="],
+
+    "vscode-languageserver-textdocument": ["vscode-languageserver-textdocument@1.0.8", "https://registry.npmmirror.com/vscode-languageserver-textdocument/-/vscode-languageserver-textdocument-1.0.8.tgz", {}, "sha512-1bonkGqQs5/fxGT5UchTgjGVnfysL0O8v1AYMBjqTbWQTFn721zaPGDYFkOKtfDgFiSgXM3KwaG3FMGfW4Ed9Q=="],
+
+    "vscode-languageserver-types": ["vscode-languageserver-types@3.17.3", "https://registry.npmmirror.com/vscode-languageserver-types/-/vscode-languageserver-types-3.17.3.tgz", {}, "sha512-SYU4z1dL0PyIMd4Vj8YOqFvHu7Hz/enbWtpfnVbJHU4Nd1YNYx8u0ennumc6h48GQNeOLxmwySmnADouT/AuZA=="],
+
+    "vscode-uri": ["vscode-uri@3.0.7", "https://registry.npmmirror.com/vscode-uri/-/vscode-uri-3.0.7.tgz", {}, "sha512-eOpPHogvorZRobNqJGhapa0JdwaxpjVvyBp0QIUMRMSf8ZAlqOdEquKuRmw9Qwu0qXtJIWqFtMkmvJjUZmMjVA=="],
+
+    "@types/node/undici-types": ["undici-types@8.9.0", "https://registry.npmmirror.com/undici-types/-/undici-types-8.9.0.tgz", {}, "sha512-KTDyRTYX8sWmKXAikPHHSyc63CRPETMctyjKFupcC6OBLXT3xsN0e9aF7m+mIXutFWpUXuedtowG7iLOzp0kQg=="],
+  }
+}

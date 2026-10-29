@@ -384,7 +384,9 @@ export class StreamImpl<S, T> implements Stream<T> {
         return -1;
     }
 
-    every(predicate: (value: T) => unknown): boolean {
+    every<S extends T>(predicate: (value: T) => value is S): this is Stream<S>;
+    every(predicate: (value: T) => unknown): boolean;
+    every<S extends T>(predicate: ((value: T) => value is S) | ((value: T) => unknown)): boolean {
         const iterator = this.iterator();
         let next = iterator.next();
         while (!next.done) {
@@ -433,7 +435,9 @@ export class StreamImpl<S, T> implements Stream<T> {
         );
     }
 
-    filter(predicate: (value: T) => unknown): Stream<T> {
+    filter<U extends T>(predicate: (value: T) => value is U): Stream<U>;
+    filter(predicate: (value: T) => unknown): Stream<T>;
+    filter<U extends T>(predicate: ((value: T) => value is U) | ((value: T) => unknown)): Stream<T> | Stream<U> {
         return new StreamImpl<S, T>(
             this.startFn,
             state => {
@@ -446,7 +450,7 @@ export class StreamImpl<S, T> implements Stream<T> {
                 } while (!result.done);
                 return DONE_RESULT;
             }
-        );
+        ) as Stream<T> | Stream<U>;
     }
 
     nonNullable(): Stream<NonNullable<T>> {
@@ -673,7 +677,7 @@ function isIterable<T>(obj: unknown): obj is Iterable<T> {
  * An empty stream of any type.
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-export const EMPTY_STREAM: Stream<any> = new StreamImpl<undefined, any>(() => undefined, () => DONE_RESULT);
+export const EMPTY_STREAM: Stream<any> = new StreamImpl<undefined, any>(() => undefined, () => DONE_RESULT) as unknown as Stream<any>;
 
 /**
  * Use this `IteratorResult` when implementing a `StreamImpl` to indicate that there are no more elements in the stream.
@@ -687,7 +691,7 @@ export function stream<T>(...collections: Array<Iterable<T> | ArrayLike<T>>): St
     if (collections.length === 1) {
         const collection = collections[0];
         if (collection instanceof StreamImpl) {
-            return collection as Stream<T>;
+            return collection as unknown as Stream<T>;
         }
         if (isIterable(collection)) {
             return new StreamImpl<Iterator<T, undefined>, T>(

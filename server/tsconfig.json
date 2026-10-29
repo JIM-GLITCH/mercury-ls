@@ -6,9 +6,10 @@
 		"moduleResolution": "nodenext",
 		"sourceMap": true,
 		"strict": true,
+		"types": ["node"],
 		"outDir": "out",
 		"rootDir": "src"
 	},
 	"include": ["src"],
-	"exclude": ["node_modules", ".vscode-test"]
+	"exclude": ["node_modules", ".vscode-test", "src/test"]
 }

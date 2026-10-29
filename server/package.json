@@ -19,6 +19,7 @@
 	},
 	"scripts": {},
 	"devDependencies": {
+		"@types/bun": "^1.4.4",
 		"@types/moo": "^0.5.5"
 	}
 }

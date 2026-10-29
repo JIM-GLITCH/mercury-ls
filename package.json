@@ -1,27 +1,28 @@
 {
 	"name": "mercury-ls",
-	"description": "A simple language server for mercurylang",
-	"author": "lilr",
-	"license": "MIT",
 	"version": "0.0.9",
+	"author": "lilr",
 	"repository": {
 		"type": "git",
 		"url": "https://github.com/JIM-GLITCH/mercury-ls"
 	},
-	"publisher": "lilr",
-	"categories": [],
-	"keywords": [
-		"multi-root ready"
-	],
-	"engines": {
-		"vscode": "^1.63.0"
+	"main": "./client/out/extension.js",
+	"devDependencies": {
+		"@types/mocha": "^9.1.1",
+		"@types/node": "^16.18.11",
+		"@typescript-eslint/eslint-plugin": "^5.48.2",
+		"@typescript-eslint/parser": "^5.48.2",
+		"bun-types": "^1.4.4",
+		"eslint": "^8.32.0",
+		"mocha": "^9.2.2",
+		"typescript": "7"
 	},
 	"activationEvents": [
 		"onStartupFinished",
 		"onLanguage:mercury",
 		"workspaceContains:**/*.m"
 	],
-	"main": "./client/out/extension.js",
+	"categories": [],
 	"contributes": {
 		"languages": [
 			{
@@ -67,6 +68,15 @@
 			}
 		}
 	},
+	"description": "A simple language server for mercurylang",
+	"engines": {
+		"vscode": "^1.63.0"
+	},
+	"keywords": [
+		"multi-root ready"
+	],
+	"license": "MIT",
+	"publisher": "lilr",
 	"scripts": {
 		"vscode:prepublish": "npm run compile",
 		"compile": "tsc -b",
@@ -75,15 +85,5 @@
 		"postinstall": "cd client && npm install && cd ../server && npm install && cd ..",
 		"test": "sh ./scripts/e2e.sh"
 	},
-	"devDependencies": {
-		"@types/mocha": "^9.1.1",
-		"@types/node": "^16.18.11",
-		"@typescript-eslint/eslint-plugin": "^5.48.2",
-		"@typescript-eslint/parser": "^5.48.2",
-		"eslint": "^8.32.0",
-		"mocha": "^9.2.2",
-		"typescript": "^4.9.4"
-	},
-	"type": "module",
-	"dependencies": {}
+	"type": "module"
 }
