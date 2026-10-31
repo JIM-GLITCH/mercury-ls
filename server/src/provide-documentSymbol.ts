@@ -81,6 +81,18 @@ function typeToKind(type:SemanticType|undefined):SymbolKind{
             return SymbolKind.Struct
         case 'module':
             return SymbolKind.Module
+        case 'typeclass':
+            return SymbolKind.Interface
+        case 'instance':
+            return SymbolKind.Class
+        case 'pragma':
+            return SymbolKind.Property
+        case 'operator':
+            return SymbolKind.Operator
+        case 'mutable':
+            return SymbolKind.Variable
+        case 'determinism':
+            return SymbolKind.EnumMember
         case 'variable':
             return SymbolKind.Variable
         case 'float':

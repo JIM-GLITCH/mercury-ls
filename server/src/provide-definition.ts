@@ -95,7 +95,11 @@ export  function findDefTerms(params:uriTerm):Stream<uriTerm> {
         }
         case 'func':
         case 'pred':
-        case 'type':{
+        case 'type':
+        case 'typeclass':
+        case 'instance':
+        case 'mutable':
+        case 'operator':{
             return findDefinitionTerm(term,document);
 
         }

@@ -18,10 +18,16 @@ export async function HoverProvider(params:HoverParams) {
             case 'pred':
             case 'type':
             case "inst":
+            case "typeclass":
+            case "instance":
+            case "pragma":
+            case "operator":
                 msg = nameArity(term)
                 break ;
             case 'module':
             case "variable":
+            case "mutable":
+            case "determinism":
                 msg = term.name
                 break ;
         }
