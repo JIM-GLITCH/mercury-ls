@@ -14,7 +14,8 @@
 		"@typescript-eslint/parser": "^5.48.2",
 		"eslint": "^8.32.0",
 		"mocha": "^9.2.2",
-		"typescript": "^7"
+		"typescript": "^7",
+		"vitest": "^5.0.5"
 	},
 	"activationEvents": [
 		"onStartupFinished",
@@ -81,7 +82,9 @@
 		"watch": "tsc -b -w",
 		"lint": "eslint ./client/src ./server/src --ext .ts,.tsx",
 		"postinstall": "cd client && npm install && cd ../server && npm install && cd ..",
-		"test": "sh ./scripts/e2e.sh"
+		"test": "sh ./scripts/e2e.sh",
+		"test:unit": "vitest run",
+		"test:unit:watch": "vitest"
 	},
 	"type": "module"
 }

@@ -200,9 +200,12 @@ goal ---> unify_expr(Ctx, Term, Term, Purity)        % X = Y
 :- type T.                                  % 抽象类型
 :- type T ---> C1 ; C2 ; ... [where ...].    % 判别联合（DU）
 :- type T == U.                             % 类型同义（等价）
-:- type T =< Super ---> ... .               % 子类型（subtype，头为 '=<'）
+:- type T =< Super ---> ... .               % 子类型
+
+:- type T =< Super.                         % 子类型 
+
 :- solver type T ...                        % solver 类型
-:- type T where ...                         % where 属性（representation / ground /
+:- typeclass T where ...                         % where 属性（representation / ground /
                                             %   any / constraint_store / equality /
                                             %   comparison / direct_arg / ...）
 ```
@@ -215,7 +218,6 @@ goal ---> unify_expr(Ctx, Term, Term, Purity)        % X = Y
 ```
 :- inst I == inst_expr.                  % 等价定义
 :- inst I ---> f(...) ; g(...) .         % 等价于 I == bound(f(...); g(...))
-:- abstract_inst I.                       % 抽象实例
 :- inst I for Type/Arity == ... .        % 绑定到某类型（'for' 关键字）
 ```
 inst 体关键字：`free`、`ground`、`clobbered`、`mostly_clobbered`、`any`、`unique_any`、
@@ -226,7 +228,6 @@ inst 体关键字：`free`、`ground`、`clobbered`、`mostly_clobbered`、`any`
 ```
 :- mode M == InstA >> InstB.             % 从 InstA 到 InstB 的模式
 :- mode M(...) == ... .                   % 带参模式
-:- abstract_mode M.
 ```
 核心 `>>` 语法：`from_to_mode(InstA, InstB)`（`parse_inst_mode_name.m:151-163`）。
 高阶模式用 `pred(...)` / `func(...) is Det`（`is` 关键字）。
@@ -235,9 +236,8 @@ inst 体关键字：`free`、`ground`、`clobbered`、`mostly_clobbered`、`any`
 ```
 :- pred P(Arg1, Arg2, ...) [is Detism].
 :- func F(Arg1, ...) = RetType [is Detism].
-:- pred P(Arg1 >> in, Arg2 >> out) is det.    % 参数模式用 '>>' 或 '::'
 :- pred P(A1 :: in, A2 :: out) is semidet.    % '::' 为 inst 注解
-:- func F(A1) = R :: out is det.
+:- func F(A1) = (R :: out )is det.
 ```
 - 参数模式支持 `Type`、`Type >> Mode`、`Type :: Inst`（`parse_type_name.m`）。
 - 函数返回用 `=` 分隔。

@@ -428,9 +428,11 @@ export class Visitor {
 
 
     visitFuncRuleHead(term: Term) {
-        let [func, funcReturn] = term.args
+        let [func, funcResult] = term.args
         this.visitFuncDef(func)
-        this.visitFuncReturn(funcReturn)
+        // 定义子句 `F(...) = 表达式` 的右侧是函数体/结果表达式，不是返回类型；
+        // 按数据项访问（functor 或数据构造子由 linker 阶段区分），避免误标成 type
+        this.visitDataTerm(funcResult)
         this.currentClause.callee = func
     }
     visitFuncDef(func: Term) {
@@ -503,9 +505,6 @@ export class Visitor {
             case "instance/1":
                 this.visitInstanceDecl(term.args[0])
                 break
-            case "abstract_inst/1":
-                this.visitInstDecl(term)
-                break
             case "abstract_mode/1":
                 this.visitModeDecl(term)
                 break
@@ -540,15 +539,33 @@ export class Visitor {
     }
 
     visitTypeDeclOrDef(term: Term) {
-        // Discriminated unions
+        // Discriminated unions (可能带 where 属性块： ---> ctors where [...])
         if (nameArity(term, "--->/2")) {
             this.visitTypeNameOrSubtype(term.args[0])
-            this.visitTypeConstrutors(term.args[1])
+            let ctors = term.args[1]
+            if (nameArity(ctors, "where/2")) {
+                // DU 的 where 块是 where/2(ctors, attrs)：取构造子列表，属性块暂不索引
+                ctors = ctors.args[0]
+            }
+            this.visitTypeConstrutors(ctors)
         }
         // Equivalence types: type T == U （U 是类型引用）
         else if (nameArity(term, "==/2")) {
             this.visitTypeName(term.args[0])
             this.visitTypeRef(term.args[1])
+        }
+        // 纯子类型声明（无 ---> 构造子体）： type T =< Super.
+        else if (nameArity(term, "=</2")) {
+            this.visitTypeNameOrSubtype(term)
+        }
+        // where 属性块：type T where [...] / solver type T where [...] / type T =< Super where [...]
+        else if (nameArity(term, "where/2")) {
+            let inner = term.args[0]
+            if (nameArity(inner, "=</2")) {
+                this.visitTypeNameOrSubtype(inner)
+            } else {
+                this.visitTypeName(inner)
+            }
         }
         else{
             // Abstract types
@@ -824,12 +841,14 @@ export class Visitor {
         label(term,"inst")
     }
     visitFuncDecl(term: Term) {
-        if (nameArity(term, "=/2")) {
+        if (nameArity(term, "is/2")) {
+            // :- func F(...) = R is det.  →  标 F，忽略确定性 det
+            this.visitFuncDecl(term.args[0])
+        } else if (nameArity(term, "=/2")) {
             let [func, ret] = term.args
             this.visitFuncDeclFunc(func)
             this.visitFuncReturn(ret)
-        } 
-        else {
+        } else {
             this.visitFuncDeclFunc(term)
         }
     }
