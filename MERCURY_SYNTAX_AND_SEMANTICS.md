@@ -216,12 +216,20 @@ hover 显示与定义/引用匹配均按语义元数进行（`utils.ts: semantic
 表达式/数据位置的 functor 引用（如 `version_array.init(...)`、构造子）解析层无法
 区分类别（不标 `semanticType`）：**linker 阶段**按名字与语义元数到 definition/declaration
 消解——本模块 + **全局导出索引**（各模块 `:- interface.` 段声明的符号，`exportManager`，
-文档构建/删除时同步）；限定名 `M.f` 则查目标模块。
+文档构建/删除时同步；含 interface 段具体类型的**构造子**与 mode/inst 名）；
+限定名 `M.f` 则查目标模块。
 命中类别一致则补标（func/constructor/...）；歧义或未命中保持无类别，
 goto def 时对无类别引用**不限类别**匹配（含限定名 `M.f` 跨模块查找）。
+注意重载符号（如 `-/2` 同时是 int 的减法函数与 pair 的 `K - V` 构造子）：
+两类候选并存时保持无类别——Mercury 靠类型推断消歧，本 LSP 无类型信息，
+误标比不标危害更大。
 find references 按**名字 + 语义元数 + 可见性**过滤（Mercury 名字解析规则）：
 限定引用 `M.f` 只保留限定到目标模块的；非限定引用只保留目标模块自身或
 import 了目标模块的文档（模块名的显式出现一律保留）。
+**参数位置的项同样参与索引/link**：pred 调用与数据项的参数里的嵌套
+functor（`f(g(X))`、`sva(uva.init(N, X))`）、闭包 `p/2` 都进 `reference`，
+由 linker 统一消解；lambda 头 `pred(...) is Det`、体内 `X = 1` 等关键字形态
+（`is`/`=`/`\=`/`pred`/`func`）在数据位置不作为引用。
 下文各"可被引用的位置"用 ✅ 标注**已索引**、❌ 标注**尚未索引**的引用位置。
 
 ### 5.1 类型声明（`parse_type_defn.m`）

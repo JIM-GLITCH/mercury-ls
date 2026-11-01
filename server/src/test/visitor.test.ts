@@ -646,6 +646,50 @@ describe('goto definition / find references for insts (providers)', () => {
     return doc
   }
 
+  it('visits implementation-defined ($name) terms without throwing', async () => {
+    const v = await visitSource(
+      ':- pred q(int).\n' +
+      'q(A) :- w($foo, A).\n' +
+      ':- pred w(int, int).\n',
+    )
+    const refs = (v as any).reference
+    // visit 不再抛 "Method not implemented."；$name 项标注但不进 reference
+    expect(refs.get('$foo')?.length ?? 0).toBe(0)
+    expect(refs.get('w')?.length).toBe(1)
+  })
+
+  it('indexes functor args (nested calls/constructors/closures) as references', async () => {
+    const v = await visitSource(
+      ':- pred q(int, int).\n' +
+      'q(A, B) :- wrap(pair(A, B), uva.init(A)), map(p/2, Xs).\n' +
+      ':- pred wrap(int, int).\n' +
+      ':- pred p(int, int).\n',
+    )
+    const refs = (v as any).reference
+    // 参数位置的嵌套 functor 也进 reference（此前只有顶层 wrap/map）
+    expect(refs.get('wrap')?.length).toBe(1)
+    expect(refs.get('pair')?.length).toBe(1)
+    expect(refs.get('init')?.length).toBe(1)
+    expect((refs.get('init')[0] as any).qualified?.name).toBe('uva')
+    // 参数位置的闭包 p/2（Name/Arity）记语义元数
+    expect(refs.get('p')?.length).toBe(1)
+    expect((refs.get('p')[0] as any).semanticArity).toBe(2)
+  })
+
+  it('does not index keyword functors reached through argument/lambda positions', async () => {
+    const v = await visitSource(
+      ':- pred map(int, int).\n' +
+      'm(Xs) :- map(pred(X) is det :- X = 1, Xs).\n',
+    )
+    const refs = (v as any).reference
+    // 子句本身被解析并索引
+    expect(refs.get('map')?.length).toBe(1)
+    // lambda 头 `pred(X) is det` 与体内 `X = 1` 的关键字不进 reference
+    expect(refs.get('is')?.length ?? 0).toBe(0)
+    expect(refs.get('=')?.length ?? 0).toBe(0)
+    expect(refs.get('pred')?.length ?? 0).toBe(0)
+  })
+
   it('resolves foreign_proc function head init/2 to its def', async () => {
     const src = [
       ':- module t.',
@@ -700,6 +744,36 @@ describe('goto definition / find references for insts (providers)', () => {
     expect(initRef.semanticType).toBe('func')
     const cellRef = doc.visitResult!.reference.get('cell')[0]
     expect(cellRef.semanticType).toBe('constructor')
+  })
+
+  it('keeps overloaded functors unlabeled when func and constructor candidates coexist', async () => {
+    const mk = async (src: string, name: string) => {
+      const uri = URI.parse(`file:///${name}.m`)
+      const doc = mercuryDocumentFactory.fromString(src, uri)
+      mercuryDocuments.addDocument(doc)
+      await new Visitor().visit(doc, {
+        isCancellationRequested: false,
+        onCancellationRequested: () => undefined,
+      } as any)
+      const mod = doc.visitResult!.module
+      if (mod) moduleManager.set(mod, doc)
+      exportManager.set(doc)
+      return doc
+    }
+    // mint 导出 `-/2` 函数（减法）；mpair 导出 `-/2` 构造子（pair 的 K - V）
+    await mk(':- module mint.\n:- interface.\n:- func int - int = int.\n:- end_module mint.\n', 'mint-mod')
+    await mk(':- module mpair.\n:- interface.\n:- type pair(K, V) ---> K - V.\n:- end_module mpair.\n', 'mpair-mod')
+    const docM = await mk(
+      ':- module m.\n:- interface.\n:- end_module m.\n:- implementation.\nf(K, V) = P :- P = K - V.\n',
+      'm-ovl',
+    )
+    await linker.link(docM, {
+      isCancellationRequested: false,
+      onCancellationRequested: () => undefined,
+    } as any)
+    // `-` 同时是 func 与构造子候选，类别不唯一 → 不标注（goto def 走不限类别匹配）
+    const ref = docM.visitResult!.reference.get('-')[0]
+    expect(ref.semanticType).toBeUndefined()
   })
 
   it('resolves unqualified refs via the global export index (cross-module)', async () => {

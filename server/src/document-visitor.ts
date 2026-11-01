@@ -216,7 +216,8 @@ export class Visitor {
         }
     }
     visitImplementationDefined(term: Term) {
-        throw new Error('Method not implemented.')
+        // `$name` 形式的 implementation-defined 项：不进 reference，仅标注避免抛错
+        label(term, "implementationDefined")
     }
     visitFuncOrPredOrConstr(term: Term) {
         // 项层类型限定 `Term :: Type`：Type 是类型引用位置
@@ -225,10 +226,19 @@ export class Visitor {
             this.visitTypeRef(term.args[1])
             return
         }
+        // lambda 体里的目标 `X = 1`、`X \= Y` 与高阶模式头 `pred(...) is Det`：
+        // `=`/`\=`/`is` 是关键字，在数据位置不作引用
+        if (nameArity(term, "=/2") || nameArity(term, "\\=/2")) return
+        if (nameArity(term, "is/2") && ["pred", "predicate", "func", "function"].includes(term.args[0]?.name)) return
         // 高阶闭包 `p/2`（Name/Arity）：pred/func 引用，语义元数取 Arity
         if (this.visitNameArityRef(term)) return
         let rightTerm = this.visitQualifiedTerm(term)
         this.addReference(rightTerm)
+        // 参数位置的项也是引用（嵌套构造子/函数调用，如 sva(uva.init(N, X))），
+        // 同样索引进 reference 参与 link（变量除外）
+        for (const arg of rightTerm.args ?? []) {
+            if (!isVariable(arg)) this.visitDataTerm(arg)
+        }
     }
     // `Name/Arity` 形式（解析为 //2(Atom, IntAtom)）的 pred/func 引用：
     // 标 pred、记语义元数、进 reference；非该形式返回 false
@@ -458,6 +468,11 @@ export class Visitor {
     visitPredRef(term: Term) {
         label(term,"pred")
         this.addReference(term)
+        // 目标参数位置的项也可能是 func 调用/构造子/闭包（如 map(p/2, Xs)、f(g(X))），
+        // 同样索引进 reference 参与 link（变量除外）
+        for (const arg of term.args ?? []) {
+            if (!isVariable(arg)) this.visitDataTerm(arg)
+        }
     }
     visitVarOrFuncOrDataOrPred(term: Term) {
         if (term.syntaxType == "variable") {
@@ -725,6 +740,10 @@ export class Visitor {
         // C1/C2 是 data constructor，不是 type；单独标 constructor 以便与类型名区分
         label(term, "constructor")
         this.addDefinition(term)
+        // interface 段的具体类型，其构造子也是模块导出符号
+        // （如 pair 的 `-`/2：与 int 的减法函数 `-`/2 同名，linker 消解时两者都
+        // 出现在候选里，类别不唯一则保持无类别，避免把 `K - V` 误标成 func）
+        this.tryAddExport(term)
         // 构造子参数是类型引用位置（类型变量除外）
         for (const arg of term.args ?? []) {
             if (!isVariable(arg)) this.visitTypeRef(arg)
@@ -980,6 +999,7 @@ export class Visitor {
     visitModeName(term: Term) {
         label(term,"mode")
         this.addDefinition(term)
+        this.tryAddExport(term)
     }
     visitFuncOrPredModeDecl(term: Term) {
         if(nameArity(term,"=/2")){
@@ -1042,6 +1062,7 @@ export class Visitor {
     visitInstName(term: Term) {
         label(term,"inst")
         this.addDefinition(term)
+        this.tryAddExport(term)
     }
     visitInst(term: Term) {
         label(term,"inst")
@@ -1292,6 +1313,7 @@ export type SemanticType =
     "mutable"|
     "determinism"|
     "operator"|
+    "implementationDefined"|
     SpecialDataTerm
 export type SpecialDataTerm = 
     'conditional'|
