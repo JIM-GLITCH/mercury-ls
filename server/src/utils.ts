@@ -1,18 +1,18 @@
-import type{ Diagnostic, Range } from 'vscode-languageserver'
-import type{  } from './mercury-parser'
-import type{ Token } from './mercury-lexer'
-import type{ Document } from './document'
-import{ RootNode, Term, termRange } from './term'
+import type { Diagnostic, Range } from 'vscode-languageserver'
+import type { } from './mercury-parser'
+import type { Token } from './mercury-lexer'
+import type { Document } from './document'
+import { RootNode, Term, termRange } from './term'
 import { MercuryDocument } from './document-manager'
 
-export function errorToken(message:string,token:Token,ps:{errors:Diagnostic[]}) {
+export function errorToken(message: string, token: Token, ps: { errors: Diagnostic[] }) {
     let range = tokenRange(token);
     ps.errors.push({
         range,
         message
     })
 }
-export function errorTerm(message:string,term:Term,ps:{errors:Diagnostic[]}) {
+export function errorTerm(message: string, term: Term, ps: { errors: Diagnostic[] }) {
     let range = termRange(term);
     ps.errors.push({
         range,
@@ -20,38 +20,40 @@ export function errorTerm(message:string,term:Term,ps:{errors:Diagnostic[]}) {
     })
 }
 
-export function tokenRange( token:Token):Range{
+export function tokenRange(token: Token): Range {
     return {
-        start:{
-            line:token.line-1,
-            character:token.col-1
+        start: {
+            line: token.line - 1,
+            character: token.col - 1
         },
-        end:{
-            line:token.line+token.lineBreaks-1,
-            character:token.lineBreaks
-                ?   (token.text.length-token.text.lastIndexOf("\n")-1)
-                :   (token.col+token.text.length-1)
+        end: {
+            line: token.line + token.lineBreaks - 1,
+            character: token.lineBreaks
+                ? (token.text.length - token.text.lastIndexOf("\n") - 1)
+                : (token.col + token.text.length - 1)
         }
     }
 }
-export function termTokenRange(term:Term){
+export function termTokenRange(term: Term) {
     return tokenRange(term.token);
 }
-export function nameArity(term:Term){
-    return term.name+'/'+term.arity;
+/** 语义元数：semanticArity 优先（Type/Arity 写法、DCG +2 的引用），否则回退语法 arity */
+export function semanticArityOf(term: Term) {
+    return term.semanticArity ?? term.arity;
 }
-export function showNameArity(term:Term){
-    return term.name+'/'+term.arity;
+export function semanticNameArityOf(term: Term) {
+    return term.name + '/' + semanticArityOf(term);
 }
 
-export function sleep(ms: number){
+
+export function sleep(ms: number) {
     return new Promise(resolve => setTimeout(resolve, ms))
 }
 
-export function sameArity(term1:Term,term2:Term){
-    return term1.arity == term2.arity;
+export function sameArity(term1: Term, term2: Term) {
+    return semanticArityOf(term1) == semanticArityOf(term2);
 }
-export function sameSemanticType(term1:Term,term2:Term){
+export function sameSemanticType(term1: Term, term2: Term) {
     return term1.semanticType == term2.semanticType;
 }
 

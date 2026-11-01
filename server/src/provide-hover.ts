@@ -1,5 +1,5 @@
 import { Hover, HoverParams, MarkupContent } from 'vscode-languageserver'
-import { nameArity } from './utils'
+import { semanticNameArityOf } from './utils'
 import { search, termRange } from './term'
 import { mercuryDocuments } from './document-manager'
 import { URI } from 'vscode-uri'
@@ -18,11 +18,13 @@ export async function HoverProvider(params:HoverParams) {
             case 'pred':
             case 'type':
             case "inst":
+            case "mode":
+            case "constructor":
             case "typeclass":
             case "instance":
             case "pragma":
             case "operator":
-                msg = nameArity(term)
+                msg = semanticNameArityOf(term)
                 break ;
             case 'module':
             case "variable":
@@ -53,7 +55,7 @@ export async function HoverProvider(params:HoverParams) {
                 msg = term.name;
                 break ;
             case 'atom':
-                msg = nameArity(term);
+                msg = semanticNameArityOf(term);
                 break ;
             default :
                 msg = term.name;

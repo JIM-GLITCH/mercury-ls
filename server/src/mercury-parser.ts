@@ -4,7 +4,7 @@ import { OpInfo, adjust_priority_for_assoc, lookup_infix_op, lookup_op, lookup_o
 import { Term, string, applyCompound, atom, backquotedapplyCompound, binPrefixCompound, Clause, float, functorCompound, implementation_defined, infixCompound, integer, negFloat, negInteger, prefixCompound, variable, RootNode } from './term'
 import { MultiMap } from './multimap'
 import type { Document } from './document'
-import { errorToken, nameArity } from './utils'
+import { errorToken, semanticNameArityOf } from './utils'
 export interface ParserState {
     calleeNode?: Term
     errors: Diagnostic[]
@@ -475,7 +475,7 @@ export namespace Parser {
                 let r1 = parse_backquoted_operator(p2, ps)
                 let r2 = read(opinfo.rpriority, termKind, r1.p, ps)
                 let backquoted_term = r1.term
-                if (nameArity(backquoted_term) == "./2") {
+                if (semanticNameArityOf(backquoted_term) == "./2") {
                     backquoted_term.args[1] = backquotedapplyCompound(
                         backquoted_term.args[1].token,
                         [lterm, r2.term]

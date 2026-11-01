@@ -15,7 +15,7 @@ type SyntaxType =
     "string" |
     "float" |
     "implementation_defined" |
-    '$clause'|
+    '$clause' |
     '$rootNode'
 
 
@@ -46,11 +46,20 @@ export interface Term {
      *  this term's name
      */
     name: string
-    /**  
+    /**
      *  this term's arity
      */
     arity: number
-    nameArity:string
+    /**
+     *  语义元数：语法上是 0 元原子、但按 Type/Arity 写法语义上带参的引用
+     *  （如 `inst I for diet/1` 里 diet 的 arity 是 0，semanticArity 是 1）。
+     *  hover 与定义/引用查找按此字段显示与匹配，未设置时回退 arity
+     */
+    semanticArity: number
+    /**
+     *  CST name/arity
+     */
+    nameArity: string
     /**
      *  语义类型 provide hover时 find definition reference 时用到
      */
@@ -59,17 +68,18 @@ export interface Term {
      * the clause this term belong to 
      */
     clause?: Clause
-    document?:MercuryDocument
+    document?: MercuryDocument
     /**
      * 
      * @param depth debug时 打印term args的深度
      */
     toString(depth?: number): string
-    range:Range
+    range: Range
 }
 export class TermImpl implements Term {
     semanticType?: SemanticType
-    nameArity:string
+    semanticArity: number
+    nameArity: string
     constructor(TermType: SyntaxType, token: Token, args: Term[] = [], startToken: Token = token, endToken: Token = token, name: string = token.value) {
         this.syntaxType = TermType
         this.token = token
@@ -78,17 +88,18 @@ export class TermImpl implements Term {
         this.endToken = endToken
         this.name = name
         this.arity = args.length
-        this.nameArity = this.name +'/'+ this.arity
+        this.semanticArity = this.arity
+        this.nameArity = this.name + '/' + this.arity
         args.forEach((x, index) => {
             x.container = this
             x.containerIndex = index
         })
     }
-    arity:number
-    name:string
-    
+    arity: number
+    name: string
+
     document?: MercuryDocument | undefined
-    get range():Range {
+    get range(): Range {
         return termRange(this);
     }
     container?: Term | undefined
@@ -215,11 +226,11 @@ export function infixCompound(token: Token, children: Term[], name?: string) {
 export class Clause extends TermImpl {
     term: Term
     end: Token
-    varMap: MultiMap<string, Term>= new MultiMap()
+    varMap: MultiMap<string, Term> = new MultiMap()
     callee?: Term
     called = new Array<Term>()
     constructor(term: Term, end: Token, varmap: MultiMap<string, Term>) {
-        super("$clause",end,[term],term.startToken,end);
+        super("$clause", end, [term], term.startToken, end);
         this.term = term
         this.end = end
         this.varMap = varmap
@@ -236,20 +247,20 @@ export class Clause extends TermImpl {
 }
 
 export class RootNode extends TermImpl {
-    constructor(clauses:Clause[]){
-        let token:Token = {
-            type:"EOF",
-            line:0,
-            col:0,
-            value:"",
-            text:"",
-            offset:-1,
-            lineBreaks:0
+    constructor(clauses: Clause[]) {
+        let token: Token = {
+            type: "EOF",
+            line: 0,
+            col: 0,
+            value: "",
+            text: "",
+            offset: -1,
+            lineBreaks: 0
         }
-        super("$rootNode",token,clauses)
+        super("$rootNode", token, clauses)
     }
-    declare args:Clause[]
-    
+    declare args: Clause[]
+
 }
 /**
  * 将 startToken 和 endToken 转化为 Range
@@ -308,10 +319,9 @@ export function termRange(term: Term): Range {
 function fixArity(term: Term) {
     for (const arg of term.args) {
         if (arg.name == "!" && arg.arity == 1 && arg.args[0].token.type == "variable") {
-            term.arity++
+            term.semanticArity++
         }
     }
-    term.nameArity = term.name +'/'+ term.arity
 }
 /**
  * 在term的范围内查找位置为position的term或subterm
@@ -321,22 +331,22 @@ function fixArity(term: Term) {
  */
 export function search(term: Term | undefined, position: Position): Term | undefined {
     switch (term?.syntaxType) {
-        case "$rootNode":{
+        case "$rootNode": {
             let clauses = (term as RootNode).args
-            let low = 0, high =clauses.length-1;
+            let low = 0, high = clauses.length - 1;
             const line = position.line;
-            while (low <= high){
-                const mid = Math.floor((low + high)/2)
+            while (low <= high) {
+                const mid = Math.floor((low + high) / 2)
                 const clause = clauses[mid];
                 let clauseRange = clause.range;
-                if (clauseRange.start.line>line){
-                    high = mid-1;
+                if (clauseRange.start.line > line) {
+                    high = mid - 1;
                 }
-                else if(clauseRange.end.line<line){
+                else if (clauseRange.end.line < line) {
                     low = mid + 1;
                 }
-                else{
-                        return search(clause,position);
+                else {
+                    return search(clause, position);
 
                 }
             }
@@ -386,7 +396,7 @@ function termToString(term: Term, depth: number = 1) {
             return `${term.name}(${argsString})`
         }
         default:
-            return  term.name
+            return term.name
     }
 }
 

@@ -195,6 +195,26 @@ goal ---> unify_expr(Ctx, Term, Term, Purity)        % X = Y
 
 所有声明均以 `:- Functor(...)` 形式出现，由 `parse_item.m` 按 functor 名派发。
 
+以下每小节均分两部分：**语法**（符号在哪里**定义**）与**可被引用的位置**（符号在哪里**被使用**）。
+二者的区分正是定义/引用索引（跳转到定义、查找引用）的依据；同一符号可在多个位置被引用，
+但定义位置唯一（含多处子句定义时按 head 归并）。注意：构造子与 pred/func 调用在解析树层
+**同形**（都是 functor），归类延迟到类型检查/linker 阶段（见 §5.1、§9.1）。
+
+**LS 实现的索引结构**（`document-visitor.ts`，均随 `VisitResult` 输出）：
+
+| 索引 | 内容 | 跳转定义 | 查找引用 |
+|---|---|---|---|
+| `definition` | 类型 / 构造子（`constructor`）/ inst / mode / typeclass / instance / mutable / 子句定义 | ✅ 按引用的 semanticType 类别过滤（type 引用不会命中同名 inst 定义） | — |
+| `declaration` | `:- pred/func` 声明（与子句定义分离） | ✅（go to declaration） | — |
+| `reference` | 子句体里的 pred/func/构造子调用、模块名 | — | ✅（default 分支） |
+| `typeReference` | 类型引用位置（见 §5.1 标注） | — | ✅（`case 'type'`） |
+| `instReference` | inst 引用位置（见 §5.2 标注） | — | ✅（`case 'inst'`） |
+| `modeReference` | mode 引用位置（见 §5.3 标注） | — | ✅（`case 'mode'`） |
+
+引用 term 带 `semanticArity`（语义元数）时（`Type/Arity` 写法、DCG `+2`），
+hover 显示与定义/引用匹配均按语义元数进行（`utils.ts: semanticArityOf`）。
+下文各"可被引用的位置"用 ✅ 标注**已索引**、❌ 标注**尚未索引**的引用位置。
+
 ### 5.1 类型声明（`parse_type_defn.m`）
 ```
 :- type T.                                  % 抽象类型
@@ -214,6 +234,29 @@ goal ---> unify_expr(Ctx, Term, Term, Purity)        % X = Y
 - `::` 为 inst 注解：`arg_field_name = yes(ctor_field_name(Field))`（`parse_type_defn.m:401-413`）。
 - 构造函数 AST：`ctor(Ordinal, MaybeExistConstraints, Functor, Args, Arity, Context)`（`prog_data.m:485-509`）。
 
+**类型名 `T` 可被引用的位置**（定义于本处，引用于；✅ = 已索引进 `typeReference`）：
+- ✅ 其它类型声明的体中：等价 `type T2 == T` 的右侧 `U`、子类型 `type T2 =< T` 的 `Super`、
+  DU 构造子参数类型（递归，如 `c2(list(string))` 里的 `list`/`string`）；
+- ✅ `pred` / `func` 声明的参数类型与返回类型（§5.4）：裸 `Type`、`Type :: Inst` /
+  `Type >> Mode` 的类型部分、返回 `(R :: T)`；参数化类型的参数也递归索引（`list(int)`）；
+- ✅ `instance C(T1, ..., Tn)` 的类型位置、typeclass 方法签名（§5.5、§11）；
+- ✅ inst 声明 `inst I for T/Arity` 的 `Type` 位置（§5.2）——按 `Type/Arity` 写法带
+  `semanticArity`（如 `for diet/1` 里 `diet` 显示与匹配为 `diet/1`）；
+- ✅ `:- mutable(Var, T, ...)` 的类型位置（§5.7）；
+- ✅ 项层类型限定：有类型项 `X :: T`、显式限定 `X : T`（§9.1）；
+- ❌ `where` 属性体内的类型（`representation = ...` 等，需先区分属性关键字与值）；
+- ❌ `pragma foreign_type`（§14）；
+- ❌ 类型类约束位置（§5.5）；`with_type(T, X)` 本 parser 不支持（clause 体语法报错）。
+
+**构造子 `C`**（DU / `=< Super ---> ...` 里的 `C1 ; C2`）：
+- 定义位置标为 `constructor`（不是 `type`），与类型名同类目区分地进 `definition`
+  （大纲显示为 EnumMember，类型名为 Struct）；构造子参数仍按类型引用索引；
+- 引用位置：任意数据项/模式位置（子句头与体中的 functor，§9.1）——与谓词/函数调用**同形**，
+  一个 functor 是构造子还是调用，由类型/模式检查在 linker 之后判定，解析树层无法区分
+  （体中使用为无标签 functor 引用，goto def 按名字+语义元数命中 `constructor` 定义）；
+- inst 体内部：`bound(... ; C(Inst, ...))`（§5.2）；
+- 其它类型的 DU 体中（嵌套引用）。
+
 ### 5.2 实例（inst）声明（`parse_inst_mode_defn.m`、`parse_inst_mode_name.m`）
 ```
 :- inst I == inst_expr.                  % 等价定义
@@ -224,6 +267,22 @@ inst 体关键字：`free`、`ground`、`clobbered`、`mostly_clobbered`、`any`
 `mostly_unique_any`、`clobbered_any`、`not_reached`、`unique`、`mostly_unique`、`bound(...)`、
 `is` / `=<`、`bound_unique`（向后兼容）。
 
+**inst 名 `I` 可被引用的位置**（定义于本处，引用于；✅ = 已索引进 `instReference`）：
+- ✅ `pred` / `func` 参数的参数化模式：`Type :: in(I)`、`Type >> in(I)` 的 inst 参数
+  （§5.4，如 `in(node)` 的 `node`）——注意 `in` 是内置 mode，标 `mode` 但不进
+  `modeReference`（见 §5.3）；
+- ✅ mode 声明体：`mode M == I >> J` 的 `InstA` / `InstB` 位置（§5.3，跳过高阶
+  `pred(...)`/`func(...)` 头）；
+- 内置 inst（`ground`/`any`/`free`/`unique`/`mostly_unique`/`mostly_uniq`/`clobbered`/
+  `mostly_clobbered`/`clobbered_any`/`unique_any`/`mostly_unique_any`/`not_reached`/
+  `bound_unique`）标 `inst` 但**不进** `instReference`；
+  （标 `mode`，进 `modeReference`，见 §5.3），不进 `instReference`；
+- ❌ 其它 inst 体内部：`bound(... ; f(I, J))`、等价 `inst I2 == I`、受限 `=<`；
+- ❌ 高阶模式的 inst 位置：`pred(I1, I2) is Det` / `func(...) is Det`（§7）。
+
+跳转定义与查找引用已支持 inst：inst 引用 goto def 按类别只命中 inst 定义
+（同名同元数的 type 定义不混入）；从 inst 定义查找引用只返回 `instReference` 中的位置。
+
 ### 5.3 模式（mode）声明（`parse_inst_mode_defn.m`、`parse_inst_mode_name.m`）
 ```
 :- mode M == InstA >> InstB.             % 从 InstA 到 InstB 的模式
@@ -231,6 +290,18 @@ inst 体关键字：`free`、`ground`、`clobbered`、`mostly_clobbered`、`any`
 ```
 核心 `>>` 语法：`from_to_mode(InstA, InstB)`（`parse_inst_mode_name.m:151-163`）。
 高阶模式用 `pred(...)` / `func(...) is Det`（`is` 关键字）。
+
+**mode 名 `M` 可被引用的位置**（定义于本处，引用于；✅ = 已索引进 `modeReference`）：
+- ✅ `pred` / `func` 声明的参数模式：`Type :: M` / `Type >> M` 的右侧整体（§5.4）——
+  含裸 mode（`T :: my_mode`）与参数化模式（`T :: in(I)` 的 `in`），
+  其 inst 参数另进 `instReference`，见 §5.2；
+- 内置模式（`in`/`out`/`di`/`uo`/`ui`/`muo`）标 `mode` 但**不进** `modeReference`；
+- ❌ clause 级模式限定（如 `p(X::in) :- ...` 的 head 注解）；
+- ❌ `pragma mode` / `pragma` 相关指令中引用模式名（§14）；
+- ❌ 其它 mode 体内部（参数化 mode `m(I)` 的引用位置）。
+
+跳转定义与查找引用已支持 mode：mode 引用 goto def 按类别只命中 mode 定义；
+从 mode 定义查找引用只返回 `modeReference` 中的位置。
 
 ### 5.4 谓词 / 函数声明（`parse_item.m:1023-1106`）
 ```
@@ -244,13 +315,59 @@ inst 体关键字：`free`、`ground`、`clobbered`、`mostly_clobbered`、`any`
 - 确定性后缀 `is Detism`（`parse_determinism_suffix`，`parse_item.m:1039`）。
 - 量化/约束/purity 前缀（`parse_item.m:275-293`）：`some`/`all`、`=>`/`<=`、`impure`/`semipure`。
 
+**谓词名 `P` 可被引用的位置**（定义于本处，引用于；✅ = 已索引进 `reference`）：
+- 子句定义头（定义位置本身，§4，进 `definition`）；
+- ✅ 子句体目标：`p(X, Y)` 调用目标 → `call_expr`（§9.2）；
+- ✅ 高阶引用：闭包 `p/3`（`Name/Arity` 形式，标 `pred`、记 `semanticArity = Arity`；
+  `/` 本体不进索引）、`predicate(T1, ...)` 高阶类型（同 `pred(...)` 处理）、`apply`
+  调用目标（§12）；
+- ✅ `:- initialise p/2.` / `:- finalise p/2.`：`PredName` 是 pred 引用（§5.7）；
+- ✅ pragma 指令（§14）：`inline`/`no_inline`/`obsolete`/`obsolete_proc`/`promise_pure`/
+  `foreign_export` 等的 `Name/Arity` 参数（标 `pred`），`foreign_proc` 的过程头
+  `p(X::in, Y::out)`（标 `pred`）；`foreign_export_enum` 的枚举构造子 `color/0`
+  进 `reference` 但不标 `pred`；
+- ✅ typeclass 方法签名（§5.5）与 instance 方法实现（§11.2）（进 `declaration`）；
+- ✅ `:- promise <Goal>` 断言的 goal 内（§5.6）。
+
+**函数名 `F` 可被引用的位置**（定义于本处，引用于）：
+- ✅ 表达式/数据项中的调用 `f(X)`（§9.1、§9.3——解析树层无独立 expr，函数调用就是 functor）；
+- 子句定义头 `f(A) = R :- ...`（定义位置本身）；
+- ✅ 高阶引用：`F = f/1`（`Name/Arity` 形式，同闭包）、`apply`、`function(...) = ...`
+  高阶类型（同 `func(...)` 处理）、`func(...) is Det` 模式（§12）；
+- ✅ pragma 指令（同谓词，§14）；
+- ✅ typeclass / instance 方法（§11）。
+
+pred / func 的子句体引用走 `reference` 索引（✅）；类型类方法签名里的 pred/func
+经 `:- pred/func` 声明路径索引（✅，进 `declaration`）。
+
 ### 5.5 类型类 / 实例（`parse_class.m`，见第 11 节）
+```
+:- typeclass TC(T) where [ ... ].        % 类型类声明（方法签名在 where 块）
+:- instance TC(T) where [ ... ].         % 实例声明（方法实现在 where 块）
+```
+- 语法细节见 §11.1–11.3。
+
+**类型类名 `TC` 可被引用的位置**（定义于本处，引用于）：
+- 类型类约束：`pred` / `func` / typeclass 声明中 `T <= TC(...)` 的约束位置（§11.3）；
+- typeclass 声明的超类位置：`typeclass TC(T) <= TC2(T, ...)`（§11.1）；
+- instance 声明头：`instance TC(T1, ..., Tn)`（§11.2）；
+- pragma `type_spec`（§14）。
+
+❌ 以上 typeclass 引用位置**均尚未索引**（无 typeclassReference）。注：带约束的声明
+`:- pred ... is det <= TC(T).` 本身已能被索引（visitor 解包 `<=/2` 约束后正常声明处理），
+只是约束里的 `TC` 未作为引用记录。
+
+**instance 声明引用的符号**：类型类名 `TC`、被实例化的类型 `T1..Tn`（§5.1）、
+`where` 块方法实现里引用的 pred / func / typeclass 方法名。
 
 ### 5.6 断言（assertion）
 ```
 :- promise <Goal>.                       % 承诺（正确性断言）
 ```
 其余 `require_*` 以 pragma 形式存在（见第 14 节）。`expect` 是运行期断言（在 `require` 库），不属解析树级声明。
+
+**可被引用的位置**：`<Goal>` 是普通目标，可引用任意 pred / func / mutable（§9.2）；
+断言引用的符号必须与对应声明处一致（编译期校验）。
 
 ### 5.7 可变状态与初始化
 ```
@@ -259,6 +376,15 @@ inst 体关键字：`free`、`ground`、`clobbered`、`mostly_clobbered`、`any`
 :- finalise    PredName.
 ```
 （`parse_mutable.m:38`，AST：`item_mutable_info`，`prog_item.m:294-334`）
+
+**可变变量 `VarName` 可被引用的位置**（定义于本处，引用于）：
+- 子句体中的读取 `Var` 与写入 `Var := X`（§9.2 合一/赋值目标）；
+- 状态变量语法糖：`!Var`、`!.Var`（读）、`!:Var`（写）（§9.1）；
+- 自动生成的访问谓词 `get_VarName/N`、`set_VarName/N` 可像普通 pred 一样被引用；
+- `:- initialise` / `:- finalise` 引用的 `PredName` 必须是本模块中声明的 pred（§5.4）。
+
+`:- mutable` 的类型位置已索引（✅ `typeReference`）；VarName 本体的体引用
+（`!Var` 等）走 variable 的 clause 级 `varMap` 索引（✅）。
 
 ---
 
@@ -394,6 +520,9 @@ inst 体关键字：`free`、`ground`、`clobbered`、`mostly_clobbered`、`any`
 
 调用目标：`p(X, Y)` → `call_expr(Context, unqualified("p"), [X,Y], pure)`；对自由变量/字面量的
 调用退化为 `call_expr(.., "call", [Term])`。
+
+goal 级 purity 前缀 `impure Goal` / `semipure Goal` / `pure Goal`（解析为 `impure/1` 等
+单参包裹）是**关键字**：visitor 跳过词头（不进 `reference`），目标本体照常索引（✅）。
 
 ### 9.3 表达式（不独立成类）
 - `3 + 4 * X` → `functor(atom("+"), [3, functor(atom("*"), [4, X])])`。

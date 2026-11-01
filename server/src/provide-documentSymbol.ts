@@ -1,5 +1,5 @@
 import { CancellationToken, DocumentSymbol, DocumentSymbolParams, SymbolInformation, SymbolKind } from 'vscode-languageserver'
-import { nameArity, showNameArity, sleep } from './utils'
+import { semanticNameArityOf, sleep } from './utils'
 import { termRange, StartEndTokenToRange, Term } from './term'
 import { stream } from './stream'
 import { DefaultMercuryDocuments, mercuryDocuments } from './document-manager'
@@ -28,9 +28,9 @@ export async function DocumentSymbolProvider(params: DocumentSymbolParams,cancel
         })
     }
     let definition = document.visitResult.definition;
-    let KeyValuePairs = definition.values().map(x=>[x.nameArity,x] as [string ,Term]);
+    let KeyValuePairs = definition.values().map(x=>[semanticNameArityOf(x),x] as [string ,Term]);
     let map  = new MultiMap(KeyValuePairs)
-    for (const [nameArity,funcTerms] of map.entriesGroupedByKey()) {
+    for (const [displayName,funcTerms] of map.entriesGroupedByKey()) {
         let subFuncs:DocumentSymbol[]=[] 
         for (const funcTerm of funcTerms ) {
             let children:DocumentSymbol[]=[] 
@@ -45,7 +45,7 @@ export async function DocumentSymbolProvider(params: DocumentSymbolParams,cancel
             }
             let range = termRange(funcTerm.clause!)
             subFuncs.push({
-                name: nameArity,
+                name: displayName,
                 kind: typeToKind(funcTerm.semanticType),
                 selectionRange: funcTerm.range,
                 children,
@@ -59,7 +59,7 @@ export async function DocumentSymbolProvider(params: DocumentSymbolParams,cancel
             let funcTerm = funcTerms[0];
             let range= StartEndTokenToRange(funcTerms[0].clause!.startToken,funcTerms[funcTerms.length-1].clause!.endToken);
             symbols.push({
-                name: nameArity,
+                name: displayName,
                 kind:typeToKind(funcTerm.semanticType),
                 range,
                 selectionRange: termRange(funcTerm),
@@ -79,6 +79,8 @@ function typeToKind(type:SemanticType|undefined):SymbolKind{
             return SymbolKind.Boolean
         case 'type':
             return SymbolKind.Struct
+        case 'constructor':
+            return SymbolKind.EnumMember
         case 'module':
             return SymbolKind.Module
         case 'typeclass':

@@ -1,5 +1,5 @@
 import { Location, ReferenceParams } from 'vscode-languageserver'
-import { sleep } from './utils'
+import { semanticArityOf, sleep } from './utils'
 import { Term, search, termRange } from './term'
 import { mercuryDocuments } from './document-manager'
 import { URI } from 'vscode-uri'
@@ -33,8 +33,24 @@ export async function ReferenceProvider(params:ReferenceParams) {
             findReferences(term,refs);
             return refs;
         }
-        case 'type':
-            break
+        case 'type':{
+            // 类型引用在独立的 typeReference 索引里，不会混入 pred / inst 引用
+            let refs:Location[] = [];
+            findTypeReferences(term,refs);
+            return refs;
+        }
+        case 'inst':{
+            // inst 引用在独立的 instReference 索引里
+            let refs:Location[] = [];
+            findInstReferences(term,refs);
+            return refs;
+        }
+        case 'mode':{
+            // mode 引用在独立的 modeReference 索引里
+            let refs:Location[] = [];
+            findModeReferences(term,refs);
+            return refs;
+        }
         case 'module':{
             let refs:Location[] = [];
             findReferences(term,refs);
@@ -50,7 +66,31 @@ export async function ReferenceProvider(params:ReferenceParams) {
 function findReferences(term:Term,refs:Location[]){
     for (const doc of mercuryDocuments.all) {
         for (const refTerm of doc.visitResult?.reference.get(term.name)??[]) {
-            if(refTerm.arity!=term.arity) continue;
+            if(semanticArityOf(refTerm)!=semanticArityOf(term)) continue;
+            refs.push({uri:doc.uri.toString(),range:termRange(refTerm)})
+        }
+    }
+}
+function findTypeReferences(term:Term,refs:Location[]){
+    for (const doc of mercuryDocuments.all) {
+        for (const refTerm of doc.visitResult?.typeReference.get(term.name)??[]) {
+            if(semanticArityOf(refTerm)!=semanticArityOf(term)) continue;
+            refs.push({uri:doc.uri.toString(),range:termRange(refTerm)})
+        }
+    }
+}
+function findInstReferences(term:Term,refs:Location[]){
+    for (const doc of mercuryDocuments.all) {
+        for (const refTerm of doc.visitResult?.instReference.get(term.name)??[]) {
+            if(semanticArityOf(refTerm)!=semanticArityOf(term)) continue;
+            refs.push({uri:doc.uri.toString(),range:termRange(refTerm)})
+        }
+    }
+}
+function findModeReferences(term:Term,refs:Location[]){
+    for (const doc of mercuryDocuments.all) {
+        for (const refTerm of doc.visitResult?.modeReference.get(term.name)??[]) {
+            if(semanticArityOf(refTerm)!=semanticArityOf(term)) continue;
             refs.push({uri:doc.uri.toString(),range:termRange(refTerm)})
         }
     }

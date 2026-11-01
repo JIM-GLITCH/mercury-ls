@@ -42,11 +42,32 @@ function findDefTermInThisDocument( term: Term, document: MercuryDocument){
     let definition =document.visitResult?.definition
     if(!definition)
         return stream([])
+    // 按引用处的 semanticType 限定可匹配的定义类别：
+    // 例如 type 引用不应命中同名的 inst / pred / mode 定义
+    const defKinds = defKindsForRef(term.semanticType)
     let res = stream(definition.get(term.name))
         .filter(x=>sameArity(x,term))
+        .filter(x=>!defKinds || defKinds.includes(x.semanticType ?? ''))
         .map(term=>(uriTerm.create(uri,term)))
     return res;
 
+}
+
+/**
+ * 引用处的 semanticType → 允许匹配的定义 semanticType 集合。
+ * 未列出的引用（如子句体里的 functor 调用，可能是 pred/func/构造子）
+ * 在解析层无法区分类别，返回 undefined 表示不过滤。
+ */
+export function defKindsForRef(refType?: string): string[] | undefined {
+    switch (refType) {
+        case 'type': return ['type']
+        case 'inst': return ['inst']
+        case 'mode': return ['mode']
+        case 'typeclass': return ['typeclass']
+        case 'instance': return ['instance']
+        case 'mutable': return ['mutable']
+        default: return undefined
+    }
 }
 function findDefTermInOtherDocument(term: Term, document: MercuryDocument){
     let imports = document.visitResult?.imports;
@@ -96,6 +117,8 @@ export  function findDefTerms(params:uriTerm):Stream<uriTerm> {
         case 'func':
         case 'pred':
         case 'type':
+        case 'inst':
+        case 'mode':
         case 'typeclass':
         case 'instance':
         case 'mutable':

@@ -6,11 +6,22 @@ import { Clause, RootNode, Term, termRange } from './term'
 import { sameArity } from './utils'
 import { interruptAndCheck } from './promise-util'
 
+// 内置模式名：标 mode 但不进 modeReference
+const builtinModes = new Set(["in", "out", "di", "uo", "ui", "muo"])
+// 内置 inst 名：标 inst 但不进 instReference
+const builtinInsts = new Set([
+    "ground", "any", "free", "unique", "mostly_unique", "mostly_uniq",
+    "clobbered", "mostly_clobbered", "clobbered_any", "unique_any",
+    "mostly_unique_any", "not_reached", "bound_unique",
+])
 export type VisitResult = {
     module?:Term
     errors:Diagnostic[]
     definition: MultiMap<string,Term>,
     reference:MultiMap<string,Term>,
+    typeReference:MultiMap<string,Term>,
+    instReference:MultiMap<string,Term>,
+    modeReference:MultiMap<string,Term>,
     declaration:MultiMap<string,Term>,
     exports:MultiMap<string,Term>
     imports:Term[]
@@ -23,6 +34,9 @@ export class Visitor {
     errors: Diagnostic[] = []
     definition = new MultiMap<string, Term>()
     reference = new MultiMap<string, Term>()
+    typeReference = new MultiMap<string, Term>()
+    instReference = new MultiMap<string, Term>()
+    modeReference = new MultiMap<string, Term>()
     declaration = new MultiMap<string, Term>()
     export= new MultiMap<string, Term>()
     async visit(doc: MercuryDocument, cancelToken: CancellationToken) {
@@ -36,6 +50,9 @@ export class Visitor {
             errors:this.errors,
             definition:this.definition,
             reference:this.reference,
+            typeReference:this.typeReference,
+            instReference:this.instReference,
+            modeReference:this.modeReference,
             declaration:this.declaration,
             exports:this.export,
             imports:this.imports
@@ -98,6 +115,14 @@ export class Visitor {
             // case "fail":
             case "not/1":
             case "\\+/1":
+                {
+                    this.visitDcgBody(term.args[0])
+                    break
+                }
+            case "impure/1":
+            case "semipure/1":
+            case "pure/1":
+                // goal 级 purity 前缀是关键字：跳过词头，递归目标本体
                 {
                     this.visitDcgBody(term.args[0])
                     break
@@ -194,8 +219,28 @@ export class Visitor {
         throw new Error('Method not implemented.')
     }
     visitFuncOrPredOrConstr(term: Term) {
+        // 项层类型限定 `Term :: Type`：Type 是类型引用位置
+        if (nameArity(term, "::/2")) {
+            this.visitDataTerm(term.args[0])
+            this.visitTypeRef(term.args[1])
+            return
+        }
+        // 高阶闭包 `p/2`（Name/Arity）：pred/func 引用，语义元数取 Arity
+        if (this.visitNameArityRef(term)) return
         let rightTerm = this.visitQualifiedTerm(term)
         this.addReference(rightTerm)
+    }
+    // `Name/Arity` 形式（解析为 //2(Atom, IntAtom)）的 pred/func 引用：
+    // 标 pred、记语义元数、进 reference；非该形式返回 false
+    visitNameArityRef(term: Term): boolean {
+        if (!nameArity(term, "//2") || term.args.length !== 2) return false
+        const [nameTerm, arityTerm] = term.args
+        const n = Number.parseInt(arityTerm?.name ?? '', 10)
+        if (Number.isNaN(n) || isVariable(nameTerm)) return false
+        label(nameTerm, "pred")
+        nameTerm.semanticArity = n
+        this.addReference(nameTerm)
+        return true
     }
     visitFloat(term: Term) {
         label(term,"float")
@@ -226,9 +271,9 @@ export class Visitor {
                 if (term.args.length > 1) this.visitDataTerm(term.args[1])
                 break
             case 'explicitType':
-                // 显式类型限定： :/2 (Term : Type) 或 with_type/2
+                // 显式类型限定： :/2 (Term : Type) 或 with_type/2，第二参是类型引用位置
                 this.visitDataTerm(term.args[0])
-                this.visitDataTerm(term.args[1])
+                this.visitTypeRef(term.args[1])
                 break
             case 'lambda':
                 // 闭包： :-/2 或 --/2 (lambda 头, 体)
@@ -264,8 +309,9 @@ export class Visitor {
     }
 
     DcgFixArity(term: Term) {
-        term.arity += 2
-        updateNameArity(term)
+        // DCG 头/调用的语义元数 = 语法元数 + 2（隐式的输入/输出列表参数）；
+        // 不再直接改语法 arity，显示与定义/引用匹配走 semanticArity
+        term.semanticArity = term.arity + 2
     }
     visitRuleHead(term: Term) {
         if (nameArity(term, '=/2')) {
@@ -302,6 +348,14 @@ export class Visitor {
                 }
             case "not/1":
             case "\\+/1":
+                {
+                    this.visitRuleBody(term.args[0])
+                    break
+                }
+            case "impure/1":
+            case "semipure/1":
+            case "pure/1":
+                // goal 级 purity 前缀是关键字：跳过词头，递归目标本体
                 {
                     this.visitRuleBody(term.args[0])
                     break
@@ -444,6 +498,75 @@ export class Visitor {
     }
     visitTypeRef(term: Term) {
         label(term, "type")
+        if (nameArity(term, "::/2")) {
+            // `Type :: Inst` 形式（如函数返回 `(R :: out)`）：只有类型部分是类型引用，
+            // mode/inst 部分不是
+            if (!isVariable(term.args[0])) this.visitTypeRef(term.args[0])
+            return
+        }
+        // 高阶类型 `func(A1, ...) = R`（别名 `function(...)`）：`=` 与词头是关键字不是类型引用，
+        // 参数类型与返回类型才是（递归，变量除外）
+        if (nameArity(term, "=/2") && ["func", "function"].includes(term.args[0]?.name)) {
+            for (const a of term.args[0].args ?? []) {
+                if (!isVariable(a)) this.visitTypeRef(a)
+            }
+            if (!isVariable(term.args[1])) this.visitTypeRef(term.args[1])
+            return
+        }
+        // 高阶类型 `pred(A1, ...)`（别名 `predicate(...)`）：同上
+        if (["func", "function", "pred", "predicate"].includes(term.name)) {
+            for (const a of term.args ?? []) {
+                if (!isVariable(a)) this.visitTypeRef(a)
+            }
+            return
+        }
+        const right = this.visitQualifiedTerm(term)
+        this.typeReference.add(right.name, right)
+        // 参数化类型的参数也是类型引用位置（类型变量除外）
+        for (const arg of right.args ?? []) {
+            if (!isVariable(arg)) this.visitTypeRef(arg)
+        }
+    }
+    visitInstRef(term: Term) {
+        label(term, "inst")
+        const right = this.visitQualifiedTerm(term)
+        // 内置 inst（ground/any/free/...）标 inst 但不进 instReference
+        if (builtinInsts.has(right.name)) return
+        this.instReference.add(right.name, right)
+        // 参数化 inst 的参数也是 inst 引用位置（变量除外）
+        for (const arg of right.args ?? []) {
+            if (!isVariable(arg)) this.visitInstRef(arg)
+        }
+    }
+    visitModeRef(term: Term) {
+        label(term, "mode")
+        const right = this.visitQualifiedTerm(term)
+        // 内置模式（in/out/di/uo/ui/muo）标 mode 但不进 modeReference
+        if (builtinModes.has(right.name)) return
+        this.modeReference.add(right.name, right)
+        // 参数化模式的参数是 inst 引用位置（如 in(node) 的 node），由调用方处理
+    }
+    // 高阶模式 `func(M1, ...) = R is Det` / `pred(M1, ...) is Det`：
+    // 参数是 mode 引用位置，确定性标 determinism；非高阶形式返回 false
+    visitHigherOrderMode(term: Term): boolean {
+        let expr = term
+        if (nameArity(expr, "is/2")) {
+            this.visitDeterminism(expr.args[1])
+            expr = expr.args[0]
+        }
+        if (nameArity(expr, "=/2") && ["func", "function"].includes(expr.args[0]?.name)) {
+            for (const a of [...(expr.args[0].args ?? []), expr.args[1]]) {
+                if (!isVariable(a)) this.visitModeRef(a)
+            }
+            return true
+        }
+        if (["pred", "predicate"].includes(expr.name)) {
+            for (const a of expr.args ?? []) {
+                if (!isVariable(a)) this.visitModeRef(a)
+            }
+            return true
+        }
+        return false
     }
 
     visitFuncDeclFunc(func: Term) {
@@ -460,6 +583,10 @@ export class Visitor {
                 break
             case "func/1":
                 this.visitFuncDecl(term.args[0])
+                break
+            case "<=/2":
+                // 带类型类约束的声明：decl <= Constraint（如 pred ... is det <= diet_element(T)）
+                this.visitDecl(term.args[0])
                 break
             case "use_module/1":
                 this.visitUseModuleDecl(term.args[0])
@@ -589,8 +716,13 @@ export class Visitor {
             this.visitTypeConstrutor(term.args[1])
             return
         }
-        label(term, "type")
+        // C1/C2 是 data constructor，不是 type；单独标 constructor 以便与类型名区分
+        label(term, "constructor")
         this.addDefinition(term)
+        // 构造子参数是类型引用位置（类型变量除外）
+        for (const arg of term.args ?? []) {
+            if (!isVariable(arg)) this.visitTypeRef(arg)
+        }
     }
     visitTypeNameOrSubtype(term: Term) {
         if (nameArity(term, "=</2")) {
@@ -694,10 +826,17 @@ export class Visitor {
         }
     }
     visitFinaliseDecl(decl: Term) {
-        this.addReference(decl.args[0])
+        this.visitInitFinaliseRef(decl)
     }
     visitInitialiseDecl(decl: Term) {
-        this.addReference(decl.args[0])
+        this.visitInitFinaliseRef(decl)
+    }
+    // `:- initialise p/2.` / `:- finalise p/2.`：PredName 是 pred 引用（Name/Arity 形式）
+    visitInitFinaliseRef(decl: Term) {
+        const target = decl.args[0]
+        if (!target) return
+        if (this.visitNameArityRef(target)) return
+        this.addReference(target)
     }
     visitPromiseDecl(decl: Term) {
         // :- promise <Goal>. 把目标体当普通 goal 遍历以索引其中的引用
@@ -705,6 +844,37 @@ export class Visitor {
     }
     visitPragmaDecl(decl: Term) {
         label(decl, "pragma")
+        // pragma 引用的 pred/func/constructor 位置索引（§14）：
+        // - inline/no_inline/obsolete/obsolete_proc/promise_pure/type_spec/foreign_export:
+        //   参数是 Name/Arity（pred/func 引用）
+        // - foreign_proc: 第 2 参是过程头 `p(X::in, Y::out)`（functor 即 pred 引用）
+        // - foreign_export_enum: 第 2 参是枚举构造子 Name/Arity
+        if (decl.name === "foreign_proc") {
+            const head = decl.args?.[1]
+            if (head && !isVariable(head) && head.syntaxType !== "string") {
+                label(head, "pred")
+                this.addReference(head)
+            }
+            return
+        }
+        if (decl.name === "foreign_export_enum") {
+            const ctor = decl.args?.[1]
+            if (ctor && nameArity(ctor, "//2") && ctor.args[0] && !isVariable(ctor.args[0])) {
+                const n = Number.parseInt(ctor.args[1]?.name ?? '', 10)
+                const nameTerm = ctor.args[0]
+                if (!Number.isNaN(n)) nameTerm.semanticArity = n
+                this.addReference(nameTerm)
+            }
+            return
+        }
+        for (const arg of decl.args ?? []) {
+            this.visitPragmaArgRef(arg)
+        }
+    }
+    visitPragmaArgRef(term: Term) {
+        if (isVariable(term)) return
+        if (this.visitNameArityRef(term)) return
+        // 其它结构参数（属性列表等）不索引
     }
     visitOperatorDecl(decl: Term) {
         // :- infixl(Prio, Op).  Op（decl.args[1]）是被定义的运算符名
@@ -759,6 +929,10 @@ export class Visitor {
         }
         label(head, "instance")
         this.addDefinition(head)
+        // 实例化的类型参数是类型引用位置（类型变量除外）
+        for (const arg of head.args ?? []) {
+            if (!isVariable(arg)) this.visitTypeRef(arg)
+        }
         if (whereTerm) {
             for (const method of listToTerms(whereTerm.args[1])) {
                 if (nameArity(method, "pred/1")) {
@@ -774,6 +948,16 @@ export class Visitor {
     visitModeDecl(term: Term) {
         if(nameArity(term,"==/2")){
             this.visitModeName(term.args[0])
+            // `mode M == InstA >> InstB`：两侧都是 inst 引用位置（§5.2/5.3）；
+            // 跳过高阶模式 pred(...)/func(...) 头
+            const body = term.args[1]
+            if (nameArity(body, ">>/2")) {
+                for (const side of body.args) {
+                    if (!isVariable(side) && !['pred', 'predicate', 'func', 'function'].includes(side.name)) {
+                        this.visitInstRef(side)
+                    }
+                }
+            }
         } else if (nameArity(term,"is/2")){
             this.visitFuncOrPredModeDecl(term.args[0])
         } else {
@@ -829,6 +1013,16 @@ export class Visitor {
     visitInstOrForBlock(term: Term) {
         if(nameArity(term,"for/2")){
             this.visitInstName(term.args[0])
+            // `inst I for Type/Arity`：Type 是类型引用位置（Type/Arity 解析为 //2(Type, Arity)）
+            const typeSpec = term.args[1]
+            if (nameArity(typeSpec, "//2") && typeSpec.args[0] && !isVariable(typeSpec.args[0])) {
+                // Type 语法上是 0 元原子（arity 0），语义元数取 Type/Arity 的 Arity
+                const semanticArity = Number.parseInt(typeSpec.args[1]?.name ?? '', 10)
+                if (!Number.isNaN(semanticArity)) {
+                    typeSpec.args[0].semanticArity = semanticArity
+                }
+                this.visitTypeRef(typeSpec.args[0])
+            }
         }else{
             this.visitInstName(term)
         }
@@ -847,9 +1041,11 @@ export class Visitor {
         } else if (nameArity(term, "=/2")) {
             let [func, ret] = term.args
             this.visitFuncDeclFunc(func)
+            this.visitTypeParams(func)
             this.visitFuncReturn(ret)
         } else {
             this.visitFuncDeclFunc(term)
+            this.visitTypeParams(term)
         }
     }
 
@@ -857,12 +1053,38 @@ export class Visitor {
         if (nameArity(term, "is/2")) {
             let [pred, determinism] = term.args
             label(pred,"pred")
+            this.visitTypeParams(pred)
             this.visitDeterminism(determinism)
 
             this.addDeclaration(pred)
         } else {
             label(term,"pred")
+            this.visitTypeParams(term)
             this.addDeclaration(term)
+        }
+    }
+    // 参数模式 Type / Type :: Inst / Type >> Mode：Type 是类型引用位置
+    visitTypeParams(pred: Term) {
+        for (const param of pred.args ?? []) {
+            if (nameArity(param, "::/2") || nameArity(param, ">>/2")) {
+                if (!isVariable(param.args[0])) this.visitTypeRef(param.args[0])
+                // `::`/`>>` 右侧是 mode 位置：整个标 mode 进 modeReference
+                // （如 `T :: node` 的 node、`T :: in(node)` 的 in）；
+                // 参数化模式的参数是 inst 引用位置（如 in(node) 的 node）
+                const modePart = param.args[1]
+                if (!isVariable(modePart)) {
+                    this.visitModeRef(modePart)
+                    for (const arg of modePart.args ?? []) {
+                        if (isVariable(arg)) continue
+                        // 高阶模式 func(M1,...) = R is Det / pred(M1,...) is Det：
+                        // 其参数是 mode 引用位置
+                        if (this.visitHigherOrderMode(arg)) continue
+                        this.visitInstRef(arg)
+                    }
+                }
+            } else if (!isVariable(param)) {
+                this.visitTypeRef(param)
+            }
         }
     }
     addReference(term: Term) {
@@ -1040,10 +1262,11 @@ function updateNameArity(term: Term) {
     term.nameArity = term.name + "/"+term.arity
 }
 
-export type SemanticType = 
+export type SemanticType =
     "func"|
     "pred"|
     "type"|
+    "constructor"|
     "inst"|
     "mode"|
     "module"|

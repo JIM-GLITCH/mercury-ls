@@ -1,5 +1,5 @@
 import { CallHierarchyIncomingCall, CallHierarchyIncomingCallsParams, CallHierarchyItem, CallHierarchyOutgoingCall, CallHierarchyOutgoingCallsParams, CallHierarchyPrepareParams, CancellationToken, SymbolKind } from 'vscode-languageserver'
-import {   nameArity, sameArity, sameSemanticType, sleep, termTokenRange, tokenRange } from './utils'
+import {   semanticNameArityOf, sameArity, sameSemanticType, sleep, termTokenRange, tokenRange } from './utils'
 import { Term, termRange } from './term'
 import { SemanticType } from "./document-visitor"
 import { stream } from './stream'
@@ -93,7 +93,7 @@ function findRefTermInDocument(term:Term,document:MercuryDocument){
 function uriTermToCallHierarchyItem(params: uriTerm):CallHierarchyItem {
     let {term,uri} = params;
     return {
-        name :nameArity(term),
+        name :semanticNameArityOf(term),
         kind :SemanticTypeToSymbolKind(term.semanticType),
         uri:uri.toString(),
         range:termRange(term),
