@@ -1,9 +1,10 @@
 import { CancellationToken, Diagnostic, DiagnosticSeverity } from 'vscode-languageserver'
 import { MercuryDocument } from './document-manager'
 import { stream } from './stream'
-import { equalQualified, moduleManager } from './document-moduleManager'
-import { label } from './document-visitor'
+import { equalQualified, exportManager, moduleManager } from './document-moduleManager'
+import { label, SemanticType, VisitResult } from './document-visitor'
 import { Term } from './term'
+import { sameArity } from './utils'
 import { interruptAndCheck } from './promise-util'
 import { MultiMap } from './multimap'
 
@@ -30,47 +31,51 @@ export class DefaultLinker implements Linker{
     errors = [] as Diagnostic[]
     async link(document: MercuryDocument, cancelToken:CancellationToken ) {
         this.errors= []
-        // let importedSymbolKeyValuePairs = stream(document.visitResult!.imports)
-        //     .map(importTerm =>{
-        //         let targetDoc = moduleManager.get(importTerm);
-        //         if(!targetDoc)
-        //             return undefined
-        //         // keep information that which docs import targetDoc 
-        //         // when targetDoc is changed or deleted, rebuild these docs
-        //         targetDoc.importedByDocs.push(document)
-        //         return targetDoc.visitResult!.exports
-        //     })
-        //     .nonNullable()
-        //     .flat()
-        // let importedSymbolMap = new MultiMap(importedSymbolKeyValuePairs)
-        // loop:
-        // for (const term of document.visitResult!.reference.values()) {
-        //     await interruptAndCheck(cancelToken);
-        //     let definition = document.visitResult!.definition
-        //     // first search local scope 
-        //     if(definition.has(term.name)){
-        //         let definitionTerm = definition.get(term.name)[0]
-        //         label(term,definitionTerm.semanticType!)
-        //         continue loop;
-        //     }
-        //     this.addError(" undefined Term",term)
-        // }
-        //     // then search imported Scope
-        //     if(importedSymbolMap.has(term.name)){
-        //         for(const targetTerm of importedSymbolMap.get(term.name)){
-        //             if(equalQualified(targetTerm, term)){
-        //                 // term.definition = targetTerm
-        //                 label(term,targetTerm.semanticType!)
-        //                 continue loop;
-                        
-        //             }
-        //         }
-        //     }
-        //     // if can't find definition， report error
-        //     this.addError(" undefined Term",term)
-        // }
+        const vr = document.visitResult
+        if (vr) {
+            // 解析期无法区分 func 调用 / 构造子 / pred 引用的无类别 functor 引用
+            // （表达式/数据位置的 `f(...)`，如 `version_array.init(N, X)`）：
+            // 在此按名字与语义元数到 definition/declaration（本模块及 import/限定名
+            // 指向的模块）消解；命中类别一致才标注，歧义或未命中保持无类别
+            // （goto def 对无类别引用走不限类别匹配）
+            for (const [name, refs] of vr.reference.entriesGroupedByKey()) {
+                await interruptAndCheck(cancelToken)
+                for (const ref of refs) {
+                    if (ref.semanticType) continue
+                    const kind = this.resolveRefKind(ref, name, vr)
+                    if (kind) label(ref, kind)
+                }
+            }
+        }
         document.linkResult = {errors:this.errors}
-    }   
+    }
+    // 消解无类别引用的 semanticType：本模块 + import 模块（限定名则为目标模块）
+    // 中同名同元数的定义/声明，全部候选类别一致时返回该类别
+    private resolveRefKind(ref: Term, name: string, vr: VisitResult): SemanticType | undefined {
+        let candidates = [
+            ...vr.definition.get(name),
+            ...vr.declaration.get(name),
+        ]
+        if (ref.qualified) {
+            const targetDoc = moduleManager.get(ref.qualified)
+            if (targetDoc?.visitResult) {
+                candidates = candidates.concat(this.lookupCandidates(targetDoc.visitResult, name))
+            }
+        } else {
+            // 全局导出索引：各模块 interface 段声明的符号，按名字直接取候选
+            candidates = candidates.concat(exportManager.get(name) as Term[])
+        }
+        const kinds = new Set(
+            candidates
+                .filter(d => sameArity(d, ref) && d.semanticType)
+                .map(d => d.semanticType as SemanticType)
+        )
+        if (kinds.size !== 1) return undefined
+        return kinds.values().next().value
+    }
+    private lookupCandidates(vr: VisitResult, name: string): Term[] {
+        return [...vr.definition.get(name), ...vr.declaration.get(name)]
+    }
     addError(msg: string, term: Term) {
         this.errors.push(Diagnostic.create(
             term.range,

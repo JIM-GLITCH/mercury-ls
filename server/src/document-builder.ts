@@ -6,7 +6,7 @@ import { URI } from 'vscode-uri'
 import { validator } from './document-validator'
 import { Visitor } from './document-visitor'
 // import { moduleMap } from './globalSpace'
-import { equalQualified, moduleManager } from './document-moduleManager'
+import { equalQualified, exportManager, moduleManager } from './document-moduleManager'
 import { linker } from './document-linker'
 import { stream } from './stream'
 import { connection, sendBarText as changClientBarText, sendMemoryUsage } from './server'
@@ -36,6 +36,8 @@ export class DefaultDocumentBuilder{
                 if(visitResult.module){
                     moduleManager.set(visitResult.module,doc);
                 }
+                // 同步全局导出符号索引（linker 按名字取候选用）
+                exportManager.set(doc);
                 doc.state = DocumentState.Visited;
                 await interruptAndCheck((cancelToken))
             }
@@ -65,6 +67,7 @@ export class DefaultDocumentBuilder{
             let deletedDocument = mercuryDocuments.deleteDocument(deletedUri);
             if(deletedDocument){
                 moduleManager.delete(deletedDocument);
+                exportManager.delete(deletedDocument);
                 deletedDocuments.push(deletedDocument)
             }
         }

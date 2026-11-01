@@ -12,6 +12,8 @@ import { sameArity, semanticNameArityOf } from '../utils'
 import { termRange } from '../term'
 import { findDefTerms, uriTermToLocation } from '../provide-definition'
 import { ReferenceProvider } from '../provide-reference'
+import { linker } from '../document-linker'
+import { exportManager, moduleManager } from '../document-moduleManager'
 import { mercuryDocumentFactory, mercuryDocuments } from '../document-manager'
 
 interface DefEntry {
@@ -595,6 +597,19 @@ describe('visitor: pred/func reference positions (reference)', () => {
     expect(refs.get('/')?.length ?? 0).toBe(0)
   })
 
+  it('skips declaration-level purity prefixes (impure/semipure/pure)', async () => {
+    const v = await visitSource(
+      ':- impure pred imp is det.\n' +
+      ':- semipure pred semip is det.\n',
+    )
+    const decls = declarationsOf(v)
+    expectLabeled(decls, 'imp', 'imp/0', 'pred')
+    expectLabeled(decls, 'semip', 'semip/0', 'pred')
+    // purity 前缀词头不进任何索引
+    expect((v as any).reference.get('impure')?.length ?? 0).toBe(0)
+    expect((v as any).reference.get('semipure')?.length ?? 0).toBe(0)
+  })
+
   it('skips goal-level purity prefixes (impure/semipure/pure) and indexes the goal', async () => {
     const v = await visitSource(
       ':- pred garbage_collect(!IO).\n' +
@@ -630,6 +645,166 @@ describe('goto definition / find references for insts (providers)', () => {
     } as any)
     return doc
   }
+
+  it('resolves foreign_proc function head init/2 to its def', async () => {
+    const src = [
+      ':- module t.',
+      ':- interface.',
+      ':- type va ---> empty.',
+      ':- func init(int, int) = va.',
+      ':- end_module t.',
+      ':- implementation.',
+      'init(N, X) = empty.',
+      ':- pragma foreign_proc("C#",',
+      '    init(N::in, X::in) = (VA::out),',
+      '    [will_not_call_mercury, promise_pure, thread_safe],',
+      '    "VA = new version_array.ML_sva(version_array.ML_uva.init(N, X));").',
+    ].join('\n')
+    const uri = URI.parse('file:///foreign-proc-func.m')
+    const doc = await visitDoc(src, uri)
+
+    // foreign_proc 函数形式的头标 func（解包 =/2），而不是把 = 记成引用
+    const refTerm = doc.visitResult!.reference.get('init')
+      .find((t: any) => t.semanticType === 'func')
+    expect(refTerm).toBeTruthy()
+    expect((refTerm as any).semanticArity ?? (refTerm as any).arity).toBe(2)
+    const locs = (await findDefTerms({ uri, term: refTerm } as any))
+      .map(uriTermToLocation)
+      .toArray()
+    expect(locs.length).toBe(1)
+  })
+
+  it('labels unlabeled expression functors via linker resolution (func vs constructor)', async () => {
+    const src = [
+      ':- module t.',
+      ':- interface.',
+      ':- type va ---> empty ; cell(int, va).',
+      ':- func init(int, int) = va.',
+      ':- end_module t.',
+      ':- implementation.',
+      'init(N, X) = empty.',
+      'f(N, X) = VA :-',
+      '    VA0 = init(N, X),',
+      '    VA = VA0,',
+      '    VA1 = cell(1, VA0).',
+    ].join('\n')
+    const uri = URI.parse('file:///linker-label.m')
+    const doc = await visitDoc(src, uri)
+    await linker.link(doc, {
+      isCancellationRequested: false,
+      onCancellationRequested: () => undefined,
+    } as any)
+
+    // init(N, X) 按定义消解为 func；cell(1, VA0) 是构造子，不被误标 func
+    const initRef = doc.visitResult!.reference.get('init')[0]
+    expect(initRef.semanticType).toBe('func')
+    const cellRef = doc.visitResult!.reference.get('cell')[0]
+    expect(cellRef.semanticType).toBe('constructor')
+  })
+
+  it('resolves unqualified refs via the global export index (cross-module)', async () => {
+    const mk = async (src: string, name: string) => {
+      const uri = URI.parse(`file:///${name}.m`)
+      const doc = mercuryDocumentFactory.fromString(src, uri)
+      mercuryDocuments.addDocument(doc)
+      await new Visitor().visit(doc, {
+        isCancellationRequested: false,
+        onCancellationRequested: () => undefined,
+      } as any)
+      const mod = doc.visitResult!.module
+      if (mod) moduleManager.set(mod, doc)
+      exportManager.set(doc)
+      return doc
+    }
+    // va 模块 interface 段导出 empty/0
+    await mk(':- module va.\n:- interface.\n:- func empty = int.\n:- end_module va.\n', 'va-mod')
+    // t 模块引用 empty，自身无定义：经全局导出索引消解为 func
+    const docT = await mk(
+      ':- module t.\n:- interface.\n:- import_module va.\n:- end_module t.\n' +
+      ':- implementation.\ng(X) :- X = empty.\n',
+      't-mod',
+    )
+    await linker.link(docT, {
+      isCancellationRequested: false,
+      onCancellationRequested: () => undefined,
+    } as any)
+    const ref = docT.visitResult!.reference.get('empty')[0]
+    expect(ref.semanticType).toBe('func')
+  })
+
+  it('goto def resolves expression functors without category labels (func calls)', async () => {
+    const src = [
+      ':- module t.',
+      ':- interface.',
+      ':- func init(int, int) = int.',
+      ':- end_module t.',
+      ':- implementation.',
+      'init(N, X) = empty.',
+      'f(N, X) = VA :-',
+      '    VA0 = init(N, X),',
+      '    VA = VA0.',
+    ].join('\n')
+    const uri = URI.parse('file:///functor-def.m')
+    const doc = await visitDoc(src, uri)
+
+    // 表达式位置的 functor 引用（init(N, X)）没有 semanticType
+    const refTerm = doc.visitResult!.reference.get('init')[0]
+    expect(refTerm.semanticType).toBeUndefined()
+    const locs = (await findDefTerms({ uri, term: refTerm } as any))
+      .map(uriTermToLocation)
+      .toArray()
+    expect(locs.length).toBe(1)
+    // 命中定义子句头 init(N, X)（第 6 行，0 基 5）
+    expect(locs[0].range.start.line).toBe(5)
+  })
+
+  it('find references skips same-name terms qualified/resolved to other modules', async () => {
+    // 模块 version_array 定义 init/2 并自引用
+    const va = await visitDoc(
+      [
+        ':- module version_array.',
+        ':- interface.',
+        ':- func init(int, int) = int.',
+        ':- end_module version_array.',
+        ':- implementation.',
+        'init(N, X) = N.',
+        'k(X) :- X = init(1, 2).',
+      ].join('\n'),
+      URI.parse('file:///va.m'),
+    )
+    // 模块 other：限定引用 version_array.init（保留）、非限定 init（无 import，排除）
+    await visitDoc(
+      [
+        ':- module other.',
+        ':- interface.',
+        ':- end_module other.',
+        ':- implementation.',
+        'g(X) :- X = version_array.init(1, 2).',
+        'h(X) :- X = init(1, 2).',
+      ].join('\n'),
+      URI.parse('file:///other.m'),
+    )
+    // 模块 fourth：import 了 version_array 的非限定引用（保留）
+    await visitDoc(
+      [
+        ':- module fourth.',
+        ':- interface.',
+        ':- import_module version_array.',
+        ':- end_module fourth.',
+        ':- implementation.',
+        'm(X) :- X = init(1, 2).',
+      ].join('\n'),
+      URI.parse('file:///fourth.m'),
+    )
+
+    const defTerm = va.visitResult!.definition.get('init')[0]
+    const refs = await ReferenceProvider({
+      textDocument: { uri: va.uri.toString() },
+      position: termRange(defTerm).start,
+    } as any)
+    // va.k 的非限定自引用 + other.g 的 version_array.init 限定引用 + fourth.m（已 import）
+    expect(refs.length).toBe(3)
+  })
 
   it('goto def of inst ref resolves to the inst definition, not the same-name type', async () => {
     const src = [

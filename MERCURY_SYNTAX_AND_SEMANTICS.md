@@ -213,6 +213,15 @@ goal ---> unify_expr(Ctx, Term, Term, Purity)        % X = Y
 
 引用 term 带 `semanticArity`（语义元数）时（`Type/Arity` 写法、DCG `+2`），
 hover 显示与定义/引用匹配均按语义元数进行（`utils.ts: semanticArityOf`）。
+表达式/数据位置的 functor 引用（如 `version_array.init(...)`、构造子）解析层无法
+区分类别（不标 `semanticType`）：**linker 阶段**按名字与语义元数到 definition/declaration
+消解——本模块 + **全局导出索引**（各模块 `:- interface.` 段声明的符号，`exportManager`，
+文档构建/删除时同步）；限定名 `M.f` 则查目标模块。
+命中类别一致则补标（func/constructor/...）；歧义或未命中保持无类别，
+goto def 时对无类别引用**不限类别**匹配（含限定名 `M.f` 跨模块查找）。
+find references 按**名字 + 语义元数 + 可见性**过滤（Mercury 名字解析规则）：
+限定引用 `M.f` 只保留限定到目标模块的；非限定引用只保留目标模块自身或
+import 了目标模块的文档（模块名的显式出现一律保留）。
 下文各"可被引用的位置"用 ✅ 标注**已索引**、❌ 标注**尚未索引**的引用位置。
 
 ### 5.1 类型声明（`parse_type_defn.m`）
@@ -314,6 +323,8 @@ inst 体关键字：`free`、`ground`、`clobbered`、`mostly_clobbered`、`any`
 - 函数返回用 `=` 分隔。
 - 确定性后缀 `is Detism`（`parse_determinism_suffix`，`parse_item.m:1039`）。
 - 量化/约束/purity 前缀（`parse_item.m:275-293`）：`some`/`all`、`=>`/`<=`、`impure`/`semipure`。
+  声明级 purity 前缀（`impure pred ...`，解析为 `impure/1` 包裹）是**关键字**：visitor
+  跳过词头（不进索引），声明本体照常索引（✅）。
 
 **谓词名 `P` 可被引用的位置**（定义于本处，引用于；✅ = 已索引进 `reference`）：
 - 子句定义头（定义位置本身，§4，进 `definition`）；
@@ -323,8 +334,9 @@ inst 体关键字：`free`、`ground`、`clobbered`、`mostly_clobbered`、`any`
   调用目标（§12）；
 - ✅ `:- initialise p/2.` / `:- finalise p/2.`：`PredName` 是 pred 引用（§5.7）；
 - ✅ pragma 指令（§14）：`inline`/`no_inline`/`obsolete`/`obsolete_proc`/`promise_pure`/
-  `foreign_export` 等的 `Name/Arity` 参数（标 `pred`），`foreign_proc` 的过程头
-  `p(X::in, Y::out)`（标 `pred`）；`foreign_export_enum` 的枚举构造子 `color/0`
+  `foreign_export` 等的 `Name/Arity` 参数（标 `pred`）；`foreign_proc` 的过程头——
+  pred 形式 `p(X::in, Y::out)` 标 `pred`，函数形式 `init(N::in, X::in) = (VA::out)`
+  解包 `=/2` 取函数头标 `func`；`foreign_export_enum` 的枚举构造子 `color/0`
   进 `reference` 但不标 `pred`；
 - ✅ typeclass 方法签名（§5.5）与 instance 方法实现（§11.2）（进 `declaration`）；
 - ✅ `:- promise <Goal>` 断言的 goal 内（§5.6）。

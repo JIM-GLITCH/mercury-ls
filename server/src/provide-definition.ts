@@ -141,10 +141,10 @@ export  function findDefTerms(params:uriTerm):Stream<uriTerm> {
             }])
         }
         default:{
-            return stream([])
-            // // 查找所有map
-            // let defs =findDefinitionTermWithoutSamantic(term,document)
-            // return defs
+            // 数据/表达式位置的 functor（semanticType 未标注，如 `version_array.init(...)`、
+            // 构造子引用）：解析层无法区分 func 调用 / 构造子 / pred 引用，
+            // 不限类别，按名字与语义元数匹配 definition
+            return findDefinitionTerm(term, document);
         }
     }
 }

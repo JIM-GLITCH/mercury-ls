@@ -38,7 +38,7 @@ export class Visitor {
     instReference = new MultiMap<string, Term>()
     modeReference = new MultiMap<string, Term>()
     declaration = new MultiMap<string, Term>()
-    export= new MultiMap<string, Term>()
+    exports= new MultiMap<string, Term>()
     async visit(doc: MercuryDocument, cancelToken: CancellationToken) {
         let rootNode = doc.parseResult.value
         for (const clause of rootNode.args) {
@@ -54,7 +54,7 @@ export class Visitor {
             instReference:this.instReference,
             modeReference:this.modeReference,
             declaration:this.declaration,
-            exports:this.export,
+            exports:this.exports,
             imports:this.imports
         }
     }
@@ -588,6 +588,12 @@ export class Visitor {
                 // 带类型类约束的声明：decl <= Constraint（如 pred ... is det <= diet_element(T)）
                 this.visitDecl(term.args[0])
                 break
+            case "impure/1":
+            case "semipure/1":
+            case "pure/1":
+                // 声明级 purity 前缀是关键字：跳过词头，递归声明本体
+                this.visitDecl(term.args[0])
+                break
             case "use_module/1":
                 this.visitUseModuleDecl(term.args[0])
                 break
@@ -850,10 +856,16 @@ export class Visitor {
         // - foreign_proc: 第 2 参是过程头 `p(X::in, Y::out)`（functor 即 pred 引用）
         // - foreign_export_enum: 第 2 参是枚举构造子 Name/Arity
         if (decl.name === "foreign_proc") {
-            const head = decl.args?.[1]
+            let head = decl.args?.[1]
             if (head && !isVariable(head) && head.syntaxType !== "string") {
-                label(head, "pred")
-                this.addReference(head)
+                // 函数形式 `init(N::in, X::in) = (VA::out)` 的头是 =/2(FuncHead, RetMode)：
+                // 解包取函数头标 func；pred 形式 `p(X::in, Y::out)` 标 pred
+                const isFunc = nameArity(head, "=/2")
+                if (isFunc) head = head.args[0]
+                if (head && !isVariable(head)) {
+                    label(head, isFunc ? "func" : "pred")
+                    this.addReference(head)
+                }
             }
             return
         }
@@ -1103,7 +1115,7 @@ export class Visitor {
     
     addExport(term: Term) {
         term.qualified = this.module
-        this.export.add(term.name ,term)
+        this.exports.add(term.name ,term)
     }
     addImport(module: Term) {
         this.imports.push(module)
