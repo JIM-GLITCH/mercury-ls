@@ -2,6 +2,7 @@ import { MercuryDocument } from './document-manager'
 // import { moduleMap } from './globalSpace'
 import { MultiMap } from './multimap'
 import { Term } from './term'
+import { FuncInfo, TypeInfo, keyOf, keyOfTypeCtor } from './document-type'
 
 
 class ModuleManager {
@@ -43,6 +44,10 @@ export let moduleManager =  new ModuleManager()
 class ExportManager {
     exportMap = new MultiMap<string, Term>()
     private byDoc = new Map<MercuryDocument, Term[]>()
+    // 跨模块类型推断用：类型构造子表 + 函数/谓词签名表
+    private typeMap = new Map<string, TypeInfo>()
+    private funcMap = new Map<string, FuncInfo>()
+    private byDocTypes = new Map<MercuryDocument, { typeKeys: string[]; funcKeys: string[] }>()
     set(doc: MercuryDocument) {
         this.delete(doc)
         const vr = doc.visitResult
@@ -51,15 +56,48 @@ class ExportManager {
         vr.exports.forEach(t => terms.push(t))
         this.byDoc.set(doc, terms)
         for (const t of terms) this.exportMap.add(t.name, t)
+        // 结构化签名：供推断跨模块取类型构造子 / 函数签名
+        const typeKeys: string[] = []
+        for (const ti of vr.types.values()) {
+            const k = keyOfTypeCtor(ti.ctor)
+            this.typeMap.set(k, ti)
+            typeKeys.push(k)
+        }
+        const funcKeys: string[] = []
+        const regFunc = (fi: FuncInfo) => {
+            const k = keyOf(fi.name, fi.arity)
+            this.funcMap.set(k, fi)
+            funcKeys.push(k)
+        }
+        for (const fi of vr.funcs.values()) regFunc(fi)
+        for (const fi of vr.preds.values()) regFunc(fi)
+        this.byDocTypes.set(doc, { typeKeys, funcKeys })
     }
     delete(doc: MercuryDocument) {
         const old = this.byDoc.get(doc)
-        if (!old) return
-        for (const t of old) this.exportMap.delete(t.name, t)
-        this.byDoc.delete(doc)
+        if (old) {
+            for (const t of old) this.exportMap.delete(t.name, t)
+            this.byDoc.delete(doc)
+        }
+        const oldT = this.byDocTypes.get(doc)
+        if (oldT) {
+            for (const k of oldT.typeKeys) this.typeMap.delete(k)
+            for (const k of oldT.funcKeys) this.funcMap.delete(k)
+            this.byDocTypes.delete(doc)
+        }
     }
     get(name: string): readonly Term[] {
         return this.exportMap.get(name)
+    }
+    // 跨模块推断查询
+    lookupType(ctorKey: string): TypeInfo | undefined {
+        return this.typeMap.get(ctorKey)
+    }
+    lookupFunc(name: string, arity: number): FuncInfo | undefined {
+        return this.funcMap.get(keyOf(name, arity))
+    }
+    allTypeInfos(): Iterable<TypeInfo> {
+        return this.typeMap.values()
     }
 }
 export let exportManager = new ExportManager()

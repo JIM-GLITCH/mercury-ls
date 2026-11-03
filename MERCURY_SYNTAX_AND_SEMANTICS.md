@@ -217,12 +217,84 @@ hover 显示与定义/引用匹配均按语义元数进行（`utils.ts: semantic
 区分类别（不标 `semanticType`）：**linker 阶段**按名字与语义元数到 definition/declaration
 消解——本模块 + **全局导出索引**（各模块 `:- interface.` 段声明的符号，`exportManager`，
 文档构建/删除时同步；含 interface 段具体类型的**构造子**与 mode/inst 名）；
-限定名 `M.f` 则查目标模块。
+限定名 `M.f` 则查目标模块。**类型推断同样处理限定调用**（`./2` 解包后按内层 functor
+推断）：`M.f(...)` 按限定模块精确查签名（`moduleManager` 定位模块文档取其 funcs；
+签名在 exportManager 里但模块未构建/未打开——如标准库——则仍为 unknown），
+限定名钉死模块无重载歧义，不受「类型未知不引入跨模块候选」限制；
 命中类别一致则补标（func/constructor/...）；歧义或未命中保持无类别，
 goto def 时对无类别引用**不限类别**匹配（含限定名 `M.f` 跨模块查找）。
 注意重载符号（如 `-/2` 同时是 int 的减法函数与 pair 的 `K - V` 构造子）：
 两类候选并存时保持无类别——Mercury 靠类型推断消歧，本 LSP 无类型信息，
 误标比不标危害更大。
+
+**推断基础数据（阶段 0+1）**：Visitor 现已收集 `types`/`funcs`/`preds`
+（`document-type.ts` 的 `TypeInfo`/`FuncInfo` + `unify`：类型构造子、构造子签名与
+函数/谓词签名）。
+
+**子句级类型推断（阶段 2）**：除收集外，Visitor 对每个 `:-/2` 规则/func 事实/谓词事实
+再做一次自下而上的类型合一（`inferClause`）——先用头调用的签名给头变量赋类型，
+再沿 body 目标/数据项合一并记录每项的 `inferred` 类型与可消歧类别。
+linker 优先读取 `inferred`：重载 functor（如 `-/2` 既是 int 减法函数又是 pair 的
+`K - V` 构造子）在变量类型已知为 `pair` 时被精确标成 `constructor`，否则仍保持无类别
+（与编译器「类型上下文能唯一确定才标」一致，避免误标）。
+
+**跨模块签名（阶段 3/4）**：`exportManager` 除导出 term 外，现在还按 `typeCtor` / `name/arity`
+承载各模块的 `TypeInfo` / `FuncInfo`。推断时——① 类型上下文明确（expected 为具体 `ctor`）时，
+纳入导入模块里同名同元数的类型构造子；② `signatureOf` 取不到本模块签名时回退到导入模块的
+func/pred 签名。由此 `pair` 类型哪怕定义在别的模块，`list(pair(...))` 元素里的 `K - V`
+也能精确标成 `constructor`。跨模块 func 只在类型上下文明确时参与消歧，避免把本应无类别的
+重载项误标（无类型上下文的重载项继续走 linker 的类别唯一近似）。
+
+**高阶闭包推断**：`inferTerm` 识别 `func(...) = ...` / `(pred(...) is det)` /
+带 `:- Body` 的闭包（`document-visitor.ts` 的 `inferHigherOrder`）。当闭包作为实参传入、
+其 expected 为 `ho` 类型时，用签名给闭包头绑定变量赋类型并递归推断闭包头/体；
+于是闭包内 `X - Y` 在 `func(A,B)=pair(A,B)` 签名下会被推成 pair 构造子而非减法函数。
+linker 额外消费 `vr.inferred` 中未被索引遍历收集为 reference 的闭包内项，避免漏标
+（已知缺口：visitor 的索引遍历尚不主动下钻高阶表达式，闭包内 functor 暂不进 `reference`，
+仅 `semanticType` 标注，go-to-definition 暂不能跳转到它）。
+
+**Hover 渲染推断类型**：`provide-hover.ts` 在显示类别/名字之外，额外读取 `doc.visitResult.inferred`
+里该 term（含变量）的 `MerType` 并追加 `: <类型>` 一行（`document-type.ts` 的 `merTypeToString`
+把 `var/ctor/ho` 渲染为 `int`、`pair(int,int)`、`func(A,B)=R` 等）。func/pred 引用 hover 按行
+显示：第一行 `类别 name/arity`；第二行类型签名 `name(argtype,...)`（func 带 `= 结果类型`，不带
+mode）；之后**每个 mode 声明一行** `name(argmode,...)`（`VisitResult.modeSigs` 在
+`recordFuncInfo`/`recordPredInfo` 逐声明累积，`::`/`>>` 注解由 `modeOfArg` 提取，复合 mode 如
+`in(i_node)` 原样渲染；未注解参数用 Mercury 默认 mode：参数 `in`、函数结果 `out`；类型行加
+`type` 前缀、mode 行加 `mode` 前缀；声明带 `is det` 等确定性时 mode 行追加 ` is det` 后缀；
+显式 pred/func-mode 声明 `:- mode P(Modes) [is Det].` 由 `visitPredMode`/`visitFuncMode`
+收集：首个声明**替换**默认行（Mercury：有显式声明时默认 mode 不适用），同 pred 后续声明
+追加；声明同时追加到签名 `FuncInfo.modes`（`ProcMode[]`，全部过程 mode；`::` 注解的
+pred/func 声明本身也是一条过程），首个声明覆盖 `argModeRefs`/`resultModeRef`）。
+如 `:- func add(int::in, int::in) = int is det.` hover 显示三行：`(func) add/2`、
+`type add(int, int) = int`、`mode add(in, in) = (out) is det`。constructor hover 的 `type` 行
+显示**构造子签名**（Mercury 里构造子即函数：`参数 = 结果类型`，与 func 行格式一致，从
+`visitResult.types` 的 `ConsInfo.argTypes`/`resultType` 渲染）：如
+`:- type tree(T) ---> leaf ; node(T, tree(T)).` 中 `node/2` hover 显示
+`(constructor) node/2` + `type node(T, tree(T)) = tree(T)`；零元构造子不带空括号（`type u = unit`）。变量 hover 显示 `type <类型>` 行（有把握时）。
+变量 mode 近似（子句级）：head 形参取声明的 argMode、局部变量被 unify
+绑定记 `out`、调用 in 实参记 `in`（标签为 `mode`——值是 mode 名而非 inst）。如
+`func f(int::in)=int. f(X)=X+1.` 中 head 形参 `X` 由签名赋 `int`，hover `X` 显示
+`type int` + `mode in`；
+**带体的函数子句** `f(A)=R :- Body` 头是 `=(f(A), R)`，`inferHead` 会解包：参数按签名、
+结果变量按返回类型推断。未推断出类型的变量（引擎内部 freshVar 的 `?0`/`?1`...）显示为
+`unknown`；源码声明的类型变量（如 `pair(K,V)` 的 `K`/`V`）保持原名。module（限定名前缀）
+hover 不显示类型行。**goal 遍历覆盖 if-then-else**：解析树为 `else(if(then(C,T)), E)`
+（`if` 前缀 + `then`/`else` 中缀），`inferGoal` 的 goal 形态表包含 `if/1`/`then/2`/`else/2`/
+`or_else/2` 等——缺了 `if/1`/`then/2` 时 then 分支会落进数据 functor 路径，`Y = X` 的 Y 合一
+不到 X 的 head 类型而显示 unknown。另外 `inferUnify` 合一后会**刷新**两侧已写入的推断条目
+（先推断一侧可能存了未合一的 stale 类型）。
+
+**构建编排：import 先于 importer 的 visit**（`document-builder.ts` 的 `scanHeader` + `orderByImports`）：
+跨模块推断在 `visit` 阶段从全局 `exportManager` 取导入模块的签名，而 `exportManager.set` 在
+各文档 `visit` 之后才执行。因此构建管线对 visit 阶段按 import 依赖做**拓扑序**——先对所有已
+parse 文档做轻量头扫描（`scanHeader` 从 parse 树抽 `:- module` 名与 `:- import_module` 目标，
+不必完整 visit），再用 `orderByImports` 把 import 目标排在 importer 之前。仅对批次内互相可见
+的依赖边排序；依赖目标不在批次（已构建/外部，签名已在全局单例里）则忽略该边。这样无论文件以
+何种顺序打开，import 的 `(visit + exportManager.set)` 都先于 importer 的 `visit`，跨模块精确
+消歧稳定可用。注：`collectDocuments` 已把 `state < Validated` 的文档拉入批次，故从未构建的
+import 也会进批次并被正确排序；Mercury 的 `import_module` 无环，拓扑序不必迭代（此前称"fixpoint"
+为误称，实为拓扑序 + 失效重链）。
+
 find references 按**名字 + 语义元数 + 可见性**过滤（Mercury 名字解析规则）：
 限定引用 `M.f` 只保留限定到目标模块的；非限定引用只保留目标模块自身或
 import 了目标模块的文档（模块名的显式出现一律保留）。

@@ -42,9 +42,17 @@ export class DefaultLinker implements Linker{
                 await interruptAndCheck(cancelToken)
                 for (const ref of refs) {
                     if (ref.semanticType) continue
+                    // 优先用类型推断结果消歧（重载 functor 在类型上下文可唯一确定时）
+                    const info = vr.inferred.get(ref)
+                    if (info?.category) { label(ref, info.category); continue }
                     const kind = this.resolveRefKind(ref, name, vr)
                     if (kind) label(ref, kind)
                 }
+            }
+            // 推断结果里、但未被索引遍历收集为 reference 的项（如高阶闭包体内的 functor），
+            // 同样按推断类别标注，避免漏标
+            for (const [term, info] of vr.inferred.entries()) {
+                if (info.category && !term.semanticType) label(term, info.category)
             }
         }
         document.linkResult = {errors:this.errors}

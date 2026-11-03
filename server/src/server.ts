@@ -4,7 +4,6 @@
  * ------------------------------------------------------------------------------------------ */
 import {
     createConnection,
-    TextDocuments,
     ProposedFeatures,
     InitializeParams,
     DidChangeConfigurationNotification,
@@ -32,9 +31,6 @@ import {
     WorkDoneProgressCancelNotification
 } from 'vscode-languageserver/node';
 
-import {
-    TextDocument
-} from 'vscode-languageserver-textdocument';
 import {Parser} from './mercury-parser'
 import { Document } from './document'
 import { Term, Clause } from './term'
@@ -49,15 +45,14 @@ import { HoverProvider } from './provide-hover'
 import { DocumentSymbolProvider } from './provide-documentSymbol'
 import { MutexLock, isOperationCancelled } from './promise-util'
 import { documentBuilder } from './document-builder'
-import { DocumentState, mercuryDocuments } from './document-manager'
+import { DocumentState, mercuryDocuments, textDocuments } from './document-manager'
 import { stream } from './stream'
 // Create a connection for the server, using Node's IPC as a transport.
 // Also include all preview / proposed LSP features.
 export const connection = createConnection(ProposedFeatures.all);
 export const mutex = new MutexLock;
 
-// Create a simple text document manager.
-export const textDocuments: TextDocuments<TextDocument> = new TextDocuments(TextDocument);
+// Create a simple text document manager (定义已迁至 document-manager.ts)
 
 let hasConfigurationCapability = false;
 let hasWorkspaceFolderCapability = false;
@@ -298,11 +293,6 @@ function addDocumentHander(){
                 changedUris.push(uri);
             }
         }
-        onDidChange(changedUris, deletedUris);
-    });
-    connection.onDidChangeWatchedFiles(params => {
-        const changedUris = params.changes.filter(e => e.type !== FileChangeType.Deleted).map(e => URI.parse(e.uri));
-        const deletedUris = params.changes.filter(e => e.type === FileChangeType.Deleted).map(e => URI.parse(e.uri));
         onDidChange(changedUris, deletedUris);
     });
 }

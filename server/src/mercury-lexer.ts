@@ -56,6 +56,8 @@ const moolexer = moo.compile({
         { match: /'(?:''|\\(?:.|\n)|(?!').)*'/, lineBreaks: true,value:(x)=>x.slice(1,-1) },
         { match: /\[\s*\]/, lineBreaks: true,value:(x)=>"[]"},
         { match: /\{\s*\}/, lineBreaks: true,value:(x)=>"{}"},
+        { match: /<<u/ },
+        { match: />>u/ },
         { match: /[#$&*+\-./:<=>?@^~\\]+/ },
         { match: /;|![.:]?/ },
     ],

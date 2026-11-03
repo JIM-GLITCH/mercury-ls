@@ -10,6 +10,8 @@ import { equalQualified, exportManager, moduleManager } from './document-moduleM
 import { linker } from './document-linker'
 import { stream } from './stream'
 import { connection, sendBarText as changClientBarText, sendMemoryUsage } from './server'
+import { orderByImports, scanHeader } from './document-order'
+
 export type DocumentBuildListener = (built: MercuryDocument[], cancelToken: CancellationToken) => void | Promise<void>
 export type DocumentUpdateListener = (changed: URI[], deleted: URI[]) => void
 
@@ -29,6 +31,17 @@ export class DefaultDocumentBuilder{
                 doc.state = DocumentState.Parsed
                 await interruptAndCheck((cancelToken))
             }
+        }
+        // 0.5 按 import 依赖拓扑排序 visit 阶段：保证 import 目标的 (visit + exportManager.set)
+        // 先于 importer 的 visit（跨模块推断据此从全局 exportManager 取到导入模块的类型/函数签名）
+        const headers = new Map<MercuryDocument, { module?: string; imports: string[] }>()
+        for (const doc of documents) headers.set(doc, scanHeader(doc.parseResult.value))
+        const ordered = orderByImports(
+            documents,
+            d => headers.get(d)!.module,
+            d => headers.get(d)!.imports,
+        )
+        for (const doc of ordered) {
             if(doc.state <DocumentState.Visited){
                 let visitor = new Visitor;
                 await visitor.visit(doc,cancelToken);

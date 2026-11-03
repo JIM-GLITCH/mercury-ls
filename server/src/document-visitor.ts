@@ -2,9 +2,18 @@ import { CancellationToken, Diagnostic, DiagnosticSeverity } from 'vscode-langua
 import { MercuryDocument } from './document-manager'
 import { MultiMap } from './multimap'
 import { TreeStreamImpl, stream } from './stream'
-import { Clause, RootNode, Term, termRange } from './term'
+import { Clause, RootNode, Term } from './term'
 import { sameArity } from './utils'
 import { interruptAndCheck } from './promise-util'
+import { exportManager, moduleManager } from './document-moduleManager'
+import {
+    applySubst, ConsInfo, FuncInfo, InferredInfo, MerType, TypeCtor, TypeInfo,
+    keyOf, keyOfTypeCtor, modeOfArg, argModesOf, termToMerType, unify,
+} from './document-type'
+import {
+    instTermToMerInst, instFunctorAlts, modeTermToRef, instDefHead,
+    type MerInst, type InstDef, type ModeDef, type MerModeRef,
+} from './document-mode'
 
 // 内置模式名：标 mode 但不进 modeReference
 const builtinModes = new Set(["in", "out", "di", "uo", "ui", "muo"])
@@ -25,7 +34,23 @@ export type VisitResult = {
     declaration:MultiMap<string,Term>,
     exports:MultiMap<string,Term>
     imports:Term[]
+    // 类型推断基础数据（阶段 0+1 收集，尚未用于 link 消歧）
+    types:Map<string, TypeInfo>          // 类型构造子 → 类型定义（含构造子列表）
+    funcs:Map<string, FuncInfo>          // 函数签名（name/arity → 参数+返回类型）
+    preds:Map<string, FuncInfo>          // 谓词签名（name/arity → 参数类型）
+    // name/arity → mode 声明展示串（每个声明一行，如 add(in, in) = (out)；未注解用默认 in/out）
+    modeSigs:Map<string, string[]>
+    // Phase A：:- inst / :- mode 声明的结构化表示（mode 分析用）
+    instDefs:Map<string, InstDef>
+    modeDefs:Map<string, ModeDef>
+    // 阶段 2 推断结果：项 → 推断类型/类别（供 linker 精确消歧 functor/func）
+    inferred:Map<Term, InferredInfo>
 }
+// determinism 项 → 字符串（det/semidet/cc_multi... 均为原子；缺省 undefined）
+function detOf(term: Term | undefined): string | undefined {
+    return term?.name
+}
+
 export class Visitor {
     module?:Term
     imports=[] as Term[]
@@ -39,7 +64,23 @@ export class Visitor {
     modeReference = new MultiMap<string, Term>()
     declaration = new MultiMap<string, Term>()
     exports= new MultiMap<string, Term>()
+    types = new Map<string, TypeInfo>()
+    funcs = new Map<string, FuncInfo>()
+    preds = new Map<string, FuncInfo>()
+    modeSigs = new Map<string, string[]>()
+    instDefs = new Map<string, InstDef>()
+    modeDefs = new Map<string, ModeDef>()
+    inferred = new Map<Term, InferredInfo>()
+    // 正在收集的类型定义（visitTypeConstrutor 往里追加构造子）
+    private currentType?: TypeInfo
+    // 类型推断工作态（每个子句重置）
+    private subst = new Map<string, MerType>()
+    private varTypes = new Map<string, MerType>()
+    // 变量子句级 mode 近似（head 形参声明 mode / 绑定变量 out / 调用 in 实参；类型推断步骤填充，供 hover 显示）
+    private varMode = new Map<string, string>()
+    private varCounter = 0
     async visit(doc: MercuryDocument, cancelToken: CancellationToken) {
+        this.errors = []
         let rootNode = doc.parseResult.value
         for (const clause of rootNode.args) {
             await interruptAndCheck(cancelToken)
@@ -55,7 +96,14 @@ export class Visitor {
             modeReference:this.modeReference,
             declaration:this.declaration,
             exports:this.exports,
-            imports:this.imports
+            imports:this.imports,
+            types:this.types,
+            funcs:this.funcs,
+            preds:this.preds,
+            modeSigs:this.modeSigs,
+            instDefs:this.instDefs,
+            modeDefs:this.modeDefs,
+            inferred:this.inferred
         }
     }
     visitClause(clause: Clause) {
@@ -85,7 +133,10 @@ export class Visitor {
                 this.visitPredDef(topTerm)
                 break
         }
+        // 阶段 2：子句级类型推断（声明/签名已在同模块前序收集；不抛错、不影响索引）
+        this.inferClause(clause)
     }
+
     visitDcgHead(term: Term) {
         this.DcgFixArity(term)
         this.visitPredDef(term)
@@ -585,8 +636,9 @@ export class Visitor {
     }
 
     visitFuncDeclFunc(func: Term) {
-        label(func,"func")
-        this.addDeclaration(func)
+        const head = this.visitQualifiedTerm(func) ?? func
+        label(head, "func")
+        this.addDeclaration(head)
     }
 
 
@@ -689,41 +741,68 @@ export class Visitor {
     visitTypeDeclOrDef(term: Term) {
         // Discriminated unions (可能带 where 属性块： ---> ctors where [...])
         if (nameArity(term, "--->/2")) {
-            this.visitTypeNameOrSubtype(term.args[0])
+            let head = term.args[0]
             let ctors = term.args[1]
             if (nameArity(ctors, "where/2")) {
                 // DU 的 where 块是 where/2(ctors, attrs)：取构造子列表，属性块暂不索引
                 ctors = ctors.args[0]
             }
-            this.visitTypeConstrutors(ctors)
+            // 子类型形式 type T =< Super ---> ...：head 是 =</2
+            if (nameArity(head, "=</2")) {
+                this.visitTypeName(head.args[0])
+                this.visitTypeRef(head.args[1])
+                const info = this.beginTypeInfo(head.args[0])
+                this.visitTypeConstrutors(ctors)
+                this.endTypeInfo(info)
+            } else {
+                this.visitTypeName(head)
+                const info = this.beginTypeInfo(head)
+                this.visitTypeConstrutors(ctors)
+                this.endTypeInfo(info)
+            }
         }
         // Equivalence types: type T == U （U 是类型引用）
         else if (nameArity(term, "==/2")) {
             this.visitTypeName(term.args[0])
             this.visitTypeRef(term.args[1])
+            this.addTypeInfo(this.beginTypeInfo(term.args[0]))
         }
         // 纯子类型声明（无 ---> 构造子体）： type T =< Super.
         else if (nameArity(term, "=</2")) {
             this.visitTypeNameOrSubtype(term)
+            this.addTypeInfo(this.beginTypeInfo(term.args[0]))
         }
         // where 属性块：type T where [...] / solver type T where [...] / type T =< Super where [...]
         else if (nameArity(term, "where/2")) {
-            let inner = term.args[0]
-            if (nameArity(inner, "=</2")) {
-                this.visitTypeNameOrSubtype(inner)
-            } else {
-                this.visitTypeName(inner)
-            }
+            const inner = term.args[0]
+            if (nameArity(inner, "=</2")) this.visitTypeNameOrSubtype(inner)
+            else this.visitTypeName(inner)
+            this.addTypeInfo(this.beginTypeInfo(inner))
         }
         else{
             // Abstract types
             this.visitTypeDeclType(term)
+            this.addTypeInfo(this.beginTypeInfo(term))
         }
     }
     visitTypeDeclType(term: Term) {
         label(term, "type")
         this.addDefinition(term)
         this.tryAddExport(term)
+    }
+    // 开始收集一个类型定义，返回 TypeInfo（构造子通过 currentType 追加）
+    private beginTypeInfo(typeHead: Term): TypeInfo {
+        const tc: TypeCtor = { name: typeHead.name, arity: typeHead.arity }
+        const info: TypeInfo = { ctor: tc, params: typeHead.args.map(termToMerType), constructors: [] }
+        this.currentType = info
+        return info
+    }
+    private endTypeInfo(info: TypeInfo) {
+        this.addTypeInfo(info)
+        this.currentType = undefined
+    }
+    private addTypeInfo(info: TypeInfo) {
+        this.types.set(keyOfTypeCtor(info.ctor), info)
     }
     visitTypeConstrutors(term: Term) {
         let list = stream(semicolonBinaryTermToList(term))
@@ -744,6 +823,18 @@ export class Visitor {
         // （如 pair 的 `-`/2：与 int 的减法函数 `-`/2 同名，linker 消解时两者都
         // 出现在候选里，类别不唯一则保持无类别，避免把 `K - V` 误标成 func）
         this.tryAddExport(term)
+        // 收集构造子签名（参数类型 + 结果类型 = 所属类型应用其参数）
+        if (this.currentType) {
+            const resultType: MerType = {
+                kind: 'ctor', ctor: this.currentType.ctor, args: this.currentType.params,
+            }
+            const ci: ConsInfo = {
+                ctor: term.name, arity: term.arity,
+                argTypes: term.args.map(a => termToMerType(a)),
+                resultType, typeCtor: this.currentType.ctor,
+            }
+            this.currentType.constructors.push(ci)
+        }
         // 构造子参数是类型引用位置（类型变量除外）
         for (const arg of term.args ?? []) {
             if (!isVariable(arg)) this.visitTypeRef(arg)
@@ -978,6 +1069,7 @@ export class Visitor {
     }
     visitModeDecl(term: Term) {
         if(nameArity(term,"==/2")){
+            this.recordModeDef(term.args[0], term.args[1])
             this.visitModeName(term.args[0])
             // `mode M == InstA >> InstB`：两侧都是 inst 引用位置（§5.2/5.3）；
             // 跳过高阶模式 pred(...)/func(...) 头
@@ -990,10 +1082,20 @@ export class Visitor {
                 }
             }
         } else if (nameArity(term,"is/2")){
-            this.visitFuncOrPredModeDecl(term.args[0])
+            const head = this.visitQualifiedTerm(term.args[0]) ?? term.args[0]
+            this.visitFuncOrPredModeDecl(head, detOf(term.args[1]))
         } else {
-            // abstract_mode M.
-            this.visitModeName(term)
+            const head = this.visitQualifiedTerm(term) ?? term
+            if (head.arity > 0 && !isVariable(head) &&
+                   (this.preds.has(keyOf(head.name, head.arity)) ||
+                    this.funcs.has(keyOf(head.name, head.arity)))) {
+                // `:- mode P(Modes).`（无确定性后缀）的 pred/func-mode 声明；
+                // 与抽象 mode 声明（:- mode M.，通常 arity 0 或非 pred/func 名）区分
+                this.visitFuncOrPredModeDecl(head)
+            } else {
+                // abstract_mode M.
+                this.visitModeName(term)
+            }
         }
     }
     visitModeName(term: Term) {
@@ -1001,33 +1103,80 @@ export class Visitor {
         this.addDefinition(term)
         this.tryAddExport(term)
     }
-    visitFuncOrPredModeDecl(term: Term) {
+    visitFuncOrPredModeDecl(term: Term, determinism?: string) {
         if(nameArity(term,"=/2")){
-            this.visitFuncMode(term.args[0])
+            this.visitFuncMode(term, determinism)
         }else{
-            this.visitPredMode(term)
+            this.visitPredMode(term, determinism)
         }
     }
-    visitPredMode(term: Term) {
-        label(term,"pred");
+    // pred-mode 声明 `:- mode P(Modes) [is Det].`：显式声明该 pred 的一条过程 mode。
+    // 替换 modeSigs 默认行（Mercury：有显式声明时默认 mode 不适用）、追加到签名
+    // modes 列表（多过程），首个声明覆盖 argModeRefs（子句侧单 mode 近似与跨模块展示用）
+    visitPredMode(term: Term, determinism?: string) {
+        const head = this.visitQualifiedTerm(term) ?? term
+        label(head, "pred")
+        const key = keyOf(head.name, head.arity)
+        const refs = head.args.map(modeTermToRef)
+        const fi = this.preds.get(key)
+        if (fi) {
+            fi.modes = fi.modes ?? []
+            fi.modes.push({ argModeRefs: refs, det: determinism })
+            if (!fi.hasExplicitModes && fi.modes.length === 1) fi.argModeRefs = refs
+        }
+        const det = determinism ? ` is ${determinism}` : ''
+        this.pushModeSigReplacingDefault(
+            key, `${head.name}(${head.args.map(a => this.modeArgToString(a)).join(', ')})${det}`)
     }
-    visitFuncMode(term: Term) {
-        label(term,"func");
+    // func-mode 声明 `:- mode f(Modes) = (Mode) [is Det].`
+    visitFuncMode(term: Term, determinism?: string) {
+        const headTerm = this.visitQualifiedTerm(term.args[0]) ?? term.args[0]
+        const head = headTerm
+        label(head, "func")
+        const key = keyOf(head.name, head.arity)
+        const refs = head.args.map(modeTermToRef)
+        const retRef = modeTermToRef(term.args[1])
+        const fi = this.funcs.get(key)
+        if (fi) {
+            fi.modes = fi.modes ?? []
+            fi.modes.push({ argModeRefs: refs, resultModeRef: retRef, det: determinism })
+            if (!fi.hasExplicitModes && fi.modes.length === 1) {
+                fi.argModeRefs = refs
+                fi.resultModeRef = retRef
+            }
+        }
+        const det = determinism ? ` is ${determinism}` : ''
+        this.pushModeSigReplacingDefault(
+            key, `${head.name}(${head.args.map(a => this.modeArgToString(a)).join(', ')})` +
+                 ` = (${this.modeArgToString(term.args[1])})${det}`)
+    }
+    // mode 声明参数 → 展示串（in / array_ui / in(node)）
+    private modeArgToString(t: Term): string {
+        if (isVariable(t)) return t.name
+        if (t.args.length === 0) return t.name
+        return `${t.name}(${t.args.map(a => this.modeArgToString(a)).join(', ')})`
     }
     visitMode(term: Term) {
         label(term,"mode")
     }
     visitInstDecl(term: Term) {
         if(nameArity(term,"==/2")){
+            this.recordInstDef(term.args[0], instTermToMerInst(term.args[1]))
             this.visitInstOrForBlock(term.args[0])
             this.visitInstOrBound(term.args[1])
         }else if(nameArity(term,"--->/2")){
+            this.recordInstDef(term.args[0], { kind: 'bound', functors: instFunctorAlts(term.args[1]) })
             this.visitInstOrForBlock(term.args[0])
             this.visitInsts(term.args[1])
         } else {
             // abstract_inst I.
             this.visitInstName(term)
         }
+    }
+    // :- inst I == Expr / :- inst I ---> f ; g 结构化入库（Phase A）
+    private recordInstDef(headTerm: Term, body: MerInst) {
+        const head = instDefHead(headTerm)
+        if (head) this.instDefs.set(keyOf(head.name, head.arity), { params: head.params, body })
     }
     visitInsts(term: Term) {
         for (const inst of semicolonBinaryTermToList(term)) {
@@ -1067,34 +1216,137 @@ export class Visitor {
     visitInst(term: Term) {
         label(term,"inst")
     }
-    visitFuncDecl(term: Term) {
+    visitFuncDecl(term: Term, determinism?: string) {
         if (nameArity(term, "is/2")) {
-            // :- func F(...) = R is det.  →  标 F，忽略确定性 det
-            this.visitFuncDecl(term.args[0])
+            // :- func F(...) = R is det.  →  标 F，确定性记入 mode 行
+            this.visitFuncDecl(term.args[0], detOf(term.args[1]))
         } else if (nameArity(term, "=/2")) {
             let [func, ret] = term.args
-            this.visitFuncDeclFunc(func)
-            this.visitTypeParams(func)
+            const head = this.visitQualifiedTerm(func) ?? func
+            this.visitFuncDeclFunc(head)
+            this.visitTypeParams(head)
             this.visitFuncReturn(ret)
+            this.recordFuncInfo(head, ret, determinism)
         } else {
-            this.visitFuncDeclFunc(term)
-            this.visitTypeParams(term)
+            const head = this.visitQualifiedTerm(term) ?? term
+            this.visitFuncDeclFunc(head)
+            this.visitTypeParams(head)
+            this.recordFuncInfo(head, undefined, determinism)
         }
     }
 
-    visitPredDecl(term: Term) {
+    visitPredDecl(term: Term, determinism?: string) {
         if (nameArity(term, "is/2")) {
-            let [pred, determinism] = term.args
-            label(pred,"pred")
-            this.visitTypeParams(pred)
-            this.visitDeterminism(determinism)
+            let [pred, det] = term.args
+            const head = this.visitQualifiedTerm(pred) ?? pred
+            label(head, "pred")
+            this.visitTypeParams(head)
+            this.visitDeterminism(det)
 
-            this.addDeclaration(pred)
+            this.addDeclaration(head)
+            this.recordPredInfo(head, detOf(det))
         } else {
-            label(term,"pred")
-            this.visitTypeParams(term)
-            this.addDeclaration(term)
+            const head = this.visitQualifiedTerm(term) ?? term
+            label(head, "pred")
+            this.visitTypeParams(head)
+            this.addDeclaration(head)
+            this.recordPredInfo(head, determinism)
         }
+    }
+    // 声明是否带显式 mode 注解（任一参数 ::/>> 或返回值 ::/>>；Phase D 推断目标判据）
+    private hasExplicitModes(args: Term[], ret?: Term): boolean {
+        const annotated = (t: Term) => t.nameArity === '::/2' || t.nameArity === '>>/2'
+        return args.some(annotated) || (!!ret && annotated(ret))
+    }
+    // 记录函数签名（name/arity → 参数类型/mode + 返回类型/mode）。返回缺省（无 = R 的声明）时为 undefined
+    private recordFuncInfo(func: Term, ret: Term | undefined, determinism?: string) {
+        const argRefs = func.args.map(a => this.argModeRefOf(a))
+        const retRef = ret ? this.retModeRefOf(ret) : undefined
+        this.funcs.set(keyOf(func.name, func.arity), {
+            name: func.name, arity: func.arity,
+            argTypes: func.args.map(a => termToMerType(a)),
+            argModes: argModesOf(func.args),
+            resultType: ret ? termToMerType(ret) : undefined,
+            resultMode: ret ? modeOfArg(ret) : undefined,
+            argModeRefs: argRefs,
+            resultModeRef: retRef,
+            hasExplicitModes: this.hasExplicitModes(func.args, ret),
+            // :: 注解的声明本身定义一条过程 mode；后续 :- mode f(...) 声明追加
+            modes: this.hasExplicitModes(func.args, ret)
+                ? [{ argModeRefs: argRefs, resultModeRef: retRef, det: determinism }]
+                : [],
+        })
+        // 每个 mode 声明一行（Mercury 默认 mode：参数 in，函数结果 out）；带确定性后缀
+        const modes = func.args.map(modeOfArg).map(m => m ?? 'in')
+        const rm = ret ? modeOfArg(ret) ?? 'out' : 'out'
+        const det = determinism ? ` is ${determinism}` : ''
+        this.pushModeSig(keyOf(func.name, func.arity), `${func.name}(${modes.join(', ')}) = (${rm})${det}`)
+    }
+    // 记录谓词签名（name/arity → 参数类型/mode；谓词无返回类型）
+    private recordPredInfo(pred: Term, determinism?: string) {
+        const argRefs = pred.args.map(a => this.argModeRefOf(a))
+        this.preds.set(keyOf(pred.name, pred.arity), {
+            name: pred.name, arity: pred.arity,
+            argTypes: pred.args.map(a => termToMerType(a)),
+            argModes: argModesOf(pred.args),
+            argModeRefs: argRefs,
+            hasExplicitModes: this.hasExplicitModes(pred.args),
+            modes: this.hasExplicitModes(pred.args)
+                ? [{ argModeRefs: argRefs, det: determinism }]
+                : [],
+        })
+        const modes = pred.args.map(modeOfArg).map(m => m ?? 'in')
+        const det = determinism ? ` is ${determinism}` : ''
+        this.pushModeSig(keyOf(pred.name, pred.arity), `${pred.name}(${modes.join(', ')})${det}`)
+    }
+    // :- mode I == Init >> Final 结构化入库（Phase A）；mode 别名 `I == Body`（Body 是单个
+    // mode 引用，如 array.m 的 `:- mode array_uo == out(uniq_array).`）记 alias 引用，
+    // 由 modeRefToInsts 惰性解引用（别名可能指向尚未收集的其它用户 mode）；高阶模式体
+    //（pred(...)/func(...)）暂不收集
+    private recordModeDef(headTerm: Term, body: Term) {
+        const head = instDefHead(headTerm)
+        if (!head || isVariable(body)) return
+        if (body.nameArity === '>>/2') {
+            this.modeDefs.set(keyOf(head.name, head.arity), {
+                params: head.params,
+                initial: instTermToMerInst(body.args[0]),
+                final: instTermToMerInst(body.args[1]),
+            })
+            return
+        }
+        if (['pred', 'predicate', 'func', 'function'].includes(body.name)) return
+        this.modeDefs.set(keyOf(head.name, head.arity), {
+            params: head.params,
+            initial: { kind: 'free' },
+            final: { kind: 'free' },
+            alias: modeTermToRef(body),
+        })
+    }
+    // 声明参数 → 结构化 mode 引用（未注解默认 in）
+    private argModeRefOf(arg: Term): MerModeRef {
+        if (arg.nameArity === '::/2' || arg.nameArity === '>>/2') return modeTermToRef(arg.args[1])
+        return { kind: 'builtin', name: 'in', args: [] }
+    }
+    // 函数返回值 → 结构化 mode 引用（= (T::out) 取注解；= T 默认 out）
+    private retModeRefOf(ret: Term): MerModeRef {
+        if (ret.nameArity === '::/2' || ret.nameArity === '>>/2') return modeTermToRef(ret.args[1])
+        return { kind: 'builtin', name: 'out', args: [] }
+    }
+    private pushModeSig(key: string, line: string) {
+        const arr = this.modeSigs.get(key)
+        if (arr) arr.push(line)
+        else this.modeSigs.set(key, [line])
+    }
+    // 显式 pred/func-mode 声明 → modeSigs：首个声明替换 recordPred/FuncInfo 推出的默认行
+    //（Mercury：有显式 mode 声明时默认 mode 不适用），同一 pred 的后续声明追加
+    private modeSigReplaced = new Set<string>()
+    private pushModeSigReplacingDefault(key: string, line: string) {
+        if (this.modeSigReplaced.has(key)) {
+            this.pushModeSig(key, line)
+            return
+        }
+        this.modeSigs.set(key, [line])
+        this.modeSigReplaced.add(key)
     }
     // 参数模式 Type / Type :: Inst / Type >> Mode：Type 是类型引用位置
     visitTypeParams(pred: Term) {
@@ -1173,6 +1425,402 @@ export class Visitor {
     }
     visitSolverTypeDecl(arg0: Term) {
         this.visitTypeDeclOrDef(arg0.args[0])
+    }
+
+    // ===== 阶段 2：子句级类型推断（自下而上合一，供 linker 用类型消歧 functor/func）=====
+    // 设计：复用编译器同构数据流——头签名推导头变量类型，再沿 body 目标/数据项
+    // 自下而上合一；重载（func+构造子同名同元数）在类型上下文能唯一确定时消歧，
+    // 否则保持无类别（不标注），避免误标。推断失败不应影响索引/labeling。
+    private inferClause(clause: Clause) {
+        const top = clause.term
+        // 声明（:-/1）与 DCG（-->/2）不做子句级推断
+        if (top.nameArity === ':-/1' || top.nameArity === '-->/2') return
+        if (!clause.callee) return
+        this.subst = new Map()
+        this.varTypes = new Map()
+        this.varMode = new Map()
+        this.varCounter = 0
+        try {
+            if (top.nameArity === ':-/2') {
+                this.inferHead(top.args[0])
+                this.inferGoal(top.args[1])
+            } else if (top.nameArity === '=/2') {
+                // 函数事实 `F(...) = Expr`：结果按返回类型推断；头参数按签名
+                const sig = this.signatureOf(clause.callee)
+                if (sig) {
+                    this.markVarMode(top.args[1], sig.resultMode ?? 'out')
+                    if (sig.resultType) this.inferTerm(top.args[1], sig.resultType)
+                }
+                this.inferHead(top.args[0])
+            } else {
+                // 谓词事实：仅头
+                this.inferHead(top)
+            }
+        } catch {
+            // 推断异常不向外抛，保持索引稳定
+        }
+    }
+    // 变量子句级 mode 标记（只记首次；head 形参优先于后续绑定处推断）
+    private markVarMode(term: Term, mode: string) {
+        if (isVariable(term) || ['!/1', '!./1', '!:/1'].includes(term.nameArity)) {
+            const key = this.varKey(term)
+            if (!this.varMode.has(key)) this.varMode.set(key, mode)
+        }
+    }
+    // 头签名 → 头参数类型/mode（状态变量 !X / !.X / !:X 视为同一变量 X）
+    private inferHead(head: Term) {
+        // 带体的函数子句 `f(A1..An) = R :- Body`：头是 =(f(A1..An), R)，
+        // 参数按签名推断，结果变量 R 按返回类型推断
+        if (head.nameArity === '=/2') {
+            const call = head.args[0]
+            const sig = this.signatureOf(call)
+            if (sig) {
+                const argTypes = sig.argTypes.map(a => applySubst(a, this.subst))
+                for (let i = 0; i < call.args.length; i++) {
+                    this.markVarMode(call.args[i], sig.argModes?.[i] ?? 'in')
+                    this.inferTerm(call.args[i], argTypes[i])
+                }
+                this.markVarMode(head.args[1], sig.resultMode ?? 'out')
+                if (sig.resultType) this.inferTerm(head.args[1], sig.resultType)
+                return
+            }
+            // `X = Expr` 形式的头（少见）：两侧按统一推断
+            this.inferUnify(head.args[0], head.args[1])
+            return
+        }
+        const sig = this.signatureOf(head)
+        if (!sig) return
+        const argTypes = sig.argTypes.map(a => applySubst(a, this.subst))
+        for (let i = 0; i < head.args.length; i++) {
+            this.markVarMode(head.args[i], sig.argModes?.[i] ?? 'in')
+            this.inferTerm(head.args[i], argTypes[i])
+        }
+    }
+    // 目标遍历（goal 位置：调用 p(args) / 统一 X = rhs）
+    private inferGoal(term: Term) {
+        switch (term.nameArity) {
+            case '=/2':
+            case '\\=/2':
+                this.inferUnify(term.args[0], term.args[1])
+                break
+            case './2':
+                this.inferGoal(this.unwrapQualifiedInfer(term))
+                break
+            case ',/2':
+            case ';/2':
+            case '&/2':
+            case '->/2':
+            case 'else/2':
+            case 'if/3':
+            case 'if/1':
+            case 'then/2':
+            case 'or_else/2':
+            case ':-/2':
+                // if-then-else 解析树为 else(if(then(C,T)), E)：if/1、then/2 必须按 goal
+                // 递归，否则 then 分支会落进 default 被当数据 functor 推断，
+                // 分支内 Y = X 的 Y 合一不到 X 的 head 类型而显示 unknown
+                this.inferGoal(term.args[0])
+                if (term.args[1]) this.inferGoal(term.args[1])
+                break
+            case 'some/2':
+            case 'all/2':
+            case 'not/1':
+            case '\\+/1':
+                this.inferGoal(term.args[1] ?? term.args[0])
+                break
+            case 'require_det/1':
+            case 'require_semidet/1':
+            case 'require_multi/1':
+            case 'require_nondet/1':
+            case 'require_cc_multi/1':
+            case 'require_cc_nondet/1':
+            case 'require_erroneous/1':
+            case 'require_failure/1':
+            case 'promise_pure/1':
+            case 'promise_semipure/1':
+            case 'promise_impure/1':
+            case 'event/1':
+                this.inferGoal(term.args[0])
+                break
+            case 'require_complete_switch/2':
+            case 'require_switch_arms_det/2':
+            case 'require_switch_arms_semidet/2':
+            case 'require_switch_arms_multi/2':
+            case 'require_switch_arms_nondet/2':
+            case 'require_switch_arms_cc_multi/2':
+            case 'require_switch_arms_cc_nondet/2':
+            case 'require_switch_arms_erroneous/2':
+            case 'require_switch_arms_failure/2':
+            case 'disable_warnings/2':
+            case 'disable_warning/2':
+            case 'trace/2':
+            case 'promise_equivalent_solutions/2':
+            case 'promise_equivalent_solution_sets/2':
+                this.inferGoal(term.args[1])
+                break
+            case 'true/0':
+            case 'fail/0':
+                break
+            default:
+                // 调用目标 p(args)（func 在 goal 位置极少见）
+                this.inferCall(term)
+        }
+    }
+    // 调用：按签名对齐实参类型
+    private inferCall(term: Term) {
+        const sig = this.signatureOf(term)
+        if (!sig) {
+            // 非 pred/func（高阶/未知）：兜底当数据 functor，安全不抛
+            this.inferFunctor(term)
+            return
+        }
+        const argTypes = sig.argTypes.map(a => applySubst(a, this.subst))
+        for (let i = 0; i < term.args.length; i++) {
+            this.markVarMode(term.args[i], sig.argModes?.[i] ?? 'in')
+            this.inferTerm(term.args[i], argTypes[i])
+        }
+    }
+    // 统一目标：rhs 类型需与 lhs 一致；lhs 若已有具体类型（来自头签名）则约束 rhs。
+    // 首次出现在绑定位置的变量记子句级 mode out（head 形参已在 inferHead 标记，不会被覆盖）
+    private inferUnify(lhs: Term, rhs: Term) {
+        this.markVarMode(lhs, 'out')
+        this.markVarMode(rhs, 'out')
+        const lt = this.inferTerm(lhs)
+        const rt = this.inferTerm(rhs, lt)
+        unify(lt, rt, this.subst)
+        // unify 后刷新两侧的推断条目：先推断一侧可能已写入未合一的 stale 类型
+        // （如 `Y = X` 中 Y 先被记为自由变量，合一后才有 X 的具体类型）
+        this.refreshVarTypes(lhs)
+        this.refreshVarTypes(rhs)
+    }
+    // 递归刷新 term 下所有变量出现处的推断条目（按当前 varTypes + subst 重新解析）
+    private refreshVarTypes(term: Term) {
+        if (isVariable(term) || ['!/1', '!./1', '!:/1'].includes(term.nameArity)) {
+            const key = this.varKey(term)
+            const t = this.varTypes.get(key)
+            if (t) {
+                const resolved = applySubst(t, this.subst)
+                this.pushVarType(term, resolved)
+            }
+            return
+        }
+        for (const a of term.args ?? []) this.refreshVarTypes(a)
+    }
+    private pushVarType(term: Term, resolved: MerType) {
+        const key = this.varKey(term)
+        const occurrences = term.clause?.varMap.get(key) ?? [term]
+        const info = { type: resolved, mode: this.varMode.get(key) }
+        for (const occ of occurrences) this.inferred.set(occ, info)
+    }
+    // 项/变量 → 类型（数据位置）；状态变量映射到底层变量名
+    private inferTerm(term: Term, expected?: MerType): MerType {
+        if (isVariable(term) || ['!/1', '!./1', '!:/1'].includes(term.nameArity)) {
+            const key = this.varKey(term)
+            let t = this.varTypes.get(key)
+            if (!t) { t = { kind: 'var', name: this.freshVar() }; this.varTypes.set(key, t) }
+            if (expected) unify(t, expected, this.subst)
+            const resolved = applySubst(t, this.subst)
+            this.pushVarType(term, resolved)
+            return resolved
+        }
+        // 高阶表达式（func(...) = ... / (pred(...) is det) / 带 :- Body 的闭包）
+        const ho = this.inferHigherOrder(term, expected)
+        if (ho) return ho
+
+        const st = term.syntaxType
+        if (st === 'integer') { const t: MerType = { kind: 'ctor', ctor: { name: 'int', arity: 0 }, args: [] }; this.inferred.set(term, { type: t }); return t }
+        if (st === 'float') { const t: MerType = { kind: 'ctor', ctor: { name: 'float', arity: 0 }, args: [] }; this.inferred.set(term, { type: t }); return t }
+        if (st === 'string') { const t: MerType = { kind: 'ctor', ctor: { name: 'string', arity: 0 }, args: [] }; this.inferred.set(term, { type: t }); return t }
+        if (st === 'atom' && term.nameArity === '[]/0') { const t: MerType = { kind: 'ctor', ctor: { name: 'list', arity: 1 }, args: [{ kind: 'var', name: this.freshVar() }] }; this.inferred.set(term, { type: t }); return t }
+        if (term.nameArity === '[|]/2' || term.nameArity === '[]/0') {
+            return this.inferList(term, expected)
+        }
+        if (term.nameArity === './2') {
+            // 模块限定调用 uint.cast_to_int(Size)：解析树是 ./2(模块名, 调用)。
+            // 索引遍历已解包（visitQualifiedTerm）；推断这里同样解包后对内层项推断，
+            // 否则 ./2 会被当名为 `.` 的普通 functor 查不到而落 unknown
+            const target = this.unwrapQualifiedInfer(term)
+            const t = this.inferTerm(target, expected)
+            this.inferred.set(term, { type: t })
+            return t
+        }
+        // 一般 functor（atom 或复合项）：构造子 或 数据位置函数调用
+        return this.inferFunctor(term, expected)
+    }
+    // 纯解包模块限定（a.b.c → c，逐层设 qualified；索引遍历已设，此处幂等），不做索引副作用
+    private unwrapQualifiedInfer(term: Term): Term {
+        let t = term
+        while (!isVariable(t) && t.nameArity === './2') {
+            const right = t.args[1]
+            if (t.args[0]) right.qualified = t.args[0]
+            t = right
+        }
+        return t
+    }
+    // 列表字面量：元素类型由 expected（list(E)）给定，否则新建类型变量
+    private inferList(term: Term, expected?: MerType): MerType {
+        let elemType: MerType = { kind: 'var', name: this.freshVar() }
+        if (expected && expected.kind === 'ctor' && expected.ctor.name === 'list') {
+            elemType = expected.args[0]
+        }
+        const walk = (t: Term) => {
+            if (t.nameArity === '[]/0') return
+            if (t.nameArity === '[|]/2') {
+                this.inferTerm(t.args[0], elemType)
+                walk(t.args[1])
+                return
+            }
+            // 可能直接是变量尾（!.List / Tail）
+            this.inferTerm(t, { kind: 'ctor', ctor: { name: 'list', arity: 1 }, args: [elemType] })
+        }
+        walk(term)
+        const result: MerType = { kind: 'ctor', ctor: { name: 'list', arity: 1 }, args: [applySubst(elemType, this.subst)] }
+        this.inferred.set(term, { type: result })
+        return result
+    }
+    // 数据位置 functor：用 expected 类型与签名消歧 构造子/函数；重载且类型无法唯一确定时保持无类别
+    private inferFunctor(term: Term, expected?: MerType): MerType {
+        const name = term.name
+        const arity = term.arity
+        const expCtor = expected && expected.kind === 'ctor' ? expected.ctor : undefined
+        const constrs: ConsInfo[] = []
+        const collectConstrs = (ti: TypeInfo) => {
+            for (const ci of ti.constructors) {
+                if (ci.ctor === name && ci.arity === arity) constrs.push(ci)
+            }
+        }
+        for (const ti of this.types.values()) collectConstrs(ti)
+        // 跨模块：类型上下文明确时，纳入导入模块里同名同元数的类型构造子
+        if (expCtor) {
+            for (const ti of exportManager.allTypeInfos()) {
+                if (ti.ctor.name === expCtor.name && ti.ctor.arity === expCtor.arity) collectConstrs(ti)
+            }
+        }
+        const localFunc = this.funcs.get(keyOf(name, arity))
+        // 限定名 M.f(...)：按限定模块精确查签名（钉死模块，无重载歧义）
+        const qualFunc = term.qualified
+            ? moduleManager.get(term.qualified)?.visitResult?.funcs.get(keyOf(name, arity))
+            : undefined
+        const crossFunc = qualFunc ?? exportManager.lookupFunc(name, arity)
+
+        let chosenCI: ConsInfo | undefined
+        let chosenFunc: FuncInfo | undefined
+        if (qualFunc) {
+            // 限定调用直接消解为该模块的 func/签名（不受「类型未知不引入跨模块候选」限制）
+            chosenFunc = qualFunc
+        } else if (expCtor) {
+            // 类型上下文明确：取首个能合一的构造子；否则若 func 结果类型能合一则取 func
+            // （跨模块 func 仅在类型上下文明确时参与，避免把无类型上下文的重载项误标）
+            const matches = constrs.filter(ci => unify(ci.resultType, expected!, this.subst))
+            if (matches.length >= 1) {
+                chosenCI = matches[0]
+            } else if (localFunc ?? crossFunc) {
+                chosenFunc = localFunc ?? crossFunc
+            }
+        } else {
+            // 类型未知：仅用本模块符号消歧；跨模块候选不引入（否则会把本应无类别的重载项误标）
+            if (localFunc && constrs.length === 0) {
+                chosenFunc = localFunc
+            } else if (!localFunc && constrs.length === 1) {
+                chosenCI = constrs[0]
+            } else if (localFunc && constrs.length >= 1 && localFunc.argTypes.length === arity) {
+                chosenFunc = localFunc
+            }
+            // 其余（多构造子无 func、func+构造子但参数元数不符、跨模块仅 func）无法消歧 → 留无类别
+        }
+
+        let resultType: MerType
+        let category: 'constructor' | 'func' | undefined
+        if (chosenCI) {
+            resultType = applySubst(chosenCI.resultType, this.subst)
+            category = 'constructor'
+        } else if (chosenFunc) {
+            resultType = chosenFunc.resultType ?? { kind: 'var', name: this.freshVar() }
+            category = 'func'
+        } else {
+            resultType = { kind: 'var', name: this.freshVar() }
+        }
+
+        // 对齐参数类型
+        const argTypes = chosenCI ? chosenCI.argTypes.map(a => applySubst(a, this.subst))
+            : chosenFunc ? chosenFunc.argTypes.map(a => applySubst(a, this.subst))
+            : term.args.map(() => ({ kind: 'var', name: this.freshVar() } as MerType))
+        for (let i = 0; i < term.args.length; i++) {
+            this.inferTerm(term.args[i], argTypes[i])
+        }
+        this.inferred.set(term, { type: resultType, category })
+        return resultType
+    }
+    // 高阶表达式：func(Head) = Result | (pred(Head) is Det) | 带 :- Body 的闭包。
+    // 用 expected 的 ho 签名给闭包头绑定变量赋类型，并递归推断闭包头/体。
+    private inferHigherOrder(term: Term, expected?: MerType): MerType | undefined {
+        let pf: 'pred' | 'func' | undefined
+        let headTerm: Term | undefined
+        let resultTerm: Term | undefined
+        let bodyTerm: Term | undefined
+        const a0 = term.args[0]
+        if (term.nameArity === '=/2' && a0 && ['func', 'function'].includes(a0.name)) {
+            pf = 'func'; headTerm = a0; resultTerm = term.args[1]
+        } else if (term.nameArity === 'is/2' && a0 && ['pred', 'predicate'].includes(a0.name)) {
+            pf = 'pred'; headTerm = a0
+        } else if (term.nameArity === ':-/2') {
+            const lhs = term.args[0]
+            const la0 = lhs?.args[0]
+            if (lhs?.nameArity === 'is/2' && la0 && ['pred', 'predicate'].includes(la0.name)) {
+                pf = 'pred'; headTerm = la0; bodyTerm = term.args[1]
+            } else if (lhs?.nameArity === '=/2' && la0 && ['func', 'function'].includes(la0.name)) {
+                pf = 'func'; headTerm = la0; resultTerm = la0.args[1]; bodyTerm = term.args[1]
+            }
+        }
+        if (!pf || !headTerm) return undefined
+
+        // 闭包头绑定变量（剥离 ::/>> 模式注解），按 expected 的 ho 签名赋类型
+        const headVars = headTerm.args.map(v => this.hoHeadVar(v))
+        const argTypes = headVars.map(v => {
+            const key = this.varKey(v)
+            let t = this.varTypes.get(key)
+            if (!t) { t = { kind: 'var', name: this.freshVar() }; this.varTypes.set(key, t) }
+            return t
+        })
+        const resultType: MerType = { kind: 'var', name: this.freshVar() }
+        if (expected && expected.kind === 'ho') {
+            const ea = expected.args
+            for (let i = 0; i < argTypes.length && i < ea.length; i++) {
+                unify(argTypes[i], ea[i], this.subst)
+            }
+            if (expected.result) unify(resultType, expected.result, this.subst)
+        }
+        const hoType: MerType = { kind: 'ho', pf, args: argTypes, result: pf === 'func' ? resultType : undefined }
+        if (resultTerm) this.inferTerm(resultTerm, resultType)
+        if (bodyTerm) this.inferGoal(bodyTerm)
+        this.inferred.set(term, { type: hoType })
+        return hoType
+    }
+    private hoHeadVar(argTerm: Term): Term {
+        if (['::/2', '>>/2'].includes(argTerm.nameArity)) return argTerm.args[0]
+        return argTerm
+    }
+    private signatureOf(termOrName: Term | string, arity?: number): FuncInfo | undefined {
+        const name = typeof termOrName === 'string' ? termOrName : termOrName.name
+        const a = typeof termOrName === 'string' ? arity! : termOrName.arity
+        if (typeof termOrName !== 'string' && termOrName.qualified) {
+            const doc = moduleManager.get(termOrName.qualified)
+            const sig = doc?.visitResult?.funcs.get(keyOf(name, a))
+                ?? doc?.visitResult?.preds.get(keyOf(name, a))
+            if (sig) return sig
+        }
+        return this.funcs.get(keyOf(name, a))
+            ?? this.preds.get(keyOf(name, a))
+            ?? exportManager.lookupFunc(name, a)
+    }
+    private varKey(term: Term): string {
+        if (['!/1', '!./1', '!:/1'].includes(term.nameArity)) {
+            return term.args[0]?.name ?? term.name
+        }
+        return term.name
+    }
+    private freshVar(): string {
+        return '?' + (this.varCounter++)
     }
 
 }

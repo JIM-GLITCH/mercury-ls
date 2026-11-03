@@ -81,7 +81,7 @@ export namespace Parser {
 
         // read term
         let p = new TokenIter(tokens)
-        let r = read(max_priority + 1, "OrdinaryTerm", p, ps)
+        let r = read(0, "OrdinaryTerm", p, ps)
         // check tokens are left
         let lastToken = r.p.val()
         if (lastToken.type != "EOF") {
@@ -178,12 +178,12 @@ export namespace Parser {
             if (token2.type == "integer") {
                 let term = negInteger(token2, token1)
                 // return [term,0,p.next()]
-                return bottom_up(MaxPriority, termKind, 0, term, p3, ps)
+                return bottom_up(MaxPriority, termKind, max_priority + 1, term, p3, ps)
             }
             if (token2.type == "float") {
                 let term = negFloat(token2, token1)
                 // return [term,0,p.next()]
-                return bottom_up(MaxPriority, termKind, 0, term, p3, ps)
+                return bottom_up(MaxPriority, termKind, max_priority + 1, term, p3, ps)
             }
 
         }
@@ -196,7 +196,7 @@ export namespace Parser {
             // % Since most tokens aren't binary prefix ops, the first test
             // % here will almost always fail.
             if ((BinOpinfo = find_binary_prefix_op(opinfos))
-                && BinOpinfo[3] <= MaxPriority
+                && BinOpinfo[3] >= MaxPriority
                 && token2
                 && could_start_term(token2)
                 && token2.type != "open_ct"
@@ -216,7 +216,7 @@ export namespace Parser {
             // % Since most tokens aren't prefix ops, the first test
             // % here will almost always fail.
             else if ((prefixOPinfo = find_prefix_op(opinfos))
-                && prefixOPinfo[2] <= MaxPriority
+                && prefixOPinfo[2] >= MaxPriority
                 && token2
                 && could_start_term(token2)
                 && token2.type != "open_ct"
@@ -244,7 +244,7 @@ export namespace Parser {
                     break
                 }
                 else {
-                    if (lookup_op(token1.value) && MaxPriority <= max_priority) {
+                    if (lookup_op(token1.value) && MaxPriority > 0) {
                         errorToken("unexpected token at start of (sub)term", token1, ps)
                         let term = atom(token1)
                         baseterm = term
@@ -292,7 +292,7 @@ export namespace Parser {
             }
             case "open":
             case "open_ct": {
-                let r1 = read(max_priority + 1, "OrdinaryTerm", p2, ps)
+                let r1 = read(0, "OrdinaryTerm", p2, ps)
                 let token = r1.p.val()
                 if (token.type == "close") {
                     baseterm = r1.term
@@ -307,7 +307,7 @@ export namespace Parser {
 
             }
             case "open_list": {
-                let r1 = read(max_priority + 1, "ListElem", p2, ps)
+                let r1 = read(0, "ListElem", p2, ps)
                 let r2 = read_list(r1.p, ps)
                 let term = functorCompound(token1, [r1.term, r2.term], "[|]")
                 baseterm = term
@@ -352,7 +352,7 @@ export namespace Parser {
                 continue
             }
             else {
-                return bottom_up(MaxPriority, termKind, 0, tt, pp, ps)
+                return bottom_up(MaxPriority, termKind, max_priority + 1, tt, pp, ps)
             }
         }
     }
@@ -362,7 +362,7 @@ export namespace Parser {
         let args = []
         let pp = p
         for (; ;) {
-            let r = read(max_priority + 1, "Argument", pp, ps)
+            let r = read(0, "Argument", pp, ps)
             args.push(r.term)
             let token = r.p.val()
             if (token.type == "EOF") {
@@ -388,7 +388,7 @@ export namespace Parser {
         let args = []
         let pp = p
         for (; ;) {
-            let r = read(max_priority + 1, "Argument", pp, ps)
+            let r = read(0, "Argument", pp, ps)
             args.push(r.term)
             let token = r.p.val()
 
@@ -420,14 +420,14 @@ export namespace Parser {
                 return { term, p: p1 }
             }
             case "comma": {
-                let r1 = read(max_priority + 1, "ListElem", p2, ps)
+                let r1 = read(0, "ListElem", p2, ps)
                 let r2 = read_list(r1.p, ps)
                 let term = functorCompound(token1, [r1.term, r2.term], "[|]")
                 return { term, p: r2.p }
 
             }
             case "ht_sep": {
-                let r1 = read(max_priority + 1, "Argument", p2, ps)
+                let r1 = read(0, "Argument", p2, ps)
                 let token = r1.p.val()
                 if (token.type == "close_list") {
                     return { term: r1.term, p: r1.p.next() }
@@ -444,7 +444,7 @@ export namespace Parser {
             }
             default: {
                 errorToken("missing comma", token1, ps)
-                let r1 = read(max_priority + 1, "ListElem", p1, ps)
+                let r1 = read(0, "ListElem", p1, ps)
                 let r2 = read_list(r1.p, ps)
                 let term = functorCompound(token1, [r1.term, r2.term], "[|]")
                 return { term, p: r2.p }
@@ -468,8 +468,8 @@ export namespace Parser {
         // infixop
         let opinfo
         if ((opinfo = isInfixOp(token1))
-            && (opinfo.priority <= MaxPriority)
-            && opinfo.lpriority >= lpriority) {
+            && (opinfo.priority >= MaxPriority)
+            && opinfo.lpriority <= lpriority) {
 
             if (token1.type == "backquote") {
                 let r1 = parse_backquoted_operator(p2, ps)
@@ -503,9 +503,9 @@ export namespace Parser {
     function isInfixOp(token: Token) {
         if (token.type == "backquote") {
             return {
-                priority: 120,
-                lpriority: 120,
-                rpriority: 119
+                priority: 1380,
+                lpriority: 1380,
+                rpriority: 1381
             }
         }
         else {

@@ -1,10 +1,5 @@
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect } from 'vitest'
 
-// document-manager 运行时依赖 server.ts 的 textDocuments，
-// 而 server.ts 顶层 createConnection 需要 LSP 参数，测试环境必须 mock 掉
-vi.mock('../server', () => ({
-    textDocuments: new Map(),
-}))
 import { Parser } from '../mercury-parser'
 import { Visitor } from '../document-visitor'
 import { URI } from 'vscode-uri'
@@ -15,6 +10,10 @@ import { ReferenceProvider } from '../provide-reference'
 import { linker } from '../document-linker'
 import { exportManager, moduleManager } from '../document-moduleManager'
 import { mercuryDocumentFactory, mercuryDocuments } from '../document-manager'
+import { orderByImports, scanHeader } from '../document-order'
+import { HoverProvider } from '../provide-hover'
+import { merTypeToString } from '../document-type'
+import { modeRefToInsts } from '../document-mode'
 
 interface DefEntry {
   nameArity: string
@@ -39,6 +38,25 @@ async function visitSource(src: string): Promise<Visitor> {
     onCancellationRequested: () => undefined,
   } as any)
   return v
+}
+
+// 跑 visitor + linker，返回带 linkResult 的文档（端到端消歧验证用）
+async function linkSource(src: string): Promise<any> {
+  const doc: any = {
+    parseResult: Parser.parse(src),
+    uri: URI.parse('file:///test.m'),
+    visitResult: undefined,
+  }
+  const v = new Visitor()
+  await v.visit(doc, {
+    isCancellationRequested: false,
+    onCancellationRequested: () => undefined,
+  } as any)
+  await linker.link(doc, {
+    isCancellationRequested: false,
+    onCancellationRequested: () => undefined,
+  } as any)
+  return doc
 }
 
 /** 深度收集树中所有 nameArity 匹配的节点 */
@@ -196,6 +214,17 @@ describe('visitor: type declarations', () => {
     )
     expectLabeled(defs, 't_where', 't_where/0', 'type')
     assertNoWhereMislabeled(defs)
+  })
+})
+
+describe('visitor: qualified declaration names', () => {
+  it('keeps qualified predicate declarations as pred symbols, not type refs', async () => {
+    const v = await visitMercury([
+      ':- pred bag.least_upper_bound_small_loop(map(T, int)::in, map(T, int)::in, map(T, int)::out) is det.',
+    ].join('\n'))
+    const decls = declarationsOf(v)
+    expectLabeled(decls, 'least_upper_bound_small_loop', 'least_upper_bound_small_loop/3', 'pred')
+    expect(decls.get('bag')?.some((e: any) => e.semanticType === 'type')).toBeFalsy()
   })
 })
 
@@ -776,6 +805,180 @@ describe('goto definition / find references for insts (providers)', () => {
     expect(ref.semanticType).toBeUndefined()
   })
 
+  it('disambiguates imported type constructor via cross-module inference (pair -/2)', async () => {
+    const mk = async (src: string, name: string) => {
+      const uri = URI.parse(`file:///${name}.m`)
+      const doc = mercuryDocumentFactory.fromString(src, uri)
+      mercuryDocuments.addDocument(doc)
+      await new Visitor().visit(doc, {
+        isCancellationRequested: false,
+        onCancellationRequested: () => undefined,
+      } as any)
+      const mod = doc.visitResult!.module
+      if (mod) moduleManager.set(mod, doc)
+      exportManager.set(doc)
+      return doc
+    }
+    // mpair 导出类型 pair(K, V) ---> K - V（构造子 `-`/2 在另一模块）
+    await mk(':- module mpair.\n:- interface.\n:- type pair(K, V) ---> K - V.\n:- end_module mpair.\n', 'mpair-x')
+    // muser 导入 mpair，子句里 `!:List = [1 - 2 | !.List]`，!List 类型经头签名推为 list(pair(int,int))
+    const docM = await mk(
+      ':- module muser.\n' +
+      ':- interface.\n' +
+      ':- import_module mpair.\n' +
+      ':- pred p(list(pair(int, int))::out) is det.\n' +
+      ':- end_module muser.\n' +
+      ':- implementation.\n' +
+      'p(!List) :- !:List = [1 - 2 | !.List].\n',
+      'muser-x',
+    )
+    await linker.link(docM, {
+      isCancellationRequested: false,
+      onCancellationRequested: () => undefined,
+    } as any)
+    // `1 - 2` 出现在 list(pair(int,int)) 元素位置，pair 类型来自导入模块 → 精确标构造子
+    const mins = collectTerms(docM.parseResult.value, '-/2')
+    expect(mins.length).toBeGreaterThan(0)
+    for (const t of mins) expect(t.semanticType).toBe('constructor')
+  })
+
+  it('resolves direct imported pair constructor use without expected list context', async () => {
+    const mk = async (src: string, name: string) => {
+      const uri = URI.parse(`file:///${name}.m`)
+      const doc = mercuryDocumentFactory.fromString(src, uri)
+      mercuryDocuments.addDocument(doc)
+      await new Visitor().visit(doc, {
+        isCancellationRequested: false,
+        onCancellationRequested: () => undefined,
+      } as any)
+      const mod = doc.visitResult!.module
+      if (mod) moduleManager.set(mod, doc)
+      exportManager.set(doc)
+      return doc
+    }
+    await mk(':- module mpair.\n:- interface.\n:- type pair(K, V) ---> K - V.\n:- end_module mpair.\n', 'mpair-direct')
+    const docM = await mk(
+      ':- module muser.\n' +
+      ':- interface.\n' +
+      ':- import_module mpair.\n' +
+      ':- pred p(pair(int, int)::out) is det.\n' +
+      ':- end_module muser.\n' +
+      ':- implementation.\n' +
+      'p(P) :- P = 1 - 2.\n',
+      'muser-direct',
+    )
+    await linker.link(docM, {
+      isCancellationRequested: false,
+      onCancellationRequested: () => undefined,
+    } as any)
+    const mins = collectTerms(docM.parseResult.value, '-/2')
+    expect(mins.length).toBeGreaterThan(0)
+    for (const t of mins) expect(t.semanticType).toBe('constructor')
+  })
+
+  it('infers higher-order closure head types and disambiguates inner functor', async () => {
+    // p 接收 func(A, B) = pair(A, B)；把 func(X, Y) = (X - Y) 直接作为实参传入，
+    // 闭包头 X、Y 应被推成 pair 的类型参数，从而内部的 `X - Y` 按 pair 构造子消歧
+    const doc = await linkSource(
+      ':- module m.\n' +
+      ':- interface.\n' +
+      ':- type pair(K, V) ---> K - V.\n' +
+      ':- pred p(func(A, B) = pair(A, B)::in) is det.\n' +
+      ':- end_module m.\n' +
+      ':- implementation.\n' +
+      'foo :-\n' +
+      '    p(func(X, Y) = (X - Y)).\n',
+    )
+    // 闭包体内的 `X - Y` 应被精确标成 pair 的构造子（而非无类别/func）
+    const mins = collectTerms(doc.parseResult.value, '-/2')
+    expect(mins.length).toBeGreaterThan(0)
+    for (const t of mins) expect(t.semanticType).toBe('constructor')
+  })
+
+  it('treats higher-order closure calls as valid calls with output bound by the closure mode', async () => {
+    const src = [
+      ':- module m.',
+      ':- interface.',
+      ':- pred run(pred(int, int)::in, int::in, int::out) is det.',
+      ':- end_module m.',
+      ':- implementation.',
+      'run(Closure, In, Out) :-',
+      '    In = 1,',
+      '    Closure(In, Out).',
+    ].join('\n')
+    const uri = URI.parse('file:///higher-order-closure-mode.m')
+    const doc = await visitDoc(src, uri)
+    const modeErrors = doc.visitResult.errors.filter((d: any) => d.source === 'mercury-ls')
+    expect(modeErrors).toEqual([])
+  })
+
+  it('collects type/func/pred signatures for inference (TypeInfo/FuncInfo)', async () => {
+    const v = await visitSource(
+      ':- module m.\n' +
+      ':- interface.\n' +
+      ':- type pair(K, V) ---> K - V.\n' +
+      ':- type list(T) ---> [] ; [T | list(T)].\n' +
+      ':- func f(int, int) = va.\n' +
+      ':- pred p(int::in, int::out) is det.\n' +
+      ':- end_module m.\n',
+    )
+    const types = (v as any).types as Map<string, any>
+    // 类型 pair(K, V) → 2 个类型参数，构造子 `-`/2
+    const pair = types.get('pair/2')
+    expect(pair).toBeTruthy()
+    expect(pair.params.length).toBe(2)
+    const minusCtor = pair.constructors.find((c: any) => c.ctor === '-')
+    expect(minusCtor).toBeTruthy()
+    expect(minusCtor.arity).toBe(2)
+    // 构造子结果类型 = 所属类型应用其参数 pair(K, V)
+    expect(minusCtor.resultType.ctor.name).toBe('pair')
+    expect(minusCtor.resultType.args.length).toBe(2)
+
+    // list(T) 的 [] 与 [|] 构造子也收集
+    const list = types.get('list/1')
+    expect(list.constructors.find((c: any) => c.ctor === '[]')).toBeTruthy()
+    expect(list.constructors.find((c: any) => c.ctor === '[|]')).toBeTruthy()
+
+    // func 签名：参数类型 + 返回类型
+    const funcs = (v as any).funcs as Map<string, any>
+    const f = funcs.get('f/2')
+    expect(f).toBeTruthy()
+    expect(f.argTypes.length).toBe(2)
+    expect(f.resultType.ctor.name).toBe('va')
+
+    // pred 签名：参数类型，无返回类型
+    const preds = (v as any).preds as Map<string, any>
+    const p = preds.get('p/2')
+    expect(p).toBeTruthy()
+    expect(p.argTypes.length).toBe(2)
+    expect(p.resultType).toBeUndefined()
+  })
+
+  it('infers functor category from variable types (pair -/2 as constructor)', async () => {
+    const doc = await linkSource(
+      ':- module m.\n' +
+      ':- interface.\n' +
+      ':- type pair(K, V) ---> K - V.\n' +
+      ':- pred map_keys_func_2(K::in, V::out, pair(K, V)::in, assoc_list(K, V)::in, list(pair(K, V))::out) is det.\n' +
+      ':- implementation.\n' +
+      'map_keys_func_2(KeyMap, Tail0, !List) :-\n' +
+      '    ( Tail0 = [],\n' +
+      '        !:List = []\n' +
+      '    ;\n' +
+      '        Tail0 = [Key0 - Value | Tail1],\n' +
+      '        Key = KeyMap(Value, Key0),\n' +
+      '        !:List = [Key - Value | !.List],\n' +
+      '        map_keys_func_2(KeyMap, Tail1, !List)\n' +
+      '    ).\n',
+    )
+    // 所有 `-/2` 都出现在 pair 类型的列表元素位置 → 推断为构造子
+    const mins = collectTerms(doc.parseResult.value, '-/2')
+    expect(mins.length).toBeGreaterThan(0)
+    for (const t of mins) {
+      expect(t.semanticType).toBe('constructor')
+    }
+  })
+
   it('resolves unqualified refs via the global export index (cross-module)', async () => {
     const mk = async (src: string, name: string) => {
       const uri = URI.parse(`file:///${name}.m`)
@@ -953,5 +1156,582 @@ describe('goto definition / find references for insts (providers)', () => {
     } as any)
     expect(refs.length).toBe(1)
     expect(refs[0].range.start.line).toBe(3)
+  })
+
+  it('scanHeader extracts module name and import_module targets', () => {
+    const src = [
+      ':- module muser.',
+      ':- interface.',
+      ':- import_module mpair, mlist.',
+      ':- import_module mset.',
+      ':- end_module muser.',
+    ].join('\n')
+    const h = scanHeader(Parser.parse(src).value as any)
+    expect(h.module).toBe('muser')
+    // 逗号形式 mpair, mlist 与单独 import_module mset 都要抽到
+    expect(h.imports.sort()).toEqual(['mlist', 'mpair', 'mset'])
+  })
+
+  it('orderByImports orders import targets before importers', () => {
+    const docs = [
+      { name: 'muser', imports: ['mpair', 'mlist'] },
+      { name: 'mpair', imports: [] },
+      { name: 'mlist', imports: ['mpair'] },
+      { name: 'orphan', imports: [] },
+    ]
+    const ordered = orderByImports(
+      docs,
+      d => d.name,
+      d => d.imports,
+    )
+    const pos = (n: string) => ordered.findIndex(d => d.name === n)
+    // mpair 必须排在依赖它的 muser / mlist 之前
+    expect(pos('mpair')).toBeLessThan(pos('muser'))
+    expect(pos('mpair')).toBeLessThan(pos('mlist'))
+    // 依赖目标不在批次（如 external）时不影响顺序，orphan 仍出现
+    expect(ordered.map(d => d.name)).toContain('orphan')
+  })
+})
+
+describe('hover shows inferred types', () => {
+  const visitDoc = async (src: string, uri: URI) => {
+    const doc = mercuryDocumentFactory.fromString(src, uri)
+    mercuryDocuments.addDocument(doc)
+    await new Visitor().visit(doc, {
+      isCancellationRequested: false,
+      onCancellationRequested: () => undefined,
+    } as any)
+    return doc
+  }
+  it('shows full signature for a func reference', async () => {
+    const src = [
+      ':- module m.',
+      ':- interface.',
+      ':- func add(int::in, int::in) = int.',
+      ':- end_module m.',
+      ':- implementation.',
+      'g(Z) :- Z = add(1, 2).',
+    ].join('\n')
+    const uri = URI.parse('file:///hover-func.m')
+    const doc = await visitDoc(src, uri)
+    const addRef = collectTerms(doc.parseResult.value, 'add/2')
+      .find((t: any) => t.semanticType === 'func')
+    expect(addRef).toBeTruthy()
+    const hover = await HoverProvider({
+      textDocument: { uri: uri.toString() },
+      position: termRange(addRef).start,
+    } as any)
+    const value: string = (hover!.contents as any).value
+    expect(value).toContain('(func) add/2')
+    // 第二行：type + 类型签名（不带 mode）；第三行：mode + mode 声明
+    expect(value).toContain('type add(int, int) = int')
+    expect(value).toContain('mode add(in, in) = (out)')
+    expect(value).not.toContain('::')
+  })
+
+  it('shows argument modes in func/pred signature hover', async () => {
+    const src = [
+      ':- module m.',
+      ':- interface.',
+      ':- pred q(int :: in(i_node)) is det.',
+      ':- func f(int::in) = (int::out) is det.',
+      ':- end_module m.',
+    ].join('\n')
+    const uri = URI.parse('file:///hover-mode.m')
+    const doc = await visitDoc(src, uri)
+    const hoverOf = async (nameArity: string) => {
+      const t = collectTerms(doc.parseResult.value, nameArity)
+        .find((x: any) => x.semanticType === 'pred' || x.semanticType === 'func')
+      const h = await HoverProvider({
+        textDocument: { uri: uri.toString() },
+        position: termRange(t).start,
+      } as any)
+      return (h!.contents as any).value as string
+    }
+    // 类型行 + mode 行（复合 mode in(i_node) 原样渲染；mode 行带 determinism）
+    const q = await hoverOf('q/1')
+    expect(q).toContain('(pred) q/1')
+    expect(q).toContain('type q(int)')
+    expect(q).toContain('mode q(in(i_node)) is det')
+    const f = await hoverOf('f/1')
+    expect(f).toContain('(func) f/1')
+    expect(f).toContain('type f(int) = int')
+    expect(f).toContain('mode f(in) = (out) is det')
+  })
+
+  it('shows owning type in constructor hover', async () => {
+    const src = [
+      ':- module m.',
+      ':- interface.',
+      ':- type tree(T) ---> leaf ; node(T, tree(T)).',
+      ':- type unit ---> u.',
+      ':- end_module m.',
+    ].join('\n')
+    const uri = URI.parse('file:///hover-ctor.m')
+    const doc = await visitDoc(src, uri)
+    const hoverOf = async (nameArity: string) => {
+      const t = collectTerms(doc.parseResult.value, nameArity)
+        .find((x: any) => x.semanticType === 'constructor')
+      const h = await HoverProvider({
+        textDocument: { uri: uri.toString() },
+        position: termRange(t).start,
+      } as any)
+      return (h!.contents as any).value as string
+    }
+    // 构造子签名：参数 = 结果类型（所属类型）
+    expect(await hoverOf('node/2')).toContain('type node(T, tree(T)) = tree(T)')
+    // 零元构造子不带空括号
+    expect(await hoverOf('u/0')).toContain('type u = unit')
+  })
+
+  it('infers variable types inside if-then-else branches from head signature', async () => {
+    const src = [
+      ':- module m.',
+      ':- interface.',
+      ':- pred p(int::in) is det.',
+      ':- end_module m.',
+      ':- implementation.',
+      'p(X) :- ( if X > 0 then Y = X else true ).',
+    ].join('\n')
+    const uri = URI.parse('file:///hover-if.m')
+    const doc = await visitDoc(src, uri)
+    // Y 只出现在 then 分支：应与 head 参数 X 同为 int（此前 then 分支被当数据推断而 unknown）
+    const ys = [...doc.visitResult.inferred.entries()].filter(([t]: any) => t.name === 'Y')
+    expect(ys.length).toBeGreaterThan(0)
+    for (const [, info] of ys) {
+      expect(merTypeToString((info as any).type)).toBe('int')
+    }
+  })
+
+  it('mode analysis Phase A: parses inst/mode declarations into structured MerInst', async () => {
+    const src = [
+      ':- module m.',
+      ':- interface.',
+      ':- inst list_skel ---> [] ; [X | list_skel].',
+      ':- inst pair_cell(T) ---> pair(T, T).',
+      ':- inst i2 == ground.',
+      ':- mode di_uo == ground >> ground.',
+      ':- pred q(int::in) is det.',
+      ':- func f(int::in) = (int::out).',
+      ':- end_module m.',
+    ].join('\n')
+    const uri = URI.parse('file:///mode-phase-a.m')
+    const doc = await visitDoc(src, uri)
+    // `--->` 体 → bound 构造子列表；body 里的变量 → inst_var 形参引用
+    expect(doc.visitResult.instDefs.get('list_skel/0')).toEqual({
+      params: [],
+      body: {
+        kind: 'bound',
+        functors: [
+          { ctor: '[]', arity: 0, args: [] },
+          { ctor: '[|]', arity: 2, args: [
+            { kind: 'inst_var', name: 'X' },
+            { kind: 'user', name: 'list_skel', arity: 0, args: [] },
+          ] },
+        ],
+      },
+    })
+    // 参数化 inst：形参名记入 params
+    expect(doc.visitResult.instDefs.get('pair_cell/1')).toEqual({
+      params: ['T'],
+      body: {
+        kind: 'bound',
+        functors: [{ ctor: 'pair', arity: 2, args: [
+          { kind: 'inst_var', name: 'T' }, { kind: 'inst_var', name: 'T' },
+        ] }],
+      },
+    })
+    expect(doc.visitResult.instDefs.get('i2/0')).toEqual({ params: [], body: { kind: 'ground' } })
+    expect(doc.visitResult.modeDefs.get('di_uo/0')).toEqual({
+      params: [], initial: { kind: 'ground' }, final: { kind: 'ground' },
+    })
+    // 声明参数 → 结构化 mode 引用（未注解默认 in / 返回默认 out）
+    expect(doc.visitResult.preds.get('q/1')?.argModeRefs).toEqual([
+      { kind: 'builtin', name: 'in', args: [] },
+    ])
+    expect(doc.visitResult.funcs.get('f/1')?.argModeRefs).toEqual([
+      { kind: 'builtin', name: 'in', args: [] },
+    ])
+    expect(doc.visitResult.funcs.get('f/1')?.resultModeRef).toEqual({
+      kind: 'builtin', name: 'out', args: [],
+    })
+    // 用户 mode 解析（形参替换在 modeRefToInsts）
+    const ref = doc.visitResult.preds.get('q/1')?.argModeRefs?.[0]
+    const insts = ref && modeRefToInsts(ref, doc.visitResult.modeDefs)
+    expect(insts).toEqual({ initial: { kind: 'ground' }, final: { kind: 'ground' } })
+  })
+
+  it('infers higher-order closure variables from qualified calls like array.map', async () => {
+    const mk = async (src: string, name: string) => {
+      const doc = mercuryDocumentFactory.fromString(src, URI.parse(`file:///${name}.m`))
+      mercuryDocuments.addDocument(doc)
+      await new Visitor().visit(doc, {
+        isCancellationRequested: false,
+        onCancellationRequested: () => undefined,
+      } as any)
+      const mod = doc.visitResult!.module
+      if (mod) moduleManager.set(mod, doc)
+      exportManager.set(doc)
+      return doc
+    }
+    await mk(':- module array.\n:- interface.\n:- pred map(pred(int, int), list(int), list(int)) is det.\n:- end_module array.\n', 'array-hocall')
+    const src = [
+      ':- module m.',
+      ':- interface.',
+      ':- func map(func(int) = int, list(int)) = list(int).',
+      ':- end_module m.',
+      ':- implementation.',
+      'map(F, A1) = A2 :-',
+      '    P = (pred(X::in, Y::out) is det :- Y = F(X)),',
+      '    array.map(P, A1, A2).',
+    ].join('\n')
+    const doc = await mk(src, 'm-hocall')
+    const pInfos = [...doc.visitResult.inferred.entries()].filter(([t]: any) => t.name === 'P')
+    expect(pInfos.length).toBeGreaterThan(0)
+    expect(merTypeToString((pInfos.at(-1)![1] as any).type)).toBe('pred(int, int)')
+  })
+
+  it('resolves module-qualified function calls in type inference (uint.cast_to_int)', async () => {
+    const mk = async (src: string, name: string) => {
+      const doc = mercuryDocumentFactory.fromString(src, URI.parse(`file:///${name}.m`))
+      mercuryDocuments.addDocument(doc)
+      await new Visitor().visit(doc, {
+        isCancellationRequested: false,
+        onCancellationRequested: () => undefined,
+      } as any)
+      const mod = doc.visitResult!.module
+      if (mod) moduleManager.set(mod, doc)
+      exportManager.set(doc)
+      return doc
+    }
+    // 标准库风格：uint 模块导出 cast_to_int/1（模拟 library/uint.m 被构建后的导出索引）
+    await mk(':- module uint.\n:- interface.\n:- func cast_to_int(uint) = int.\n:- end_module uint.\n', 'uint-mod')
+    const src = [
+      ':- module m.',
+      ':- interface.',
+      ':- pred uinit(uint::in) is det.',
+      ':- end_module m.',
+      ':- implementation.',
+      'uinit(Size) :-',
+      '    SizeI = uint.cast_to_int(Size),',
+      '    SizeI > 0.',
+    ].join('\n')
+    const doc = await mk(src, 'm-qualcall')
+    await linker.link(doc, {
+      isCancellationRequested: false,
+      onCancellationRequested: () => undefined,
+    } as any)
+    const infoOf = (name: string) =>
+      [...doc.visitResult.inferred.entries()].filter(([t]: any) => t.name === name)
+    // 修复前：./2 被当名为 `.` 的 functor 查不到 → SizeI/cast_to_int 均为 unknown
+    // 修复后：按限定模块 uint 精确查 cast_to_int/1 签名 → SizeI 推为 int
+    const sis = infoOf('SizeI')
+    expect(sis.length).toBeGreaterThan(0)
+    for (const [, info] of sis) expect(merTypeToString((info as any).type)).toBe('int')
+    // cast_to_int 本身消解为 func，类型 int
+    const ctis = infoOf('cast_to_int')
+    expect(ctis.length).toBeGreaterThan(0)
+    for (const [, info] of ctis) {
+      expect((info as any).category).toBe('func')
+      expect(merTypeToString((info as any).type)).toBe('int')
+    }
+    // 参数 Size 经签名对齐仍为 uint（从头签名来）
+    const sizes = infoOf('Size')
+    for (const [, info] of sizes) expect(merTypeToString((info as any).type)).toBe('uint')
+    // hover：跨模块 func 引用显示签名 + mode 行（来自导出签名的 argModeRefs）
+    const ctTerm = ctis[0][0]
+    const hover = await HoverProvider({
+      textDocument: { uri: doc.uri.toString() },
+      position: termRange(ctTerm).start,
+    } as any)
+    const value: string = (hover!.contents as any).value
+    expect(value).toContain('type cast_to_int(uint) = int')
+    expect(value).toContain('mode cast_to_int(in) = (out)')
+  })
+
+  it('binds a function result variable from a qualified output call', async () => {
+    const mk = async (src: string, name: string) => {
+      const doc = mercuryDocumentFactory.fromString(src, URI.parse(`file:///${name}.m`))
+      mercuryDocuments.addDocument(doc)
+      await new Visitor().visit(doc, {
+        isCancellationRequested: false,
+        onCancellationRequested: () => undefined,
+      } as any)
+      const mod = doc.visitResult!.module
+      if (mod) moduleManager.set(mod, doc)
+      exportManager.set(doc)
+      return doc
+    }
+    await mk([
+      ':- module assoc_list.',
+      ':- interface.',
+      ':- pred from_corresponding_lists(list(K), list(V), assoc_list(K, V)).',
+      ':- mode from_corresponding_lists(in, in, out) is det.',
+      ':- end_module assoc_list.',
+    ].join('\n'), 'assoc-list')
+    const src = [
+      ':- module m.',
+      ':- interface.',
+      ':- func from_corresponding_lists(list(K), list(V)) = assoc_list(K, V).',
+      ':- mode from_corresponding_lists(in, in) = (out) is det.',
+      ':- end_module m.',
+      ':- implementation.',
+      'from_corresponding_lists(Ks, Vs) = AL :-',
+      '    assoc_list.from_corresponding_lists(Ks, Vs, AL).',
+    ].join('\n')
+    const doc = await mk(src, 'm-qualified-result')
+    const errors = doc.visitResult.errors.filter((d: any) => d.source === 'mercury-ls')
+    expect(errors).toEqual([])
+  })
+
+  it('binds an output argument from a same-module qualified output call before module registration', async () => {
+    const moduleName = 'bag_q_solo'
+    const src = [
+      `:- module ${moduleName}.`,
+      ':- interface.',
+      `:- type ${moduleName}(T).`,
+      `:- pred init(${moduleName}(T)::out) is det.`,
+      `:- end_module ${moduleName}.`,
+      ':- implementation.',
+      'init(Bag) :-',
+      `    ${moduleName}.init(Bag).`,
+    ].join('\n')
+    const doc: any = {
+      parseResult: Parser.parse(src),
+      uri: URI.parse('file:///bag-qualified-solo.m'),
+      visitResult: undefined,
+    }
+    const v = new Visitor()
+    await v.visit(doc, {
+      isCancellationRequested: false,
+      onCancellationRequested: () => undefined,
+    } as any)
+    const errors = doc.visitResult.errors.filter((d: any) => d.source === 'mercury-ls')
+    expect(errors).toEqual([])
+  })
+
+  it('pred-mode declaration `:- mode P(Modes) is Det.` replaces the default mode line and sig', async () => {
+    const src = [
+      ':- module m.',
+      ':- interface.',
+      ':- pred lookup(array(T), int, T).',
+      ':- mode lookup(in, in, out) is det.',
+      ':- pred q(array(int)::in, int::in, int::out).',
+      ':- end_module m.',
+      ':- implementation.',
+      'lookup(A, I, X) :- X = 5.',
+      'q(A, I, X) :- lookup(A, I, X).',
+    ].join('\n')
+    const uri = URI.parse('file:///mode-predmode.m')
+    const doc = await visitDoc(src, uri)
+    const vr = doc.visitResult
+    // hover modeSigs：显式声明替换默认行（默认 in,in,in 是无注解 pred 声明的推断，不再显示）
+    const sigs = vr.modeSigs.get('lookup/3') ?? []
+    expect(sigs).toEqual(['lookup(in, in, out) is det'])
+    // 签名 argModeRefs 覆盖为声明值（mode checker 调用检查随之使用 in,in,out）
+    expect(vr.preds.get('lookup/3')?.argModeRefs).toEqual([
+      { kind: 'builtin', name: 'in', args: [] },
+      { kind: 'builtin', name: 'in', args: [] },
+      { kind: 'builtin', name: 'out', args: [] },
+    ])
+    // q 调用 lookup(A, I, X)：X 自由匹配 out（若无覆盖会误报 no-matching-mode）
+    const modeErrors = vr.errors.filter((d: any) => d.source === 'mercury-ls')
+    expect(modeErrors).toEqual([])
+  })
+
+  it('state variable expansion in calls: function-goal form and distinct !./!: components', async () => {
+    const src = [
+      ':- module m.',
+      ':- interface.',
+      ':- func slow_set(int, int, int) = int.',
+      ':- pred bump(int::in, int::out) is det.',
+      ':- pred pb(int::in) is det.',
+      ':- end_module m.',
+      ':- implementation.',
+      // 函数形式糖：slow_set(N, X, !A) → !:A = slow_set(N, X, !.A)
+      'slow_set(!.A, N, X) = !:A :-',
+      '    slow_set(N, X, !A).',
+      'bump(X, Y) :- Y is X + 1.',
+      // 谓词形式：bump(!N) → bump(!.N, !:N)
+      'pb(!.N) :- bump(!N).',
+    ].join('\n')
+    const uri = URI.parse('file:///mode-statevar.m')
+    const doc = await visitDoc(src, uri)
+    const modeErrors = doc.visitResult.errors.filter((d: any) => d.source === 'mercury-ls')
+    // 修复前：!.A / !:A 共用一个变量键（head 里 in/out 初始化互相覆盖成 free），
+    // 且调用按书写元数 slow_set/3 查签名、!A 不展开 → no-matching-mode（用户报告的现象）
+    expect(modeErrors).toEqual([])
+  })
+
+  it('binds output args through qualified state-variable calls', async () => {
+    const mk = async (src: string, name: string) => {
+      const doc = mercuryDocumentFactory.fromString(src, URI.parse(`file:///${name}.m`))
+      mercuryDocuments.addDocument(doc)
+      await new Visitor().visit(doc, {
+        isCancellationRequested: false,
+        onCancellationRequested: () => undefined,
+      } as any)
+      const mod = doc.visitResult!.module
+      if (mod) moduleManager.set(mod, doc)
+      exportManager.set(doc)
+      return doc
+    }
+    await mk([
+      ':- module tree234.',
+      ':- interface.',
+      ':- pred remove_smallest(T::out, int::in, !Map) is det.',
+      ':- mode remove_smallest(out, in, in, out) is det.',
+      ':- end_module tree234.',
+    ].join('\n'), 'tree234-statevar')
+    const doc = await mk([
+      ':- module m.',
+      ':- interface.',
+      ':- import_module tree234.',
+      ':- pred wrapper(T::out, int::in, !Map) is det.',
+      ':- mode wrapper(out, in, in, out) is det.',
+      ':- end_module m.',
+      ':- implementation.',
+      'wrapper(K, V, !Map) :-',
+      '    tree234.remove_smallest(K, V, !Map).',
+    ].join('\n'), 'm-statevar-call')
+    const modeErrors = doc.visitResult.errors.filter((d: any) => d.source === 'mercury-ls')
+    expect(modeErrors).toEqual([])
+  })
+
+  it('treats state-variable output in empty list fold case as bound at clause end', async () => {
+    const src = [
+      ':- module m.',
+      ':- interface.',
+      ':- pred foldl(pred(T, U, U), list(T), !U) is det.',
+      ':- end_module m.',
+      ':- implementation.',
+      'foldl(_P, [], !A).',
+    ].join('\n')
+    const doc = mercuryDocumentFactory.fromString(src, URI.parse('file:///foldl-statevar.m'))
+    mercuryDocuments.addDocument(doc)
+    await new Visitor().visit(doc, {
+      isCancellationRequested: false,
+      onCancellationRequested: () => undefined,
+    } as any)
+    const modeErrors = doc.visitResult.errors.filter((d: any) => d.source === 'mercury-ls')
+    expect(modeErrors).toEqual([])
+  })
+
+  it('head-domain type of KVs follows the pred signature on recursive update', async () => {
+    const mk = async (src: string, name: string) => {
+      const doc = mercuryDocumentFactory.fromString(src, URI.parse(`file:///${name}.m`))
+      mercuryDocuments.addDocument(doc)
+      await new Visitor().visit(doc, {
+        isCancellationRequested: false,
+        onCancellationRequested: () => undefined,
+      } as any)
+      const mod = doc.visitResult!.module
+      if (mod) moduleManager.set(mod, doc)
+      exportManager.set(doc)
+      return doc
+    }
+    await mk(':- module pair.\n:- interface.\n:- type pair(K, V) ---> K - V.\n:- end_module pair.\n', 'pair-imported-head')
+    await mk(':- module assoc_list.\n:- interface.\n:- import_module pair.\n:- type assoc_list(K, V) == list(pair(K, V)).\n:- end_module assoc_list.\n', 'assoc-list-head')
+    const src = [
+      ':- module m.',
+      ':- interface.',
+      ':- import_module assoc_list.',
+      ':- pred update(K, V, assoc_list(K, V), assoc_list(K, V)).',
+      ':- mode update(in, in, in, out) is det.',
+      ':- end_module m.',
+      ':- implementation.',
+      'update(Key, Value, KVs0, KVs) :-',
+      '    KVs0 = [K - V | TailKVs0],',
+      '    KVs = [K - V | TailKVs0].',
+    ].join('\n')
+    const doc = await mk(src, 'update-head-type')
+    const kvs = [...doc.visitResult.inferred.entries()].filter(([t]: any) => t.name === 'KVs')
+    const kvTypes = kvs.map(([, info]: any) => merTypeToString(info.type))
+    expect(kvTypes).toContain('assoc_list(K, V)')
+  })
+
+  it('qualified calls resolve signatures from the qualified module (mode checker)', async () => {
+    const mk = async (src: string, name: string) => {
+      const doc = mercuryDocumentFactory.fromString(src, URI.parse(`file:///${name}.m`))
+      mercuryDocuments.addDocument(doc)
+      await new Visitor().visit(doc, {
+        isCancellationRequested: false,
+        onCancellationRequested: () => undefined,
+      } as any)
+      const mod = doc.visitResult!.module
+      if (mod) moduleManager.set(mod, doc)
+      exportManager.set(doc)
+      return doc
+    }
+    // array 模块导出 size/2 (in, in)；本地模块也有同名 size/2 (out, out)
+    await mk(':- module array.\n:- interface.\n:- pred size(int::in, int::in) is semidet.\n:- end_module array.\n', 'array-sv')
+    const src = [
+      ':- module m.',
+      ':- interface.',
+      ':- pred size(int::out, int::out) is det.',
+      ':- pred is_empty(int::in) is semidet.',
+      ':- end_module m.',
+      ':- implementation.',
+      // 修复前：checker 按裸名 size/2 查到本地 (out,out)，Array ground vs out initial free → 误报
+      // 修复后：限定调用按 array 模块精确查 (in,in) → 匹配，零诊断
+      'is_empty(Array) :-',
+      '    array.size(Array, 0).',
+    ].join('\n')
+    const doc = await mk(src, 'm-qualcheck')
+    const modeErrors = doc.visitResult.errors.filter((d: any) => d.source === 'mercury-ls')
+    expect(modeErrors).toEqual([])
+  })
+
+  it('out-position args accept bound terms (post-call unification): size(Array, 0)', async () => {
+    // 模拟 mercury/library/array.m：
+    //   :- pred size(array(_T), int).
+    //   :- mode size(in, out) is det.
+    // 调用 array.size(Array, 0) 把绑定常量传给 out 位——编译器语义为调用后合一，合法
+    const mk = async (src: string, name: string) => {
+      const doc = mercuryDocumentFactory.fromString(src, URI.parse(`file:///${name}.m`))
+      mercuryDocuments.addDocument(doc)
+      await new Visitor().visit(doc, {
+        isCancellationRequested: false,
+        onCancellationRequested: () => undefined,
+      } as any)
+      const mod = doc.visitResult!.module
+      if (mod) moduleManager.set(mod, doc)
+      exportManager.set(doc)
+      return doc
+    }
+    await mk(':- module array.\n:- interface.\n:- pred size(int, int).\n:- mode size(in, out) is det.\n:- end_module array.\n', 'array-sz')
+    const src = [
+      ':- module m.',
+      ':- interface.',
+      ':- pred is_empty(int::in) is semidet.',
+      ':- end_module m.',
+      ':- implementation.',
+      'is_empty(Array) :-',
+      '    array.size(Array, 0).',
+    ].join('\n')
+    const doc = await mk(src, 'm-sizezero')
+    const modeErrors = doc.visitResult.errors.filter((d: any) => d.source === 'mercury-ls')
+    expect(modeErrors).toEqual([])
+  })
+
+  it('infers func-clause head params and result from the signature (f(X)=Z :- Body)', async () => {
+    const src = [
+      ':- module m.',
+      ':- interface.',
+      ':- func add(int::in, int::in) = int.',
+      ':- end_module m.',
+      ':- implementation.',
+      'add(X, Y) = Z :- Z = X + Y.',
+    ].join('\n')
+    const uri = URI.parse('file:///hover-func-body.m')
+    const doc = await visitDoc(src, uri)
+    const typedAsInt = (name: string) =>
+      [...doc.visitResult.inferred.entries()].filter(
+        ([t, info]: any) => t.name === name && info.type && merTypeToString(info.type) === 'int',
+      )
+    // 带体函数子句：头参数 X/Y 与结果变量 Z 都按签名推成 int
+    expect(typedAsInt('X').length).toBeGreaterThan(0)
+    expect(typedAsInt('Y').length).toBeGreaterThan(0)
+    expect(typedAsInt('Z').length).toBeGreaterThan(0)
   })
 })

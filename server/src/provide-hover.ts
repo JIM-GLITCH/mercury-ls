@@ -3,6 +3,8 @@ import { semanticNameArityOf } from './utils'
 import { search, termRange } from './term'
 import { mercuryDocuments } from './document-manager'
 import { URI } from 'vscode-uri'
+import { merTypeToString, keyOf } from './document-type'
+import { exportManager } from './document-moduleManager'
 
 export async function HoverProvider(params:HoverParams) {
     let pos = params.position;
@@ -11,7 +13,7 @@ export async function HoverProvider(params:HoverParams) {
     let  term  = search(doc.parseResult.value,pos)
     if(!term)
         return 
-    let msg;
+    let header: string
     if(term.semanticType){
         switch (term.semanticType){
             case 'func':
@@ -24,26 +26,17 @@ export async function HoverProvider(params:HoverParams) {
             case "instance":
             case "pragma":
             case "operator":
-                msg = semanticNameArityOf(term)
+                header = `(${term.semanticType}) ${semanticNameArityOf(term)}`
                 break ;
             case 'module':
             case "variable":
             case "mutable":
             case "determinism":
-                msg = term.name
+                header = `(${term.semanticType}) ${term.name}`
                 break ;
+            default:
+                header = `(${term.semanticType}) ${term.name}`
         }
-        return {
-            contents:{
-                kind:"markdown",
-                value:[
-                    '```mercury',
-                    `(${term.semanticType}) ${msg}`,
-                    '```'
-                ].join('\n')
-            } as MarkupContent,
-            range:termRange(term)
-        } as Hover
     }
     else{
         switch (term.syntaxType) {
@@ -52,25 +45,79 @@ export async function HoverProvider(params:HoverParams) {
             case 'integer':
             case 'float':
             case 'implementation_defined':
-                msg = term.name;
+                header = term.name;
                 break ;
             case 'atom':
-                msg = semanticNameArityOf(term);
+                header = semanticNameArityOf(term);
                 break ;
             default :
-                msg = term.name;
+                header = term.name;
                 break;
         }
     }
-    
-let message =`\`\`\`mercury
-${msg}
-\`\`\`
-`
+
+    // 类型展示：func/pred 按行显示「类型签名 + 每个 mode 声明一行」；
+    // 其余项显示推断类型（`type ...`）；module（限定名前缀）不显示类型行
+    let typeStr: string | undefined
+    if (term.semanticType !== 'module') {
+        if (term.semanticType === 'func' || term.semanticType === 'pred') {
+            // 本模块优先；跨模块引用（uint.cast_to_int 等）落全局导出索引
+            const fi = doc.visitResult?.funcs.get(keyOf(term.name, term.arity))
+                ?? doc.visitResult?.preds.get(keyOf(term.name, term.arity))
+                ?? exportManager.lookupFunc(term.name, term.arity)
+            if (fi) {
+                const args = fi.argTypes.map(merTypeToString).join(', ')
+                const lines = [term.semanticType === 'func'
+                    ? `type ${fi.name}(${args}) = ${fi.resultType ? merTypeToString(fi.resultType) : '?'}`
+                    : `type ${fi.name}(${args})`]
+                const modeLines = doc.visitResult?.modeSigs.get(keyOf(term.name, term.arity)) ?? []
+                if (modeLines.length > 0) {
+                    for (const ml of modeLines) {
+                        lines.push(`mode ${ml}`)
+                    }
+                } else if (fi.argModeRefs) {
+                    // 跨模块签名无 modeSigs 展示串：从结构化 argModeRefs 渲染一行
+                    //（未注解参数在 record 时已默认填充 in/out）
+                    const refName = (r: { kind: string; name: string }) => r.name
+                    const argModes = fi.argModeRefs.map(refName).join(', ')
+                    lines.push(term.semanticType === 'func'
+                        ? `mode ${fi.name}(${argModes}) = (${fi.resultModeRef ? refName(fi.resultModeRef) : 'out'})`
+                        : `mode ${fi.name}(${argModes})`)
+                }
+                typeStr = lines.join('\n')
+            }
+        }
+        // constructor：type 行显示构造子签名（Mercury 里构造子即函数：参数 = 结果类型）
+        else if (term.semanticType === 'constructor') {
+            for (const ti of doc.visitResult?.types.values() ?? []) {
+                const ci = ti.constructors.find(c => c.ctor === term.name && c.arity === term.arity)
+                if (ci) {
+                    const args = ci.argTypes.map(merTypeToString).join(', ')
+                    const head = args ? `${ci.ctor}(${args})` : ci.ctor
+                    typeStr = `type ${head} = ${merTypeToString(ci.resultType)}`
+                    break
+                }
+            }
+        }
+        if (!typeStr) {
+            const inferred = doc.visitResult?.inferred.get(term)
+            if (inferred?.type) {
+                const lines = [`type ${merTypeToString(inferred.type)}`]
+                typeStr = lines.join('\n')
+            }
+        }
+    }
+
+    const code = [header, typeStr].filter(s => s !== undefined).join('\n')
+
     return {
         contents:{
             kind:"markdown",
-            value:message
+            value:[
+                '```mercury',
+                code,
+                '```'
+            ].join('\n')
         } as MarkupContent,
         range:termRange(term)
     } as Hover

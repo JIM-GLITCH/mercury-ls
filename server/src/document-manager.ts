@@ -1,12 +1,17 @@
 import { TextDocument } from 'vscode-languageserver-textdocument'
+import { TextDocuments } from 'vscode-languageserver/node'
 import { URI } from 'vscode-uri'
 import { ParseResult, Parser } from './mercury-parser'
 import { Clause, Term } from './term'
-import { textDocuments } from './server'
 import { readFileSync } from 'fs'
 import { Stream, stream } from './stream'
 import { VisitResult } from './document-visitor'
 import { Diagnostic, Position } from 'vscode-languageserver'
+
+// 文本文档仓库：从 server 启动模块迁出，避免数据层依赖「LSP 连接启动模块」。
+// 原先定义在 server.ts 且由 document-manager import，导致任何导入 document-manager 的测试
+// 都会间接触发 server.ts 顶层的 createConnection() 崩溃（无 LSP 传输）。
+export const textDocuments = new TextDocuments(TextDocument)
 
 export enum DocumentState {
     /**
@@ -284,6 +289,8 @@ export class DefaultMercuryDocuments implements MercuryDocuments{
         if(MercuryDoc){
             MercuryDoc.state = DocumentState.Changed
             MercuryDoc.references = []
+            MercuryDoc.visitResult = undefined
+            MercuryDoc.linkResult = undefined
             MercuryDoc.diagnostics = []
         }
         return MercuryDoc;
