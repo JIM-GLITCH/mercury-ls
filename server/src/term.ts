@@ -213,8 +213,9 @@ export function infixCompound(token: Token, children: Term[], name?: string) {
         "atom",
         token,
         children,
-        children[0].startToken,
-        children[children.length - 1].endToken
+        token,
+        children[children.length - 1].endToken,
+        name
     )
     fixArity(node)
     return node

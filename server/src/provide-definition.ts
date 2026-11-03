@@ -1,4 +1,4 @@
-import { DefinitionParams, Location, TextDocumentPositionParams } from 'vscode-languageserver'
+import { DefinitionParams, Location, TextDocumentPositionParams, TypeDefinitionParams } from 'vscode-languageserver'
 import { sameArity, sleep, termTokenRange } from './utils'
 import { Term, search, termRange } from './term'
 import { DefTerm, Document } from './document'
@@ -13,6 +13,42 @@ export async function DefinitionProvider(params:DefinitionParams):Promise<Locati
     if(!termAndUri) return []
     return findDefTerms(termAndUri)
         .map(uriTermToLocation).toArray()
+}
+
+export async function TypeDefinitionProvider(params: TypeDefinitionParams): Promise<Location[]> {
+    const termAndUri = await findAtTextDocumentPositionTerm(params)
+    if (!termAndUri) return []
+
+    const { term, uri } = termAndUri
+    const document = mercuryDocuments.getOrCreateDocument(uri)!
+
+    // If the term is a type or constructor reference, navigate to its definition
+    if (term.semanticType && ['type', 'constructor'].includes(term.semanticType)) {
+        return findDefTerms(termAndUri)
+            .filter(uriTerm => uriTerm.term.semanticType === 'type' || uriTerm.term.semanticType === 'constructor')
+            .map(uriTermToLocation)
+            .toArray()
+    }
+
+    // If the term is a variable with an inferred type, navigate to the type's definition
+    if (term.semanticType === 'variable') {
+        const inferred = document.visitResult?.inferred.get(term)
+        if (inferred?.type && inferred.type.kind === 'ctor') {
+            const typeCtor = inferred.type.ctor
+            const typeKey = `${typeCtor.name}/${typeCtor.arity}`
+            const typeInfo = document.visitResult?.types.get(typeKey)
+            if (typeInfo) {
+                // Find the type definition term by name/arity
+                const typeDefs = document.visitResult?.definition.get(typeCtor.name) ?? []
+                const typeDef = typeDefs.find(t => t.semanticType === 'type' && t.arity === typeCtor.arity)
+                if (typeDef) {
+                    return [uriTermToLocation({ uri, term: typeDef })]
+                }
+            }
+        }
+    }
+
+    return []
 }
 
 // function findDefinitionTermWithoutSamantic(term:Term,document:MercuryDocument){

@@ -3,9 +3,10 @@ import { describe, it, expect } from 'vitest'
 import { Parser } from '../mercury-parser'
 import { Visitor } from '../document-visitor'
 import { URI } from 'vscode-uri'
+import { TextDocument } from 'vscode-languageserver-textdocument'
 import { sameArity, semanticNameArityOf } from '../utils'
 import { termRange } from '../term'
-import { findDefTerms, uriTermToLocation } from '../provide-definition'
+import { findDefTerms, TypeDefinitionProvider, uriTermToLocation } from '../provide-definition'
 import { ReferenceProvider } from '../provide-reference'
 import { linker } from '../document-linker'
 import { exportManager, moduleManager } from '../document-moduleManager'
@@ -14,6 +15,7 @@ import { orderByImports, scanHeader } from '../document-order'
 import { HoverProvider } from '../provide-hover'
 import { merTypeToString } from '../document-type'
 import { modeRefToInsts } from '../document-mode'
+import { semanticTokensForDocument } from '../provide-semantic-tokens'
 
 interface DefEntry {
   nameArity: string
@@ -151,6 +153,94 @@ function assertNoWhereMislabeled(defs: Map<string, DefEntry[]>) {
     }
   }
 }
+
+it('produces semantic tokens for definition names', async () => {
+  const src = `
+:- module test.
+:- interface.
+:- pred foo(int::in, int::out).
+:- end_module test.
+`
+  const doc: any = {
+    parseResult: Parser.parse(src),
+    uri: URI.parse('file:///test.m'),
+    textDocument: TextDocument.create('file:///test.m', 'mercury', 0, src),
+    visitResult: undefined,
+  }
+  const v = new Visitor()
+  await v.visit(doc, {
+    isCancellationRequested: false,
+    onCancellationRequested: () => undefined,
+  } as any)
+
+  const tokens = semanticTokensForDocument(doc)
+  expect(tokens.data.length).toBeGreaterThan(0)
+})
+
+it('does not remap control keywords to semantic tokens', async () => {
+  const src = `
+:- module test.
+:- interface.
+
+foo(X) :-
+    ( if X = 1 then X = 2 else X = 3 ).
+
+:- implementation.
+
+foo(_) :- true.
+:- end_module test.
+`
+  const doc: any = {
+    parseResult: Parser.parse(src),
+    uri: URI.parse('file:///test.m'),
+    textDocument: TextDocument.create('file:///test.m', 'mercury', 0, src),
+    visitResult: undefined,
+  }
+  const v = new Visitor()
+  await v.visit(doc, {
+    isCancellationRequested: false,
+    onCancellationRequested: () => undefined,
+  } as any)
+
+  const tokens = semanticTokensForDocument(doc)
+  const data = tokens.data
+  expect(data.length).toBeGreaterThan(0)
+  expect(data.some((value, idx) => idx % 5 === 3 && value === 16)).toBe(false)
+})
+
+it('does not highlight the first variable of an infix expression as the operator function', async () => {
+  const src = `
+:- module test.
+:- interface.
+
+foo(Acc0, X, Y) :-
+    Acc1 = Acc0 + (to_int(Y) - to_int(X)) + 1.
+
+:- end_module test.
+`
+  const doc: any = {
+    parseResult: Parser.parse(src),
+    uri: URI.parse('file:///test.m'),
+    textDocument: TextDocument.create('file:///test.m', 'mercury', 0, src),
+    visitResult: undefined,
+  }
+  const v = new Visitor()
+  await v.visit(doc, {
+    isCancellationRequested: false,
+    onCancellationRequested: () => undefined,
+  } as any)
+
+  const tokens = semanticTokensForDocument(doc)
+  const tokenPairs = [] as Array<[number, number, number, number]>
+  for (let i = 0; i + 4 < tokens.data.length; i += 5) {
+    tokenPairs.push([tokens.data[i], tokens.data[i + 1], tokens.data[i + 2], tokens.data[i + 3]])
+  }
+
+  const colorsAcc0 = tokenPairs.filter(([deltaLine, deltaStart, length, tokenType]) =>
+    deltaLine === 3 && deltaStart === 4 && length >= 5 && tokenType === 12,
+  )
+  expect(colorsAcc0).toHaveLength(0)
+})
 
 describe('visitor: type declarations', () => {
   it('indexes abstract type `type T.`', async () => {
@@ -1103,6 +1193,59 @@ describe('goto definition / find references for insts (providers)', () => {
     expect(locs.length).toBe(1)
     // 命中的应是 inst 定义（第 4 行，0 基 3），而不是同名的 type 定义
     expect(locs[0].range.start.line).toBe(3)
+  })
+
+  it('goto type definition resolves type refs to the type declaration', async () => {
+    const src = [
+      ':- module test.',
+      ':- interface.',
+      ':- type pair(T, U).',
+      ':- pred p(pair(int, int)) is det.',
+      ':- end_module test.',
+      '',
+    ].join('\n')
+    const uri = URI.parse('file:///type-goto-def.m')
+    const doc = await visitDoc(src, uri)
+
+    const refTerm = doc.visitResult!.typeReference.get('pair')[0]
+    const locs = await TypeDefinitionProvider({
+      textDocument: { uri: uri.toString() },
+      position: termRange(refTerm).start,
+    } as any)
+    expect(locs.length).toBe(1)
+    expect(locs[0].range.start.line).toBe(2)
+  })
+
+  it('goto type definition resolves imported generic type refs across modules', async () => {
+    const pairUri = URI.parse('file:///generic-pair.m')
+    const pairDoc = await visitDoc([
+      ':- module generic_pair.',
+      ':- interface.',
+      ':- type pair(T, U).',
+      ':- end_module generic_pair.',
+      '',
+    ].join('\n'), pairUri)
+    moduleManager.set(pairDoc.visitResult!.module!, pairDoc)
+    exportManager.set(pairDoc)
+
+    const useUri = URI.parse('file:///generic-use.m')
+    const useDoc = await visitDoc([
+      ':- module generic_use.',
+      ':- interface.',
+      ':- import_module generic_pair.',
+      ':- pred p(pair(int, string)) is det.',
+      ':- end_module generic_use.',
+      '',
+    ].join('\n'), useUri)
+
+    const refTerm = useDoc.visitResult!.typeReference.get('pair')[0]
+    const locs = await TypeDefinitionProvider({
+      textDocument: { uri: useUri.toString() },
+      position: termRange(refTerm).start,
+    } as any)
+    expect(locs.length).toBe(1)
+    expect(locs[0].uri).toBe(pairUri.toString())
+    expect(locs[0].range.start.line).toBe(2)
   })
 
   it('find references from the inst definition locates inst refs only', async () => {

@@ -28,7 +28,8 @@ import {
     LSPErrorCodes,
     WorkDoneProgress,
     WorkDoneProgressCreateRequest,
-    WorkDoneProgressCancelNotification
+    WorkDoneProgressCancelNotification,
+    SemanticTokensRequest,
 } from 'vscode-languageserver/node';
 
 import {Parser} from './mercury-parser'
@@ -37,12 +38,13 @@ import { Term, Clause } from './term'
 import {URI,Utils}from "vscode-uri"
 import fs = require("fs")
 import path = require('path')
-import { DefinitionProvider } from './provide-definition'
+import { DefinitionProvider, TypeDefinitionProvider } from './provide-definition'
 import { DeclarationProvider } from './provide-declaration'
 import { incomingCallsProvider, outgoingCallsProvider, prepareCallHierarchyProvider } from './provide-callHierarchy'
 import { ReferenceProvider } from './provide-reference'
 import { HoverProvider } from './provide-hover'
 import { DocumentSymbolProvider } from './provide-documentSymbol'
+import { semanticTokenLegend, semanticTokensForDocument } from './provide-semantic-tokens'
 import { MutexLock, isOperationCancelled } from './promise-util'
 import { documentBuilder } from './document-builder'
 import { DocumentState, mercuryDocuments, textDocuments } from './document-manager'
@@ -86,11 +88,17 @@ function onInitialize(params: InitializeParams) {
             },
             hoverProvider:true,
             definitionProvider:true,
+            typeDefinitionProvider:true,
             documentSymbolProvider:true,
             referencesProvider:true,
             callHierarchyProvider:true,
             declarationProvider:true,
-            implementationProvider:true
+            implementationProvider:true,
+            semanticTokensProvider: {
+                legend: semanticTokenLegend,
+                range: false,
+                full: { delta: false }
+            }
         }
     };
     if (hasWorkspaceFolderCapability) {
@@ -326,10 +334,16 @@ textDocuments.onDidClose(e => {documentSettings.delete(e.document.uri);});
 connection.onDocumentSymbol(cancelableRequest(DocumentSymbolProvider));
 connection.onHover(cancelableRequest(HoverProvider));
 connection.onDefinition(cancelableRequest(DefinitionProvider));
+connection.onTypeDefinition(cancelableRequest(TypeDefinitionProvider));
 connection.onReferences(cancelableRequest(ReferenceProvider));
 connection.onImplementation(cancelableRequest(DefinitionProvider));
 connection.onDeclaration(cancelableRequest(DeclarationProvider));
 connection.onImplementation(cancelableRequest(DefinitionProvider));
+connection.onRequest(SemanticTokensRequest.type, params => {
+    const uri = URI.parse(params.textDocument.uri);
+    const document = mercuryDocuments.getOrCreateDocument(uri);
+    return semanticTokensForDocument(document);
+});
 // connection.onTypeDefinition(TypeDefinitionProvider);
 connection.onRequest(CallHierarchyPrepareRequest.method,cancelableRequest(prepareCallHierarchyProvider));
 connection.onRequest(CallHierarchyIncomingCallsRequest.method,incomingCallsProvider);

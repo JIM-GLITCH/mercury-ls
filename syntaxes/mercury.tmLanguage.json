@@ -9,7 +9,11 @@
     },
     {
       "name": "keyword.control.mercury",
-      "match": "\\b(module|import|use|include|pred|func|type|inst|mode|instance|end)\\b"
+      "match": "\\b(module|import_module|import|use|include|interface|implementation|impure|pragma|end_module|pred|func|type|inst|mode|instance|end|if|then|else)\\b"
+    },
+    {
+      "name": "variable.other.mercury",
+      "match": "\\b[A-Z][A-Za-z0-9_]*\\b"
     },
     {
       "name": "string.quoted.double.mercury",
