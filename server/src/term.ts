@@ -213,7 +213,7 @@ export function infixCompound(token: Token, children: Term[], name?: string) {
         "atom",
         token,
         children,
-        token,
+        children[0].startToken,
         children[children.length - 1].endToken,
         name
     )
