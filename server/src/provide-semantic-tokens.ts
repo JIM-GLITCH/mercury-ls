@@ -1,6 +1,7 @@
 import type { SemanticTokens } from 'vscode-languageserver'
 import { Term, termRange } from './term'
 import type { MercuryDocument } from './document-manager'
+import { tokenRange } from './utils'
 
 export const semanticTokenLegend = {
   tokenTypes: [
@@ -91,7 +92,7 @@ function emitTokenForTerm(
   const tokenType = classifyTerm(term)
   if (tokenType === undefined) return
 
-  const range = termRange(term)
+  const range = tokenRange(term.token)
   const text = term.name || ''
   if (!text || !range || range.start.line < 0) return
 
