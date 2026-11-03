@@ -97,6 +97,7 @@ function findDefTermInThisDocument( term: Term, document: MercuryDocument){
 export function defKindsForRef(refType?: string): string[] | undefined {
     switch (refType) {
         case 'type': return ['type']
+        case 'fieldname': return ['fieldname']
         case 'inst': return ['inst']
         case 'mode': return ['mode']
         case 'typeclass': return ['typeclass']
@@ -153,6 +154,7 @@ export  function findDefTerms(params:uriTerm):Stream<uriTerm> {
         case 'func':
         case 'pred':
         case 'type':
+        case 'fieldname':
         case 'inst':
         case 'mode':
         case 'typeclass':
@@ -162,13 +164,13 @@ export  function findDefTerms(params:uriTerm):Stream<uriTerm> {
             return findDefinitionTerm(term,document);
 
         }
-            
+
         case 'module':{
             let document = moduleManager.get(term);
-            if(!document) 
+            if(!document)
                 return stream([]);
             let module = document.visitResult?.module
-            if(!module) 
+            if(!module)
                 return stream([]);
             let uri = document.uri ;
             return stream([{

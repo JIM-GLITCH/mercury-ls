@@ -81,6 +81,8 @@ function typeToKind(type:SemanticType|undefined):SymbolKind{
             return SymbolKind.Struct
         case 'constructor':
             return SymbolKind.EnumMember
+        case 'fieldname':
+            return SymbolKind.Property
         case 'module':
             return SymbolKind.Module
         case 'typeclass':

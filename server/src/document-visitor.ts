@@ -563,11 +563,14 @@ export class Visitor {
         this.visitTypeRef(funcReturn)
     }
     visitTypeRef(term: Term) {
-        label(term, "type")
         if (nameArity(term, "::/2")) {
-            // `Type :: Inst` 形式（如函数返回 `(R :: out)`）：只有类型部分是类型引用，
-            // mode/inst 部分不是
-            if (!isVariable(term.args[0])) this.visitTypeRef(term.args[0])
+            // `FieldName :: Type` 形式（构造子参数）：左侧是 fieldname，右侧是类型
+            // ::/2 本身是运算符，不标记为 type
+            if (!isVariable(term.args[0])) {
+                label(term.args[0], "fieldname")
+                this.addDefinition(term.args[0])
+            }
+            if (!isVariable(term.args[1])) this.visitTypeRef(term.args[1])
             return
         }
         // 高阶类型 `func(A1, ...) = R`（别名 `function(...)`）：`=` 与词头是关键字不是类型引用，
@@ -586,6 +589,8 @@ export class Visitor {
             }
             return
         }
+        // 只有在不是特殊运算符的情况下才标记为 type
+        label(term, "type")
         const right = this.visitQualifiedTerm(term)
         this.typeReference.add(right.name, right)
         // 参数化类型的参数也是类型引用位置（类型变量除外）
@@ -1948,6 +1953,7 @@ export type SemanticType =
     "pred"|
     "type"|
     "constructor"|
+    "fieldname"|
     "inst"|
     "mode"|
     "module"|

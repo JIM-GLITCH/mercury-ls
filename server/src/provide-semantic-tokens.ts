@@ -34,6 +34,7 @@ const tokenTypeIndexBySemanticType: Record<string, number> = {
   module: 0,
   type: 1,
   constructor: 10,
+  fieldname: 9,  // property
   inst: 17,
   mode: 17,
   variable: 8,
