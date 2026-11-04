@@ -556,7 +556,8 @@ export class Visitor {
         this.currentClause.callee = func
     }
     visitFuncDef(func: Term) {
-        label(func,"func")
+        const head = this.visitQualifiedTerm(func)
+        label(head,"func")
         this.addDefinition(func)
     }
     visitFuncReturn(funcReturn: Term) {
@@ -641,7 +642,7 @@ export class Visitor {
     }
 
     visitFuncDeclFunc(func: Term) {
-        const head = this.visitQualifiedTerm(func) ?? func
+        const head = this.visitQualifiedTerm(func)
         label(head, "func")
         this.addDeclaration(head)
     }
@@ -1227,7 +1228,7 @@ export class Visitor {
             this.visitFuncDecl(term.args[0], detOf(term.args[1]))
         } else if (nameArity(term, "=/2")) {
             let [func, ret] = term.args
-            const head = this.visitQualifiedTerm(func) ?? func
+            const head = this.visitQualifiedTerm(func)
             this.visitFuncDeclFunc(head)
             this.visitTypeParams(head)
             this.visitFuncReturn(ret)
