@@ -62,15 +62,15 @@ export async function HoverProvider(params:HoverParams) {
     if (term.semanticType !== 'module') {
         if (term.semanticType === 'func' || term.semanticType === 'pred') {
             // 本模块优先；跨模块引用（uint.cast_to_int 等）落全局导出索引
-            const fi = doc.visitResult?.funcs.get(keyOf(term.name, term.arity))
-                ?? doc.visitResult?.preds.get(keyOf(term.name, term.arity))
-                ?? exportManager.lookupFunc(term.name, term.arity)
+            const fi = doc.visitResult?.funcs.get(keyOf(term.name, term.semanticArity))
+                ?? doc.visitResult?.preds.get(keyOf(term.name, term.semanticArity))
+                ?? exportManager.lookupFunc(term.name, term.semanticArity)
             if (fi) {
                 const args = fi.argTypes.map(merTypeToString).join(', ')
                 const lines = [term.semanticType === 'func'
                     ? `type ${fi.name}(${args}) = ${fi.resultType ? merTypeToString(fi.resultType) : '?'}`
                     : `type ${fi.name}(${args})`]
-                const modeLines = doc.visitResult?.modeSigs.get(keyOf(term.name, term.arity)) ?? []
+                const modeLines = doc.visitResult?.modeSigs.get(keyOf(term.name, term.semanticArity)) ?? []
                 if (modeLines.length > 0) {
                     for (const ml of modeLines) {
                         lines.push(`mode ${ml}`)

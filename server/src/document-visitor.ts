@@ -1091,9 +1091,9 @@ export class Visitor {
             this.visitFuncOrPredModeDecl(head, detOf(term.args[1]))
         } else {
             const head = this.visitQualifiedTerm(term) ?? term
-            if (head.arity > 0 && !isVariable(head) &&
-                   (this.preds.has(keyOf(head.name, head.arity)) ||
-                    this.funcs.has(keyOf(head.name, head.arity)))) {
+            if (head.semanticArity > 0 && !isVariable(head) &&
+                   (this.preds.has(keyOf(head.name, head.semanticArity)) ||
+                    this.funcs.has(keyOf(head.name, head.semanticArity)))) {
                 // `:- mode P(Modes).`（无确定性后缀）的 pred/func-mode 声明；
                 // 与抽象 mode 声明（:- mode M.，通常 arity 0 或非 pred/func 名）区分
                 this.visitFuncOrPredModeDecl(head)
@@ -1121,7 +1121,7 @@ export class Visitor {
     visitPredMode(term: Term, determinism?: string) {
         const head = this.visitQualifiedTerm(term) ?? term
         label(head, "pred")
-        const key = keyOf(head.name, head.arity)
+        const key = keyOf(head.name, head.semanticArity)
         const refs = head.args.map(modeTermToRef)
         const fi = this.preds.get(key)
         if (fi) {
@@ -1138,7 +1138,7 @@ export class Visitor {
         const headTerm = this.visitQualifiedTerm(term.args[0]) ?? term.args[0]
         const head = headTerm
         label(head, "func")
-        const key = keyOf(head.name, head.arity)
+        const key = keyOf(head.name, head.semanticArity)
         const refs = head.args.map(modeTermToRef)
         const retRef = modeTermToRef(term.args[1])
         const fi = this.funcs.get(key)
@@ -1267,8 +1267,8 @@ export class Visitor {
     private recordFuncInfo(func: Term, ret: Term | undefined, determinism?: string) {
         const argRefs = func.args.map(a => this.argModeRefOf(a))
         const retRef = ret ? this.retModeRefOf(ret) : undefined
-        this.funcs.set(keyOf(func.name, func.arity), {
-            name: func.name, arity: func.arity,
+        this.funcs.set(keyOf(func.name, func.semanticArity), {
+            name: func.name, arity: func.semanticArity,
             argTypes: func.args.map(a => termToMerType(a)),
             argModes: argModesOf(func.args),
             resultType: ret ? termToMerType(ret) : undefined,
@@ -1285,13 +1285,13 @@ export class Visitor {
         const modes = func.args.map(modeOfArg).map(m => m ?? 'in')
         const rm = ret ? modeOfArg(ret) ?? 'out' : 'out'
         const det = determinism ? ` is ${determinism}` : ''
-        this.pushModeSig(keyOf(func.name, func.arity), `${func.name}(${modes.join(', ')}) = (${rm})${det}`)
+        this.pushModeSig(keyOf(func.name, func.semanticArity), `${func.name}(${modes.join(', ')}) = (${rm})${det}`)
     }
     // 记录谓词签名（name/arity → 参数类型/mode；谓词无返回类型）
     private recordPredInfo(pred: Term, determinism?: string) {
         const argRefs = pred.args.map(a => this.argModeRefOf(a))
-        this.preds.set(keyOf(pred.name, pred.arity), {
-            name: pred.name, arity: pred.arity,
+        this.preds.set(keyOf(pred.name, pred.semanticArity), {
+            name: pred.name, arity: pred.semanticArity,
             argTypes: pred.args.map(a => termToMerType(a)),
             argModes: argModesOf(pred.args),
             argModeRefs: argRefs,
@@ -1302,7 +1302,7 @@ export class Visitor {
         })
         const modes = pred.args.map(modeOfArg).map(m => m ?? 'in')
         const det = determinism ? ` is ${determinism}` : ''
-        this.pushModeSig(keyOf(pred.name, pred.arity), `${pred.name}(${modes.join(', ')})${det}`)
+        this.pushModeSig(keyOf(pred.name, pred.semanticArity), `${pred.name}(${modes.join(', ')})${det}`)
     }
     // :- mode I == Init >> Final 结构化入库（Phase A）；mode 别名 `I == Body`（Body 是单个
     // mode 引用，如 array.m 的 `:- mode array_uo == out(uniq_array).`）记 alias 引用，
@@ -1807,7 +1807,7 @@ export class Visitor {
     }
     private signatureOf(termOrName: Term | string, arity?: number): FuncInfo | undefined {
         const name = typeof termOrName === 'string' ? termOrName : termOrName.name
-        const a = typeof termOrName === 'string' ? arity! : termOrName.arity
+        const a = typeof termOrName === 'string' ? arity! : termOrName.semanticArity
         if (typeof termOrName !== 'string' && termOrName.qualified) {
             const doc = moduleManager.get(termOrName.qualified)
             const sig = doc?.visitResult?.funcs.get(keyOf(name, a))
@@ -1838,7 +1838,7 @@ function name(term: Term, name: string) {
     return term.name === name
 }
 function arity(term: Term, arity: number) {
-    return term.arity === arity
+    return term.semanticArity === arity
 }
 function* semicolonBinaryTermToList(term: Term) {
     for (; ;) {
