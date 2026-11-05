@@ -157,12 +157,27 @@ async function initializeWorkspace() {
     //     .map(async entry=>traverseFolder(...entry ,fileExtenstions ,coll))
     // )
     let rootPath = URI.parse(folders[0].uri).fsPath;
-    let filenames = fs.readdirSync(rootPath);
-    let file_number = filenames.length;
-    
+
+    // Recursively find all .m files in the workspace
+    function findMercuryFiles(dir: string, results: string[] = []): string[] {
+        const files = fs.readdirSync(dir);
+        for (const file of files) {
+            const fullPath = path.join(dir, file);
+            const stat = fs.statSync(fullPath);
+            if (stat.isDirectory()) {
+                findMercuryFiles(fullPath, results);
+            } else if (path.extname(file) === '.m') {
+                results.push(fullPath);
+            }
+        }
+        return results;
+    }
+
+    const mercurFiles = findMercuryFiles(rootPath);
+
     sendBarText.parsing()
-    let docs = stream(filenames).filter(filename=>path.extname(filename) ==".m")
-    .map(filename=>mercuryDocuments.getOrCreateDocument( URI.file(path.join(rootPath,filename))))
+    let docs = stream(mercurFiles)
+    .map(filepath=>mercuryDocuments.getOrCreateDocument( URI.file(filepath)))
     .toArray()
 
     await documentBuilder.build(docs,CancellationToken.None);
@@ -288,6 +303,9 @@ function addDocumentHander(){
         mutex.lock(token=>documentBuilder.update(changed,deleted,token));
     }
     textDocuments.onDidChangeContent(change => {
+        onDidChange([URI.parse(change.document.uri)],[])
+    });
+    textDocuments.onDidOpen(change => {
         onDidChange([URI.parse(change.document.uri)],[])
     });
     connection.onDidChangeWatchedFiles(params => {

@@ -771,7 +771,10 @@ export class Visitor {
         else if (nameArity(term, "==/2")) {
             this.visitTypeName(term.args[0])
             this.visitTypeRef(term.args[1])
-            this.addTypeInfo(this.beginTypeInfo(term.args[0]))
+            const info = this.beginTypeInfo(term.args[0])
+            // 记录底层类型，供推断时展开同义词（如 assoc_list(K,V) == list(pair(K,V))）
+            info.body = termToMerType(term.args[1])
+            this.addTypeInfo(info)
         }
         // 纯子类型声明（无 ---> 构造子体）： type T =< Super.
         else if (nameArity(term, "=</2")) {
@@ -1264,15 +1267,37 @@ export class Visitor {
         const annotated = (t: Term) => t.nameArity === '::/2' || t.nameArity === '>>/2'
         return args.some(annotated) || (!!ret && annotated(ret))
     }
-    // 记录函数签名（name/arity → 参数类型/mode + 返回类型/mode）。返回缺省（无 = R 的声明）时为 undefined
+    // 把一组类型里“同名的具名类型变量”合并为同一个 MerType 变量对象。
+    // 否则谓词签名里同一类型参数（如 pred(V,W) 与 assoc_list(K,V) 的 V）会是不同对象，
+    // 永远无法合一，推断时会被错误塌缩（例如 P 的 pred(V,W) 变成 pred(W,W)）。
+    private shareTypeParams(types: MerType[]): MerType[] {
+        const canon = new Map<string, MerType>()
+        const collect = (t: MerType) => {
+            if (t.kind === 'var') {
+                if (!/^\?\d+$/.test(t.name) && !canon.has(t.name)) canon.set(t.name, t)
+                return
+            }
+            if (t.kind === 'ctor') t.args.forEach(collect)
+            if (t.kind === 'ho') { t.args.forEach(collect); if (t.result) collect(t.result) }
+        }
+        types.forEach(collect)
+        const norm = (t: MerType): MerType => {
+            if (t.kind === 'var') { const c = canon.get(t.name); return (c && c !== t) ? c : t }
+            if (t.kind === 'ctor') return { ...t, args: t.args.map(norm) }
+            if (t.kind === 'ho') return { ...t, args: t.args.map(norm), result: t.result ? norm(t.result) : undefined }
+            return t
+        }
+        return types.map(norm)
+    }
+
     private recordFuncInfo(func: Term, ret: Term | undefined, determinism?: string) {
         const argRefs = func.args.map(a => this.argModeRefOf(a))
         const retRef = ret ? this.retModeRefOf(ret) : undefined
         this.funcs.set(keyOf(func.name, func.semanticArity), {
             name: func.name, arity: func.semanticArity,
-            argTypes: func.args.map(a => termToMerType(a)),
+            argTypes: this.shareTypeParams(func.args.map(a => termToMerType(a))),
             argModes: argModesOf(func.args),
-            resultType: ret ? termToMerType(ret) : undefined,
+            resultType: ret ? this.shareTypeParams([termToMerType(ret)])[0] : undefined,
             resultMode: ret ? modeOfArg(ret) : undefined,
             argModeRefs: argRefs,
             resultModeRef: retRef,
@@ -1293,7 +1318,7 @@ export class Visitor {
         const argRefs = pred.args.map(a => this.argModeRefOf(a))
         this.preds.set(keyOf(pred.name, pred.semanticArity), {
             name: pred.name, arity: pred.semanticArity,
-            argTypes: pred.args.map(a => termToMerType(a)),
+            argTypes: this.shareTypeParams(pred.args.map(a => termToMerType(a))),
             argModes: argModesOf(pred.args),
             argModeRefs: argRefs,
             hasExplicitModes: this.hasExplicitModes(pred.args),
@@ -1576,7 +1601,30 @@ export class Visitor {
     private inferCall(term: Term) {
         const sig = this.signatureOf(term)
         if (!sig) {
-            // 非 pred/func（高阶/未知）：兜底当数据 functor，安全不抛
+            // 高阶变量调用：形如 (P, V0, V) 的应用节点（(f, a1, a2, ...) 中 f 是持有谓词/函数值的变量），
+            // 解析树里表现为 nameArity = "(/N)" 且 args[0] 是变量。
+            // 不能当普通数据 functor 推断，否则会把 P 误标成数据项、把实参 V0/V 推成 fresh 未知类型，
+            // 还会用新鲜类型覆盖 P 在头里已推得的 pred(V, W)。
+            if (term.nameArity.startsWith('(/') && term.args.length >= 2 && isVariable(term.args[0])) {
+                const calleeTerm = term.args[0]
+                const callArgs = term.args.slice(1)
+                const n = callArgs.length
+                const calleeKey = this.varKey(calleeTerm)
+                const calleeType = this.varTypes.get(calleeKey)
+                const resolved = calleeType ? applySubst(calleeType, this.subst) : undefined
+                let hoArgs: MerType[]
+                if (resolved && resolved.kind === 'ho' && resolved.args.length === n) {
+                    hoArgs = resolved.args
+                } else {
+                    hoArgs = Array.from({ length: n }, () => ({ kind: 'var', name: this.freshVar() } as MerType))
+                    const freshHo: MerType = { kind: 'ho', pf: 'pred', args: hoArgs }
+                    if (calleeType) unify(calleeType, freshHo, this.subst)
+                    else { const v: MerType = { kind: 'var', name: this.freshVar() }; this.varTypes.set(calleeKey, v); unify(v, freshHo, this.subst) }
+                }
+                for (let i = 0; i < n; i++) this.inferTerm(callArgs[i], hoArgs[i])
+                return
+            }
+            // 非 pred/func（未知标识符）：兜底当数据 functor，安全不抛
             this.inferFunctor(term)
             return
         }
@@ -1637,7 +1685,7 @@ export class Visitor {
         if (st === 'integer') { const t: MerType = { kind: 'ctor', ctor: { name: 'int', arity: 0 }, args: [] }; this.inferred.set(term, { type: t }); return t }
         if (st === 'float') { const t: MerType = { kind: 'ctor', ctor: { name: 'float', arity: 0 }, args: [] }; this.inferred.set(term, { type: t }); return t }
         if (st === 'string') { const t: MerType = { kind: 'ctor', ctor: { name: 'string', arity: 0 }, args: [] }; this.inferred.set(term, { type: t }); return t }
-        if (st === 'atom' && term.nameArity === '[]/0') { const t: MerType = { kind: 'ctor', ctor: { name: 'list', arity: 1 }, args: [{ kind: 'var', name: this.freshVar() }] }; this.inferred.set(term, { type: t }); return t }
+        // 列表语法：[]/0 与 [|]/2 恒为 list 构造子，交由 inferList（含同义词展开与构造子标注）
         if (term.nameArity === '[|]/2' || term.nameArity === '[]/0') {
             return this.inferList(term, expected)
         }
@@ -1666,12 +1714,23 @@ export class Visitor {
     // 列表字面量：元素类型由 expected（list(E)）给定，否则新建类型变量
     private inferList(term: Term, expected?: MerType): MerType {
         let elemType: MerType = { kind: 'var', name: this.freshVar() }
-        if (expected && expected.kind === 'ctor' && expected.ctor.name === 'list') {
-            elemType = expected.args[0]
+        // 展开类型同义词：assoc_list(K,V) == list(pair(K,V)) → 取 list 元素类型 pair(K,V)
+        if (expected) {
+            const resolved = this.resolveSynonym(expected)
+            if (resolved.kind === 'ctor' && resolved.ctor.name === 'list' && resolved.args.length === 1) {
+                elemType = resolved.args[0]
+            }
         }
+        const listType = (): MerType => ({ kind: 'ctor', ctor: { name: 'list', arity: 1 }, args: [applySubst(elemType, this.subst)] })
         const walk = (t: Term) => {
-            if (t.nameArity === '[]/0') return
+            if (t.nameArity === '[]/0') {
+                // 空表也是 list 的构造子
+                this.inferred.set(t, { type: listType(), category: 'constructor' })
+                return
+            }
             if (t.nameArity === '[|]/2') {
+                // [|]/2 恒为 list 的 cons 构造子（Mer 无法重定义）
+                this.inferred.set(t, { type: listType(), category: 'constructor' })
                 this.inferTerm(t.args[0], elemType)
                 walk(t.args[1])
                 return
@@ -1680,9 +1739,24 @@ export class Visitor {
             this.inferTerm(t, { kind: 'ctor', ctor: { name: 'list', arity: 1 }, args: [elemType] })
         }
         walk(term)
-        const result: MerType = { kind: 'ctor', ctor: { name: 'list', arity: 1 }, args: [applySubst(elemType, this.subst)] }
-        this.inferred.set(term, { type: result })
+        // 整表项（[|]/2 或 []/0）同样标为 list 构造子
+        const category = (term.nameArity === '[|]/2' || term.nameArity === '[]/0') ? 'constructor' : undefined
+        const result = listType()
+        this.inferred.set(term, { type: result, category })
         return result
+    }
+    // 展开类型同义词（equivalence type，type T == U）：把 T(A,..) 还原为 U（代入类型参数）；
+    // 本地 this.types 与跨模块 exportManager 都查。非同义词原样返回。
+    private resolveSynonym(t: MerType): MerType {
+        if (t.kind !== 'ctor') return t
+        const ti = this.types.get(keyOfTypeCtor(t.ctor)) ?? exportManager.lookupType(keyOfTypeCtor(t.ctor))
+        if (!ti || !ti.body) return t
+        const subst = new Map<string, MerType>()
+        for (let i = 0; i < ti.params.length; i++) {
+            const p = ti.params[i]
+            if (p.kind === 'var' && t.args[i]) subst.set(p.name, t.args[i])
+        }
+        return applySubst(ti.body, subst)
     }
     // 数据位置 functor：用 expected 类型与签名消歧 构造子/函数；重载且类型无法唯一确定时保持无类别
     private inferFunctor(term: Term, expected?: MerType): MerType {
@@ -1809,15 +1883,18 @@ export class Visitor {
     private signatureOf(termOrName: Term | string, arity?: number): FuncInfo | undefined {
         const name = typeof termOrName === 'string' ? termOrName : termOrName.name
         const a = typeof termOrName === 'string' ? arity! : termOrName.semanticArity
+        // 状态变量 !X 在语义元数上按两个参数（!.X / !:X）计，但声明处常按单个逻辑参数计（如
+        // `:- pred p(list(T)::out)` 配 `p(!List)`）。两种元数都查一次，兼容这种写法。
+        const aAlt = typeof termOrName === 'string' ? a : termOrName.arity
         if (typeof termOrName !== 'string' && termOrName.qualified) {
             const doc = moduleManager.get(termOrName.qualified)
-            const sig = doc?.visitResult?.funcs.get(keyOf(name, a))
-                ?? doc?.visitResult?.preds.get(keyOf(name, a))
+            const sig = doc?.visitResult?.funcs.get(keyOf(name, a)) ?? doc?.visitResult?.funcs.get(keyOf(name, aAlt))
+                ?? doc?.visitResult?.preds.get(keyOf(name, a)) ?? doc?.visitResult?.preds.get(keyOf(name, aAlt))
             if (sig) return sig
         }
-        return this.funcs.get(keyOf(name, a))
-            ?? this.preds.get(keyOf(name, a))
-            ?? exportManager.lookupFunc(name, a)
+        return this.funcs.get(keyOf(name, a)) ?? this.funcs.get(keyOf(name, aAlt))
+            ?? this.preds.get(keyOf(name, a)) ?? this.preds.get(keyOf(name, aAlt))
+            ?? exportManager.lookupFunc(name, a) ?? exportManager.lookupFunc(name, aAlt)
     }
     private varKey(term: Term): string {
         if (['!/1', '!./1', '!:/1'].includes(term.nameArity)) {

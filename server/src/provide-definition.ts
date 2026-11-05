@@ -5,7 +5,7 @@ import { DefTerm, Document } from './document'
 import { EMPTY_STREAM, Stream, stream } from './stream'
 import { MercuryDocument, mercuryDocuments } from './document-manager'
 import { URI } from 'vscode-uri'
-import { moduleManager } from './document-moduleManager'
+import { moduleManager, exportManager } from './document-moduleManager'
 
 export async function DefinitionProvider(params:DefinitionParams):Promise<Location[]> {
     // 先找到指定位置的term 
@@ -35,16 +35,17 @@ export async function TypeDefinitionProvider(params: TypeDefinitionParams): Prom
         const inferred = document.visitResult?.inferred.get(term)
         if (inferred?.type && inferred.type.kind === 'ctor') {
             const typeCtor = inferred.type.ctor
-            const typeKey = `${typeCtor.name}/${typeCtor.arity}`
-            const typeInfo = document.visitResult?.types.get(typeKey)
-            if (typeInfo) {
-                // Find the type definition term by name/arity
-                const typeDefs = document.visitResult?.definition.get(typeCtor.name) ?? []
-                const typeDef = typeDefs.find(t => t.semanticType === 'type' && t.arity === typeCtor.arity)
-                if (typeDef) {
-                    return [uriTermToLocation({ uri, term: typeDef })]
-                }
+            // Create a temporary term for the type constructor to use findDefTerms
+            const typeTerm: Partial<Term> = {
+                name: typeCtor.name,
+                arity: typeCtor.arity,
+                semanticArity: typeCtor.arity,
+                semanticType: 'type',
             }
+            return findDefTerms({ term: typeTerm as Term, uri })
+                .filter(uriTerm => uriTerm.term.semanticType === 'type')
+                .map(uriTermToLocation)
+                .toArray()
         }
     }
 
@@ -107,16 +108,38 @@ export function defKindsForRef(refType?: string): string[] | undefined {
     }
 }
 function findDefTermInOtherDocument(term: Term, document: MercuryDocument){
+    // 对于 type 和 constructor，使用 exportManager 进行全局查找
+    // 因为它们经常通过多层 import 传播
+    if (term.semanticType === 'type' || term.semanticType === 'constructor') {
+        const exports = exportManager.get(term.name)
+        if (!exports) return stream([])
+
+        const defKinds = defKindsForRef(term.semanticType)
+        return stream(exports)
+            .filter(x => sameArity(x, term))
+            .filter(x => !defKinds || defKinds.includes(x.semanticType ?? ''))
+            .map(exportTerm => {
+                // exportTerm.qualified 指向所属模块，从 moduleManager 获取文档
+                const moduleTerm = exportTerm.qualified
+                if (!moduleTerm) return null
+                const doc = moduleManager.get(moduleTerm)
+                if (!doc) return null
+                return uriTerm.create(doc.uri, exportTerm)
+            })
+            .nonNullable()
+    }
+
+    // 对于 func 和 pred，保持单层查找（通常在当前模块或直接 import 中定义）
     let imports = document.visitResult?.imports;
     if(!imports){
         return stream([])
     }
-    
+
     let res = stream(imports)
     .map(x => moduleManager.get(x))
     .nonNullable()
     .flatMap(doc=>findDefTermInThisDocument(term,doc))
-    
+
     return res;
 }
 

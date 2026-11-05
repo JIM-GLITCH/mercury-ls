@@ -24,6 +24,7 @@ export interface TypeInfo {
     ctor: TypeCtor
     params: MerType[]       // 类型参数（type 变量）
     constructors: ConsInfo[]
+    body?: MerType          // 等价类型（type T == U）的底层类型；供推断展开同义词（如 assoc_list == list(pair(K,V))）
 }
 
 // 一条过程 mode（对应编译器一个 procedure）：:- mode P(Modes) [is Det]. 或 :: 注解推出的默认过程
@@ -113,6 +114,10 @@ export function termToMerType(term: Term): MerType {
     if ((name === '::' || name === '>>') && arity === 2) {
         return termToMerType(term.args[0])
     }
+    // 类型表达式里的 `-`/2 恒为 pair 构造子（如 assoc_list(K,V) == list(K - V) 的 K - V）
+    if (name === '-' && arity === 2) {
+        return { kind: 'ctor', ctor: { name: 'pair', arity: 2 }, args: term.args.map(termToMerType) }
+    }
     // 高阶函数类型 func(A1,...) = R（别名 function(...)）
     if (name === '=' && arity === 2 && ['func', 'function'].includes(term.args[0]?.name)) {
         const head = term.args[0]
@@ -169,7 +174,9 @@ function occurs(name: string, t: MerType): boolean {
 export function applySubst(t: MerType, subst: Map<string, MerType>): MerType {
     if (t.kind === 'var') {
         const s = subst.get(t.name)
-        return s ? applySubst(s, subst) : t
+        // 防自指环：类型参数与同义体变量同名（如 assoc_list(K,V) 的 body 里仍是 K/V）会导致 K→K 死循环
+        if (s && !(s.kind === 'var' && s.name === t.name)) return applySubst(s, subst)
+        return t
     }
     if (t.kind === 'ctor') {
         return { kind: 'ctor', ctor: t.ctor, args: t.args.map(a => applySubst(a, subst)) }

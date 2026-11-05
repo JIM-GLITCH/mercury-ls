@@ -1069,6 +1069,59 @@ describe('goto definition / find references for insts (providers)', () => {
     }
   })
 
+  it('infers assoc_list head arg: [|]/2 and -/2 as constructors, K typed (cross-module synonym)', async () => {
+    // mlist 导出 pair(K,V) ---> K - V 与 assoc_list(K,V) == list(pair(K,V)) 同义词
+    const mk = async (src: string, name: string) => {
+      const uri = URI.parse(`file:///${name}.m`)
+      const doc = mercuryDocumentFactory.fromString(src, uri)
+      mercuryDocuments.addDocument(doc)
+      await new Visitor().visit(doc, {
+        isCancellationRequested: false,
+        onCancellationRequested: () => undefined,
+      } as any)
+      const mod = doc.visitResult!.module
+      if (mod) moduleManager.set(mod, doc)
+      exportManager.set(doc)
+      return doc
+    }
+    await mk(
+      ':- module mlist.\n' +
+      ':- interface.\n' +
+      ':- type pair(K, V) ---> K - V.\n' +
+      ':- type assoc_list(K, V) == list(pair(K, V)).\n' +
+      ':- end_module mlist.\n',
+      'mlist-assoc',
+    )
+    // muser 导入 mlist，头参数直接写列表语法 [K - V0 | KVs0]；assoc_list 是跨模块同义词
+    const docM = await mk(
+      ':- module muser.\n' +
+      ':- interface.\n' +
+      ':- import_module mlist.\n' +
+      ':- pred map_values_only(pred(V, W)::in(pred(in, out), det), assoc_list(K, V)::in, assoc_list(K, W)::out) is det.\n' +
+      ':- end_module muser.\n' +
+      ':- implementation.\n' +
+      'map_values_only(_P, [], []).\n' +
+      'map_values_only(P, [K - V0 | KVs0], [K - V | KVs]) :-\n' +
+      '    P(V0, V).\n',
+      'muser-assoc',
+    )
+    await linker.link(docM, {
+      isCancellationRequested: false,
+      onCancellationRequested: () => undefined,
+    } as any)
+    // 列表 cons [|]/2 与元素 pair 构造子 -/2 都应按构造子标注
+    const consList = collectTerms(docM.parseResult.value, '[|]/2')
+    const minus = collectTerms(docM.parseResult.value, '-/2')
+    expect(consList.length).toBeGreaterThan(0)
+    for (const t of consList) expect(t.semanticType).toBe('constructor')
+    expect(minus.length).toBeGreaterThan(0)
+    for (const t of minus) expect(t.semanticType).toBe('constructor')
+    // 头变量 K 的类型由 assoc_list(K, V) 同义词展开推为 K，而非 unknown
+    const kInfo = [...docM.visitResult!.inferred.entries()].filter(([t]: any) => t.name === 'K')
+    expect(kInfo.length).toBeGreaterThan(0)
+    for (const [, info] of kInfo) expect(merTypeToString((info as any).type)).toBe('K')
+  })
+
   it('resolves unqualified refs via the global export index (cross-module)', async () => {
     const mk = async (src: string, name: string) => {
       const uri = URI.parse(`file:///${name}.m`)
