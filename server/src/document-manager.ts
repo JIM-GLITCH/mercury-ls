@@ -1,5 +1,4 @@
 import { TextDocument } from 'vscode-languageserver-textdocument'
-import { TextDocuments } from 'vscode-languageserver/node'
 import { URI } from 'vscode-uri'
 import { ParseResult, Parser } from './mercury-parser'
 import { Clause, Term } from './term'
@@ -7,11 +6,7 @@ import { readFileSync } from 'fs'
 import { Stream, stream } from './stream'
 import { VisitResult } from './document-visitor'
 import { Diagnostic, Position } from 'vscode-languageserver'
-
-// 文本文档仓库：从 server 启动模块迁出，避免数据层依赖「LSP 连接启动模块」。
-// 原先定义在 server.ts 且由 document-manager import，导致任何导入 document-manager 的测试
-// 都会间接触发 server.ts 顶层的 createConnection() 崩溃（无 LSP 传输）。
-export const textDocuments = new TextDocuments(TextDocument)
+import type { MercuryServices } from './services'
 
 export enum DocumentState {
     /**
@@ -108,6 +103,7 @@ export interface MercuryDocumentFactory {
 }
 
 export class DefaultMercuryDocumentFactory implements MercuryDocumentFactory{
+    constructor(protected readonly services: MercuryServices) {}
 
     fromTextDocument(textDocument: TextDocument, uri?: URI | undefined): MercuryDocument {
         return this.create(uri??URI.parse(textDocument.uri),textDocument)
@@ -122,7 +118,7 @@ export class DefaultMercuryDocumentFactory implements MercuryDocumentFactory{
     }
     create(uri:URI,content?:string|TextDocument|{$model:any}){
         // if no document is given, check the textDocuments service first, it maintains documents being opened in an editor
-        content ??= textDocuments.get(uri.toString());
+        content ??= this.services.textDocuments.get(uri.toString());
         // if still no document is found try to load it from the file system
         content ??= this.getContentFromFileSystem(uri);
         
@@ -166,7 +162,7 @@ export class DefaultMercuryDocumentFactory implements MercuryDocumentFactory{
         return document;
     }
     update(document: MercuryDocument): MercuryDocument {
-        let textDocument = textDocuments.get(document.uri.toString())
+        let textDocument = this.services.textDocuments.get(document.uri.toString())
         let text = textDocument?textDocument.getText(): this.getContentFromFileSystem(document.uri)
         
         if(textDocument){
@@ -207,11 +203,14 @@ export class DefaultMercuryDocumentFactory implements MercuryDocumentFactory{
     }
 
 }
-export let mercuryDocumentFactory = new DefaultMercuryDocumentFactory()
+
 /**
  * Shared service for managing Mercury documents.
  */
 export interface MercuryDocuments {
+
+    /** 当前管理的文档数量 */
+    readonly size: number
 
     /**
      * A stream of all documents managed under this service.
@@ -256,6 +255,7 @@ export interface MercuryDocuments {
 
 export class DefaultMercuryDocuments implements MercuryDocuments{
     protected readonly documentMap:Map<string,MercuryDocument>= new Map()
+    constructor(protected readonly services: MercuryServices) {}
     get size(){
         return this.documentMap.size
     }
@@ -276,7 +276,7 @@ export class DefaultMercuryDocuments implements MercuryDocuments{
             // The document is already present in our map
             return MercuryDoc;
         }
-        MercuryDoc = mercuryDocumentFactory.create(uri);
+        MercuryDoc = this.services.documentFactory.create(uri);
         this.documentMap.set(uriString, MercuryDoc);
         return MercuryDoc;
     }
@@ -306,4 +306,3 @@ export class DefaultMercuryDocuments implements MercuryDocuments{
     }
     
 }
-export let mercuryDocuments = new DefaultMercuryDocuments();

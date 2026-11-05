@@ -38,21 +38,24 @@ import { Term, Clause } from './term'
 import {URI,Utils}from "vscode-uri"
 import fs = require("fs")
 import path = require('path')
-import { DefinitionProvider, TypeDefinitionProvider } from './provide-definition'
-import { DeclarationProvider } from './provide-declaration'
-import { incomingCallsProvider, outgoingCallsProvider, prepareCallHierarchyProvider } from './provide-callHierarchy'
-import { ReferenceProvider } from './provide-reference'
-import { HoverProvider } from './provide-hover'
-import { DocumentSymbolProvider } from './provide-documentSymbol'
-import { semanticTokenLegend, semanticTokensForDocument } from './provide-semantic-tokens'
+import { semanticTokenLegend } from './provide-semantic-tokens'
 import { MutexLock, isOperationCancelled } from './promise-util'
-import { documentBuilder } from './document-builder'
-import { DocumentState, mercuryDocuments, textDocuments } from './document-manager'
 import { stream } from './stream'
+import { createMercuryServices, type LspClient } from './services'
 // Create a connection for the server, using Node's IPC as a transport.
 // Also include all preview / proposed LSP features.
 export const connection = createConnection(ProposedFeatures.all);
 export const mutex = new MutexLock;
+
+/** 把 LSP 连接包装成数据层可注入的输出通道（状态栏 + 诊断）。 */
+const client: LspClient = {
+    sendNotification: (method, params) => connection.sendNotification(method, params),
+    sendDiagnostics: params => connection.sendDiagnostics(params),
+    setStatus: text => connection.sendNotification('$/statusBar/text', text),
+}
+
+/** 当前 server 进程唯一的一套服务容器。 */
+export const services = createMercuryServices({ client });
 
 // Create a simple text document manager (定义已迁至 document-manager.ts)
 
@@ -129,24 +132,24 @@ connection.onNotification("$/initialWorkspace",async()=>{
 export namespace sendBarText{
     
     export function initializing(){
-        return connection.sendNotification("$/statusBar/text","$(sync~spin)initializing");
+        return client.setStatus("$(sync~spin)initializing");
     }
     export function Mercury(){
-        return connection.sendNotification("$/statusBar/text","Mercury");
+        return client.setStatus("Mercury");
     }
     export function parsing(){
-        return connection.sendNotification("$/statusBar/text","$(sync~spin)parsing");
+        return client.setStatus("$(sync~spin)parsing");
     }
     export function linking(){
-        return connection.sendNotification("$/statusBar/text","$(sync~spin)linking");
+        return client.setStatus("$(sync~spin)linking");
     }
     export function validating(){
-        return connection.sendNotification("$/statusBar/text","$(sync~spin)validating");
+        return client.setStatus("$(sync~spin)validating");
     }
 
 }
 export function sendMemoryUsage(){
-    return connection.sendNotification("$/statusBar/tooltip",{cached:mercuryDocuments.size,usage:process.memoryUsage.rss()/1000000});
+    return connection.sendNotification("$/statusBar/tooltip",{cached:services.documents.size,usage:process.memoryUsage.rss()/1000000});
 }
 async function initializeWorkspace() {
     sendBarText.initializing()
@@ -177,10 +180,10 @@ async function initializeWorkspace() {
 
     sendBarText.parsing()
     let docs = stream(mercurFiles)
-    .map(filepath=>mercuryDocuments.getOrCreateDocument( URI.file(filepath)))
+    .map(filepath=>services.documents.getOrCreateDocument( URI.file(filepath)))
     .toArray()
 
-    await documentBuilder.build(docs,CancellationToken.None);
+    await services.builder.build(docs,CancellationToken.None);
     sendBarText.Mercury()
 }
 // The example settings     
@@ -300,12 +303,12 @@ connection.onCompletionResolve(
 
 function addDocumentHander(){
     function onDidChange(changed:URI[],deleted:URI[]){
-        mutex.lock(token=>documentBuilder.update(changed,deleted,token));
+        mutex.lock(token=>services.builder.update(changed,deleted,token));
     }
-    textDocuments.onDidChangeContent(change => {
+    services.textDocuments.onDidChangeContent(change => {
         onDidChange([URI.parse(change.document.uri)],[])
     });
-    textDocuments.onDidOpen(change => {
+    services.textDocuments.onDidOpen(change => {
         onDidChange([URI.parse(change.document.uri)],[])
     });
     connection.onDidChangeWatchedFiles(params => {
@@ -348,26 +351,26 @@ connection.onInitialize(params=>onInitialize(params))
 connection.onInitialized(params=>onInitialized(params))
 addDocumentHander()
     // Only keep settings for open documents
-textDocuments.onDidClose(e => {documentSettings.delete(e.document.uri);});
-connection.onDocumentSymbol(cancelableRequest(DocumentSymbolProvider));
-connection.onHover(cancelableRequest(HoverProvider));
-connection.onDefinition(cancelableRequest(DefinitionProvider));
-connection.onTypeDefinition(cancelableRequest(TypeDefinitionProvider));
-connection.onReferences(cancelableRequest(ReferenceProvider));
-connection.onImplementation(cancelableRequest(DefinitionProvider));
-connection.onDeclaration(cancelableRequest(DeclarationProvider));
-connection.onImplementation(cancelableRequest(DefinitionProvider));
+services.textDocuments.onDidClose(e => {documentSettings.delete(e.document.uri);});
+connection.onDocumentSymbol(cancelableRequest(services.providers.documentSymbol));
+connection.onHover(cancelableRequest(services.providers.hover));
+connection.onDefinition(cancelableRequest(services.providers.definition));
+connection.onTypeDefinition(cancelableRequest(services.providers.typeDefinition));
+connection.onReferences(cancelableRequest(services.providers.references));
+connection.onImplementation(cancelableRequest(services.providers.definition));
+connection.onDeclaration(cancelableRequest(services.providers.declaration));
+connection.onImplementation(cancelableRequest(services.providers.definition));
 connection.onRequest(SemanticTokensRequest.type, params => {
     const uri = URI.parse(params.textDocument.uri);
-    const document = mercuryDocuments.getOrCreateDocument(uri);
-    return semanticTokensForDocument(document);
+    const document = services.documents.getOrCreateDocument(uri);
+    return services.providers.semanticTokens(document);
 });
 // connection.onTypeDefinition(TypeDefinitionProvider);
-connection.onRequest(CallHierarchyPrepareRequest.method,cancelableRequest(prepareCallHierarchyProvider));
-connection.onRequest(CallHierarchyIncomingCallsRequest.method,incomingCallsProvider);
-connection.onRequest(CallHierarchyOutgoingCallsRequest.method,outgoingCallsProvider);
+connection.onRequest(CallHierarchyPrepareRequest.method,cancelableRequest(services.providers.prepareCallHierarchy));
+connection.onRequest(CallHierarchyIncomingCallsRequest.method,services.providers.incomingCalls);
+connection.onRequest(CallHierarchyOutgoingCallsRequest.method,services.providers.outgoingCalls);
 
 
-textDocuments.listen(connection)
+services.textDocuments.listen(connection)
 connection.listen()
 setInterval(()=>sendMemoryUsage(),1000)

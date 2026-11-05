@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { beforeEach, describe, it, expect } from 'vitest'
 
 import { Parser } from '../mercury-parser'
 import { Visitor } from '../document-visitor'
@@ -6,16 +6,19 @@ import { URI } from 'vscode-uri'
 import { TextDocument } from 'vscode-languageserver-textdocument'
 import { sameArity, semanticNameArityOf } from '../utils'
 import { termRange } from '../term'
-import { findDefTerms, TypeDefinitionProvider, uriTermToLocation } from '../provide-definition'
-import { ReferenceProvider } from '../provide-reference'
-import { linker } from '../document-linker'
-import { exportManager, moduleManager } from '../document-moduleManager'
-import { mercuryDocumentFactory, mercuryDocuments } from '../document-manager'
+import { uriTermToLocation } from '../provide-definition'
+import { createMercuryServices, type MercuryServices } from '../services'
 import { orderByImports, scanHeader } from '../document-order'
-import { HoverProvider } from '../provide-hover'
 import { merTypeToString } from '../document-type'
 import { modeRefToInsts } from '../document-mode'
 import { semanticTokensForDocument } from '../provide-semantic-tokens'
+
+// 每个用例 new 一套独立的服务容器，避免文档/索引在用例间累积
+let services: MercuryServices
+
+beforeEach(() => {
+  services = createMercuryServices()
+})
 
 interface DefEntry {
   nameArity: string
@@ -34,7 +37,7 @@ async function visitSource(src: string): Promise<Visitor> {
     uri: URI.parse('file:///test.m'),
     visitResult: undefined,
   }
-  const v = new Visitor()
+  const v = new Visitor(services)
   await v.visit(doc, {
     isCancellationRequested: false,
     onCancellationRequested: () => undefined,
@@ -49,12 +52,12 @@ async function linkSource(src: string): Promise<any> {
     uri: URI.parse('file:///test.m'),
     visitResult: undefined,
   }
-  const v = new Visitor()
+  const v = new Visitor(services)
   await v.visit(doc, {
     isCancellationRequested: false,
     onCancellationRequested: () => undefined,
   } as any)
-  await linker.link(doc, {
+  await services.linker.link(doc, {
     isCancellationRequested: false,
     onCancellationRequested: () => undefined,
   } as any)
@@ -167,7 +170,7 @@ it('produces semantic tokens for definition names', async () => {
     textDocument: TextDocument.create('file:///test.m', 'mercury', 0, src),
     visitResult: undefined,
   }
-  const v = new Visitor()
+  const v = new Visitor(services)
   await v.visit(doc, {
     isCancellationRequested: false,
     onCancellationRequested: () => undefined,
@@ -196,7 +199,7 @@ foo(_) :- true.
     textDocument: TextDocument.create('file:///test.m', 'mercury', 0, src),
     visitResult: undefined,
   }
-  const v = new Visitor()
+  const v = new Visitor(services)
   await v.visit(doc, {
     isCancellationRequested: false,
     onCancellationRequested: () => undefined,
@@ -224,7 +227,7 @@ foo(Acc0, X, Y) :-
     textDocument: TextDocument.create('file:///test.m', 'mercury', 0, src),
     visitResult: undefined,
   }
-  const v = new Visitor()
+  const v = new Visitor(services)
   await v.visit(doc, {
     isCancellationRequested: false,
     onCancellationRequested: () => undefined,
@@ -624,6 +627,20 @@ describe('visitor: inst references (instReference)', () => {
     expectLabeled(decls, 'f2', 'f2/1', 'func')
   })
 
+  it('labels `(Type :: Mode)` func returns as type + mode, not fieldname + type', async () => {
+    const v = await visitMercury(
+      ':- func init(int::in, T::in) = (array(T)::array_uo) is det.',
+    )
+    const typeRefs = typeReferencesOf(v)
+    expectLabeled(typeRefs, 'array', 'array/1', 'type')
+    expect(typeRefs.get('array_uo')).toBeUndefined()
+    expectLabeled(modeReferencesOf(v), 'array_uo', 'array_uo/0', 'mode')
+    // 返回类型不是构造子字段，不能作为 fieldname 定义
+    const arrayDefs = definitionsOf(v).get('array') ?? []
+    expect(arrayDefs.some((e) => e.semanticType === 'fieldname')).toBe(false)
+    expectLabeled(declarationsOf(v), 'init', 'init/2', 'func')
+  })
+
   it('indexes inst refs in `mode M == InstA >> InstB`', async () => {
     const v = await visitMercury(':- mode m1 == node >> ground.')
     const refs = instReferencesOf(v)
@@ -756,9 +773,9 @@ describe('visitor: pred/func reference positions (reference)', () => {
 
 describe('goto definition / find references for insts (providers)', () => {
   const visitDoc = async (src: string, uri: URI) => {
-    const doc = mercuryDocumentFactory.fromString(src, uri)
-    mercuryDocuments.addDocument(doc)
-    await new Visitor().visit(doc, {
+    const doc = services.documentFactory.fromString(src, uri)
+    services.documents.addDocument(doc)
+    await new Visitor(services).visit(doc, {
       isCancellationRequested: false,
       onCancellationRequested: () => undefined,
     } as any)
@@ -831,7 +848,7 @@ describe('goto definition / find references for insts (providers)', () => {
       .find((t: any) => t.semanticType === 'func')
     expect(refTerm).toBeTruthy()
     expect((refTerm as any).semanticArity ?? (refTerm as any).arity).toBe(2)
-    const locs = (await findDefTerms({ uri, term: refTerm } as any))
+    const locs = (await services.providers.findDefTerms({ uri, term: refTerm } as any))
       .map(uriTermToLocation)
       .toArray()
     expect(locs.length).toBe(1)
@@ -853,7 +870,7 @@ describe('goto definition / find references for insts (providers)', () => {
     ].join('\n')
     const uri = URI.parse('file:///linker-label.m')
     const doc = await visitDoc(src, uri)
-    await linker.link(doc, {
+    await services.linker.link(doc, {
       isCancellationRequested: false,
       onCancellationRequested: () => undefined,
     } as any)
@@ -868,15 +885,15 @@ describe('goto definition / find references for insts (providers)', () => {
   it('keeps overloaded functors unlabeled when func and constructor candidates coexist', async () => {
     const mk = async (src: string, name: string) => {
       const uri = URI.parse(`file:///${name}.m`)
-      const doc = mercuryDocumentFactory.fromString(src, uri)
-      mercuryDocuments.addDocument(doc)
-      await new Visitor().visit(doc, {
+      const doc = services.documentFactory.fromString(src, uri)
+      services.documents.addDocument(doc)
+      await new Visitor(services).visit(doc, {
         isCancellationRequested: false,
         onCancellationRequested: () => undefined,
       } as any)
       const mod = doc.visitResult!.module
-      if (mod) moduleManager.set(mod, doc)
-      exportManager.set(doc)
+      if (mod) services.moduleManager.set(mod, doc)
+      services.exportManager.set(doc)
       return doc
     }
     // mint 导出 `-/2` 函数（减法）；mpair 导出 `-/2` 构造子（pair 的 K - V）
@@ -886,7 +903,7 @@ describe('goto definition / find references for insts (providers)', () => {
       ':- module m.\n:- interface.\n:- end_module m.\n:- implementation.\nf(K, V) = P :- P = K - V.\n',
       'm-ovl',
     )
-    await linker.link(docM, {
+    await services.linker.link(docM, {
       isCancellationRequested: false,
       onCancellationRequested: () => undefined,
     } as any)
@@ -898,15 +915,15 @@ describe('goto definition / find references for insts (providers)', () => {
   it('disambiguates imported type constructor via cross-module inference (pair -/2)', async () => {
     const mk = async (src: string, name: string) => {
       const uri = URI.parse(`file:///${name}.m`)
-      const doc = mercuryDocumentFactory.fromString(src, uri)
-      mercuryDocuments.addDocument(doc)
-      await new Visitor().visit(doc, {
+      const doc = services.documentFactory.fromString(src, uri)
+      services.documents.addDocument(doc)
+      await new Visitor(services).visit(doc, {
         isCancellationRequested: false,
         onCancellationRequested: () => undefined,
       } as any)
       const mod = doc.visitResult!.module
-      if (mod) moduleManager.set(mod, doc)
-      exportManager.set(doc)
+      if (mod) services.moduleManager.set(mod, doc)
+      services.exportManager.set(doc)
       return doc
     }
     // mpair 导出类型 pair(K, V) ---> K - V（构造子 `-`/2 在另一模块）
@@ -922,7 +939,7 @@ describe('goto definition / find references for insts (providers)', () => {
       'p(!List) :- !:List = [1 - 2 | !.List].\n',
       'muser-x',
     )
-    await linker.link(docM, {
+    await services.linker.link(docM, {
       isCancellationRequested: false,
       onCancellationRequested: () => undefined,
     } as any)
@@ -935,15 +952,15 @@ describe('goto definition / find references for insts (providers)', () => {
   it('resolves direct imported pair constructor use without expected list context', async () => {
     const mk = async (src: string, name: string) => {
       const uri = URI.parse(`file:///${name}.m`)
-      const doc = mercuryDocumentFactory.fromString(src, uri)
-      mercuryDocuments.addDocument(doc)
-      await new Visitor().visit(doc, {
+      const doc = services.documentFactory.fromString(src, uri)
+      services.documents.addDocument(doc)
+      await new Visitor(services).visit(doc, {
         isCancellationRequested: false,
         onCancellationRequested: () => undefined,
       } as any)
       const mod = doc.visitResult!.module
-      if (mod) moduleManager.set(mod, doc)
-      exportManager.set(doc)
+      if (mod) services.moduleManager.set(mod, doc)
+      services.exportManager.set(doc)
       return doc
     }
     await mk(':- module mpair.\n:- interface.\n:- type pair(K, V) ---> K - V.\n:- end_module mpair.\n', 'mpair-direct')
@@ -957,7 +974,7 @@ describe('goto definition / find references for insts (providers)', () => {
       'p(P) :- P = 1 - 2.\n',
       'muser-direct',
     )
-    await linker.link(docM, {
+    await services.linker.link(docM, {
       isCancellationRequested: false,
       onCancellationRequested: () => undefined,
     } as any)
@@ -1073,15 +1090,15 @@ describe('goto definition / find references for insts (providers)', () => {
     // mlist 导出 pair(K,V) ---> K - V 与 assoc_list(K,V) == list(pair(K,V)) 同义词
     const mk = async (src: string, name: string) => {
       const uri = URI.parse(`file:///${name}.m`)
-      const doc = mercuryDocumentFactory.fromString(src, uri)
-      mercuryDocuments.addDocument(doc)
-      await new Visitor().visit(doc, {
+      const doc = services.documentFactory.fromString(src, uri)
+      services.documents.addDocument(doc)
+      await new Visitor(services).visit(doc, {
         isCancellationRequested: false,
         onCancellationRequested: () => undefined,
       } as any)
       const mod = doc.visitResult!.module
-      if (mod) moduleManager.set(mod, doc)
-      exportManager.set(doc)
+      if (mod) services.moduleManager.set(mod, doc)
+      services.exportManager.set(doc)
       return doc
     }
     await mk(
@@ -1105,7 +1122,7 @@ describe('goto definition / find references for insts (providers)', () => {
       '    P(V0, V).\n',
       'muser-assoc',
     )
-    await linker.link(docM, {
+    await services.linker.link(docM, {
       isCancellationRequested: false,
       onCancellationRequested: () => undefined,
     } as any)
@@ -1125,15 +1142,15 @@ describe('goto definition / find references for insts (providers)', () => {
   it('resolves unqualified refs via the global export index (cross-module)', async () => {
     const mk = async (src: string, name: string) => {
       const uri = URI.parse(`file:///${name}.m`)
-      const doc = mercuryDocumentFactory.fromString(src, uri)
-      mercuryDocuments.addDocument(doc)
-      await new Visitor().visit(doc, {
+      const doc = services.documentFactory.fromString(src, uri)
+      services.documents.addDocument(doc)
+      await new Visitor(services).visit(doc, {
         isCancellationRequested: false,
         onCancellationRequested: () => undefined,
       } as any)
       const mod = doc.visitResult!.module
-      if (mod) moduleManager.set(mod, doc)
-      exportManager.set(doc)
+      if (mod) services.moduleManager.set(mod, doc)
+      services.exportManager.set(doc)
       return doc
     }
     // va 模块 interface 段导出 empty/0
@@ -1144,7 +1161,7 @@ describe('goto definition / find references for insts (providers)', () => {
       ':- implementation.\ng(X) :- X = empty.\n',
       't-mod',
     )
-    await linker.link(docT, {
+    await services.linker.link(docT, {
       isCancellationRequested: false,
       onCancellationRequested: () => undefined,
     } as any)
@@ -1170,7 +1187,7 @@ describe('goto definition / find references for insts (providers)', () => {
     // 表达式位置的 functor 引用（init(N, X)）没有 semanticType
     const refTerm = doc.visitResult!.reference.get('init')[0]
     expect(refTerm.semanticType).toBeUndefined()
-    const locs = (await findDefTerms({ uri, term: refTerm } as any))
+    const locs = (await services.providers.findDefTerms({ uri, term: refTerm } as any))
       .map(uriTermToLocation)
       .toArray()
     expect(locs.length).toBe(1)
@@ -1218,7 +1235,7 @@ describe('goto definition / find references for insts (providers)', () => {
     )
 
     const defTerm = va.visitResult!.definition.get('init')[0]
-    const refs = await ReferenceProvider({
+    const refs = await services.providers.references({
       textDocument: { uri: va.uri.toString() },
       position: termRange(defTerm).start,
     } as any)
@@ -1240,7 +1257,7 @@ describe('goto definition / find references for insts (providers)', () => {
     const doc = await visitDoc(src, uri)
 
     const refTerm = doc.visitResult!.instReference.get('i_node')[0]
-    const locs = (await findDefTerms({ uri, term: refTerm } as any))
+    const locs = (await services.providers.findDefTerms({ uri, term: refTerm } as any))
       .map(uriTermToLocation)
       .toArray()
     expect(locs.length).toBe(1)
@@ -1261,7 +1278,7 @@ describe('goto definition / find references for insts (providers)', () => {
     const doc = await visitDoc(src, uri)
 
     const refTerm = doc.visitResult!.typeReference.get('pair')[0]
-    const locs = await TypeDefinitionProvider({
+    const locs = await services.providers.typeDefinition({
       textDocument: { uri: uri.toString() },
       position: termRange(refTerm).start,
     } as any)
@@ -1278,8 +1295,8 @@ describe('goto definition / find references for insts (providers)', () => {
       ':- end_module generic_pair.',
       '',
     ].join('\n'), pairUri)
-    moduleManager.set(pairDoc.visitResult!.module!, pairDoc)
-    exportManager.set(pairDoc)
+    services.moduleManager.set(pairDoc.visitResult!.module!, pairDoc)
+    services.exportManager.set(pairDoc)
 
     const useUri = URI.parse('file:///generic-use.m')
     const useDoc = await visitDoc([
@@ -1292,7 +1309,7 @@ describe('goto definition / find references for insts (providers)', () => {
     ].join('\n'), useUri)
 
     const refTerm = useDoc.visitResult!.typeReference.get('pair')[0]
-    const locs = await TypeDefinitionProvider({
+    const locs = await services.providers.typeDefinition({
       textDocument: { uri: useUri.toString() },
       position: termRange(refTerm).start,
     } as any)
@@ -1314,7 +1331,7 @@ describe('goto definition / find references for insts (providers)', () => {
     const doc = await visitDoc(src, uri)
 
     const defTerm = doc.visitResult!.definition.get('j_node')[0]
-    const refs = await ReferenceProvider({
+    const refs = await services.providers.references({
       textDocument: { uri: uri.toString() },
       position: termRange(defTerm).start,
     } as any)
@@ -1338,7 +1355,7 @@ describe('goto definition / find references for insts (providers)', () => {
     // goto def：mode 引用 → mode 定义（第 3 行，0 基 2）
     const refTerm = doc.visitResult!.modeReference.get('my_mode')[0]
     expect(refTerm.semanticType).toBe('mode')
-    const locs = (await findDefTerms({ uri, term: refTerm } as any))
+    const locs = (await services.providers.findDefTerms({ uri, term: refTerm } as any))
       .map(uriTermToLocation)
       .toArray()
     expect(locs.length).toBe(1)
@@ -1346,7 +1363,7 @@ describe('goto definition / find references for insts (providers)', () => {
 
     // find refs：mode 定义 → mode 引用（第 4 行，0 基 3）
     const defTerm = doc.visitResult!.definition.get('my_mode')[0]
-    const refs = await ReferenceProvider({
+    const refs = await services.providers.references({
       textDocument: { uri: uri.toString() },
       position: termRange(defTerm).start,
     } as any)
@@ -1391,9 +1408,9 @@ describe('goto definition / find references for insts (providers)', () => {
 
 describe('hover shows inferred types', () => {
   const visitDoc = async (src: string, uri: URI) => {
-    const doc = mercuryDocumentFactory.fromString(src, uri)
-    mercuryDocuments.addDocument(doc)
-    await new Visitor().visit(doc, {
+    const doc = services.documentFactory.fromString(src, uri)
+    services.documents.addDocument(doc)
+    await new Visitor(services).visit(doc, {
       isCancellationRequested: false,
       onCancellationRequested: () => undefined,
     } as any)
@@ -1413,7 +1430,7 @@ describe('hover shows inferred types', () => {
     const addRef = collectTerms(doc.parseResult.value, 'add/2')
       .find((t: any) => t.semanticType === 'func')
     expect(addRef).toBeTruthy()
-    const hover = await HoverProvider({
+    const hover = await services.providers.hover({
       textDocument: { uri: uri.toString() },
       position: termRange(addRef).start,
     } as any)
@@ -1438,7 +1455,7 @@ describe('hover shows inferred types', () => {
     const hoverOf = async (nameArity: string) => {
       const t = collectTerms(doc.parseResult.value, nameArity)
         .find((x: any) => x.semanticType === 'pred' || x.semanticType === 'func')
-      const h = await HoverProvider({
+      const h = await services.providers.hover({
         textDocument: { uri: uri.toString() },
         position: termRange(t).start,
       } as any)
@@ -1468,7 +1485,7 @@ describe('hover shows inferred types', () => {
     const hoverOf = async (nameArity: string) => {
       const t = collectTerms(doc.parseResult.value, nameArity)
         .find((x: any) => x.semanticType === 'constructor')
-      const h = await HoverProvider({
+      const h = await services.providers.hover({
         textDocument: { uri: uri.toString() },
         position: termRange(t).start,
       } as any)
@@ -1559,15 +1576,15 @@ describe('hover shows inferred types', () => {
 
   it('infers higher-order closure variables from qualified calls like array.map', async () => {
     const mk = async (src: string, name: string) => {
-      const doc = mercuryDocumentFactory.fromString(src, URI.parse(`file:///${name}.m`))
-      mercuryDocuments.addDocument(doc)
-      await new Visitor().visit(doc, {
+      const doc = services.documentFactory.fromString(src, URI.parse(`file:///${name}.m`))
+      services.documents.addDocument(doc)
+      await new Visitor(services).visit(doc, {
         isCancellationRequested: false,
         onCancellationRequested: () => undefined,
       } as any)
       const mod = doc.visitResult!.module
-      if (mod) moduleManager.set(mod, doc)
-      exportManager.set(doc)
+      if (mod) services.moduleManager.set(mod, doc)
+      services.exportManager.set(doc)
       return doc
     }
     await mk(':- module array.\n:- interface.\n:- pred map(pred(int, int), list(int), list(int)) is det.\n:- end_module array.\n', 'array-hocall')
@@ -1589,15 +1606,15 @@ describe('hover shows inferred types', () => {
 
   it('resolves module-qualified function calls in type inference (uint.cast_to_int)', async () => {
     const mk = async (src: string, name: string) => {
-      const doc = mercuryDocumentFactory.fromString(src, URI.parse(`file:///${name}.m`))
-      mercuryDocuments.addDocument(doc)
-      await new Visitor().visit(doc, {
+      const doc = services.documentFactory.fromString(src, URI.parse(`file:///${name}.m`))
+      services.documents.addDocument(doc)
+      await new Visitor(services).visit(doc, {
         isCancellationRequested: false,
         onCancellationRequested: () => undefined,
       } as any)
       const mod = doc.visitResult!.module
-      if (mod) moduleManager.set(mod, doc)
-      exportManager.set(doc)
+      if (mod) services.moduleManager.set(mod, doc)
+      services.exportManager.set(doc)
       return doc
     }
     // 标准库风格：uint 模块导出 cast_to_int/1（模拟 library/uint.m 被构建后的导出索引）
@@ -1613,7 +1630,7 @@ describe('hover shows inferred types', () => {
       '    SizeI > 0.',
     ].join('\n')
     const doc = await mk(src, 'm-qualcall')
-    await linker.link(doc, {
+    await services.linker.link(doc, {
       isCancellationRequested: false,
       onCancellationRequested: () => undefined,
     } as any)
@@ -1636,7 +1653,7 @@ describe('hover shows inferred types', () => {
     for (const [, info] of sizes) expect(merTypeToString((info as any).type)).toBe('uint')
     // hover：跨模块 func 引用显示签名 + mode 行（来自导出签名的 argModeRefs）
     const ctTerm = ctis[0][0]
-    const hover = await HoverProvider({
+    const hover = await services.providers.hover({
       textDocument: { uri: doc.uri.toString() },
       position: termRange(ctTerm).start,
     } as any)
@@ -1647,15 +1664,15 @@ describe('hover shows inferred types', () => {
 
   it('binds a function result variable from a qualified output call', async () => {
     const mk = async (src: string, name: string) => {
-      const doc = mercuryDocumentFactory.fromString(src, URI.parse(`file:///${name}.m`))
-      mercuryDocuments.addDocument(doc)
-      await new Visitor().visit(doc, {
+      const doc = services.documentFactory.fromString(src, URI.parse(`file:///${name}.m`))
+      services.documents.addDocument(doc)
+      await new Visitor(services).visit(doc, {
         isCancellationRequested: false,
         onCancellationRequested: () => undefined,
       } as any)
       const mod = doc.visitResult!.module
-      if (mod) moduleManager.set(mod, doc)
-      exportManager.set(doc)
+      if (mod) services.moduleManager.set(mod, doc)
+      services.exportManager.set(doc)
       return doc
     }
     await mk([
@@ -1697,7 +1714,7 @@ describe('hover shows inferred types', () => {
       uri: URI.parse('file:///bag-qualified-solo.m'),
       visitResult: undefined,
     }
-    const v = new Visitor()
+    const v = new Visitor(services)
     await v.visit(doc, {
       isCancellationRequested: false,
       onCancellationRequested: () => undefined,
@@ -1761,15 +1778,15 @@ describe('hover shows inferred types', () => {
 
   it('binds output args through qualified state-variable calls', async () => {
     const mk = async (src: string, name: string) => {
-      const doc = mercuryDocumentFactory.fromString(src, URI.parse(`file:///${name}.m`))
-      mercuryDocuments.addDocument(doc)
-      await new Visitor().visit(doc, {
+      const doc = services.documentFactory.fromString(src, URI.parse(`file:///${name}.m`))
+      services.documents.addDocument(doc)
+      await new Visitor(services).visit(doc, {
         isCancellationRequested: false,
         onCancellationRequested: () => undefined,
       } as any)
       const mod = doc.visitResult!.module
-      if (mod) moduleManager.set(mod, doc)
-      exportManager.set(doc)
+      if (mod) services.moduleManager.set(mod, doc)
+      services.exportManager.set(doc)
       return doc
     }
     await mk([
@@ -1803,9 +1820,9 @@ describe('hover shows inferred types', () => {
       ':- implementation.',
       'foldl(_P, [], !A).',
     ].join('\n')
-    const doc = mercuryDocumentFactory.fromString(src, URI.parse('file:///foldl-statevar.m'))
-    mercuryDocuments.addDocument(doc)
-    await new Visitor().visit(doc, {
+    const doc = services.documentFactory.fromString(src, URI.parse('file:///foldl-statevar.m'))
+    services.documents.addDocument(doc)
+    await new Visitor(services).visit(doc, {
       isCancellationRequested: false,
       onCancellationRequested: () => undefined,
     } as any)
@@ -1815,15 +1832,15 @@ describe('hover shows inferred types', () => {
 
   it('head-domain type of KVs follows the pred signature on recursive update', async () => {
     const mk = async (src: string, name: string) => {
-      const doc = mercuryDocumentFactory.fromString(src, URI.parse(`file:///${name}.m`))
-      mercuryDocuments.addDocument(doc)
-      await new Visitor().visit(doc, {
+      const doc = services.documentFactory.fromString(src, URI.parse(`file:///${name}.m`))
+      services.documents.addDocument(doc)
+      await new Visitor(services).visit(doc, {
         isCancellationRequested: false,
         onCancellationRequested: () => undefined,
       } as any)
       const mod = doc.visitResult!.module
-      if (mod) moduleManager.set(mod, doc)
-      exportManager.set(doc)
+      if (mod) services.moduleManager.set(mod, doc)
+      services.exportManager.set(doc)
       return doc
     }
     await mk(':- module pair.\n:- interface.\n:- type pair(K, V) ---> K - V.\n:- end_module pair.\n', 'pair-imported-head')
@@ -1848,15 +1865,15 @@ describe('hover shows inferred types', () => {
 
   it('qualified calls resolve signatures from the qualified module (mode checker)', async () => {
     const mk = async (src: string, name: string) => {
-      const doc = mercuryDocumentFactory.fromString(src, URI.parse(`file:///${name}.m`))
-      mercuryDocuments.addDocument(doc)
-      await new Visitor().visit(doc, {
+      const doc = services.documentFactory.fromString(src, URI.parse(`file:///${name}.m`))
+      services.documents.addDocument(doc)
+      await new Visitor(services).visit(doc, {
         isCancellationRequested: false,
         onCancellationRequested: () => undefined,
       } as any)
       const mod = doc.visitResult!.module
-      if (mod) moduleManager.set(mod, doc)
-      exportManager.set(doc)
+      if (mod) services.moduleManager.set(mod, doc)
+      services.exportManager.set(doc)
       return doc
     }
     // array 模块导出 size/2 (in, in)；本地模块也有同名 size/2 (out, out)
@@ -1884,15 +1901,15 @@ describe('hover shows inferred types', () => {
     //   :- mode size(in, out) is det.
     // 调用 array.size(Array, 0) 把绑定常量传给 out 位——编译器语义为调用后合一，合法
     const mk = async (src: string, name: string) => {
-      const doc = mercuryDocumentFactory.fromString(src, URI.parse(`file:///${name}.m`))
-      mercuryDocuments.addDocument(doc)
-      await new Visitor().visit(doc, {
+      const doc = services.documentFactory.fromString(src, URI.parse(`file:///${name}.m`))
+      services.documents.addDocument(doc)
+      await new Visitor(services).visit(doc, {
         isCancellationRequested: false,
         onCancellationRequested: () => undefined,
       } as any)
       const mod = doc.visitResult!.module
-      if (mod) moduleManager.set(mod, doc)
-      exportManager.set(doc)
+      if (mod) services.moduleManager.set(mod, doc)
+      services.exportManager.set(doc)
       return doc
     }
     await mk(':- module array.\n:- interface.\n:- pred size(int, int).\n:- mode size(in, out) is det.\n:- end_module array.\n', 'array-sz')

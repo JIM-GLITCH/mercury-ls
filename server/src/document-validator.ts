@@ -29,6 +29,3 @@ export class DefaultDocumentValidator implements DocumentValidator {
         return diagnostics;
     }
 }
-
-
-export let validator = new DefaultDocumentValidator();

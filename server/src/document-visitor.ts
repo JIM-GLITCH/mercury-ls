@@ -5,7 +5,8 @@ import { TreeStreamImpl, stream } from './stream'
 import { Clause, RootNode, Term } from './term'
 import { sameArity } from './utils'
 import { interruptAndCheck } from './promise-util'
-import { exportManager, moduleManager } from './document-moduleManager'
+import { ExportManager, ModuleManager } from './document-moduleManager'
+import type { MercuryServices } from './services'
 import {
     applySubst, ConsInfo, FuncInfo, InferredInfo, MerType, TypeCtor, TypeInfo,
     keyOf, keyOfTypeCtor, modeOfArg, argModesOf, termToMerType, unify,
@@ -52,6 +53,13 @@ function detOf(term: Term | undefined): string | undefined {
 }
 
 export class Visitor {
+    /** 未显式注入容器时，用一套全新的空索引，绝不共享全局状态 */
+    protected readonly moduleManager: ModuleManager
+    protected readonly exportManager: ExportManager
+    constructor(services?: MercuryServices) {
+        this.moduleManager = services?.moduleManager ?? new ModuleManager()
+        this.exportManager = services?.exportManager ?? new ExportManager()
+    }
     module?:Term
     imports=[] as Term[]
     section?:string  
@@ -561,7 +569,9 @@ export class Visitor {
         this.addDefinition(func)
     }
     visitFuncReturn(funcReturn: Term) {
-        this.visitTypeRef(funcReturn)
+        // 函数返回值 `= (Type :: Mode)` 与声明参数同构：左侧是类型引用，右侧是 mode 引用。
+        // 不能按构造子字段 `FieldName :: Type` 处理（visitTypeRef 的 ::/2 分支）
+        this.visitTypeParam(funcReturn)
     }
     visitTypeRef(term: Term) {
         if (nameArity(term, "::/2")) {
@@ -1376,28 +1386,29 @@ export class Visitor {
         this.modeSigs.set(key, [line])
         this.modeSigReplaced.add(key)
     }
-    // 参数模式 Type / Type :: Inst / Type >> Mode：Type 是类型引用位置
+    // 声明参数与函数返回值共用：Type / Type :: Mode / Type >> Mode，Type 是类型引用位置
     visitTypeParams(pred: Term) {
-        for (const param of pred.args ?? []) {
-            if (nameArity(param, "::/2") || nameArity(param, ">>/2")) {
-                if (!isVariable(param.args[0])) this.visitTypeRef(param.args[0])
-                // `::`/`>>` 右侧是 mode 位置：整个标 mode 进 modeReference
-                // （如 `T :: node` 的 node、`T :: in(node)` 的 in）；
-                // 参数化模式的参数是 inst 引用位置（如 in(node) 的 node）
-                const modePart = param.args[1]
-                if (!isVariable(modePart)) {
-                    this.visitModeRef(modePart)
-                    for (const arg of modePart.args ?? []) {
-                        if (isVariable(arg)) continue
-                        // 高阶模式 func(M1,...) = R is Det / pred(M1,...) is Det：
-                        // 其参数是 mode 引用位置
-                        if (this.visitHigherOrderMode(arg)) continue
-                        this.visitInstRef(arg)
-                    }
+        for (const param of pred.args ?? []) this.visitTypeParam(param)
+    }
+    visitTypeParam(param: Term) {
+        if (nameArity(param, "::/2") || nameArity(param, ">>/2")) {
+            if (!isVariable(param.args[0])) this.visitTypeRef(param.args[0])
+            // `::`/`>>` 右侧是 mode 位置：整个标 mode 进 modeReference
+            // （如 `T :: node` 的 node、`T :: in(node)` 的 in）；
+            // 参数化模式的参数是 inst 引用位置（如 in(node) 的 node）
+            const modePart = param.args[1]
+            if (!isVariable(modePart)) {
+                this.visitModeRef(modePart)
+                for (const arg of modePart.args ?? []) {
+                    if (isVariable(arg)) continue
+                    // 高阶模式 func(M1,...) = R is Det / pred(M1,...) is Det：
+                    // 其参数是 mode 引用位置
+                    if (this.visitHigherOrderMode(arg)) continue
+                    this.visitInstRef(arg)
                 }
-            } else if (!isVariable(param)) {
-                this.visitTypeRef(param)
             }
+        } else if (!isVariable(param)) {
+            this.visitTypeRef(param)
         }
     }
     addReference(term: Term) {
@@ -1746,7 +1757,7 @@ export class Visitor {
     // 本地 this.types 与跨模块 exportManager 都查。非同义词原样返回。
     private resolveSynonym(t: MerType): MerType {
         if (t.kind !== 'ctor') return t
-        const ti = this.types.get(keyOfTypeCtor(t.ctor)) ?? exportManager.lookupType(keyOfTypeCtor(t.ctor))
+        const ti = this.types.get(keyOfTypeCtor(t.ctor)) ?? this.exportManager.lookupType(keyOfTypeCtor(t.ctor))
         if (!ti || !ti.body) return t
         const subst = new Map<string, MerType>()
         for (let i = 0; i < ti.params.length; i++) {
@@ -1769,16 +1780,16 @@ export class Visitor {
         for (const ti of this.types.values()) collectConstrs(ti)
         // 跨模块：类型上下文明确时，纳入导入模块里同名同元数的类型构造子
         if (expCtor) {
-            for (const ti of exportManager.allTypeInfos()) {
+            for (const ti of this.exportManager.allTypeInfos()) {
                 if (ti.ctor.name === expCtor.name && ti.ctor.arity === expCtor.arity) collectConstrs(ti)
             }
         }
         const localFunc = this.funcs.get(keyOf(name, arity))
         // 限定名 M.f(...)：按限定模块精确查签名（钉死模块，无重载歧义）
         const qualFunc = term.qualified
-            ? moduleManager.get(term.qualified)?.visitResult?.funcs.get(keyOf(name, arity))
+            ? this.moduleManager.get(term.qualified)?.visitResult?.funcs.get(keyOf(name, arity))
             : undefined
-        const crossFunc = qualFunc ?? exportManager.lookupFunc(name, arity)
+        const crossFunc = qualFunc ?? this.exportManager.lookupFunc(name, arity)
 
         let chosenCI: ConsInfo | undefined
         let chosenFunc: FuncInfo | undefined
@@ -1884,14 +1895,14 @@ export class Visitor {
         // `:- pred p(list(T)::out)` 配 `p(!List)`）。两种元数都查一次，兼容这种写法。
         const aAlt = typeof termOrName === 'string' ? a : termOrName.arity
         if (typeof termOrName !== 'string' && termOrName.qualified) {
-            const doc = moduleManager.get(termOrName.qualified)
+            const doc = this.moduleManager.get(termOrName.qualified)
             const sig = doc?.visitResult?.funcs.get(keyOf(name, a)) ?? doc?.visitResult?.funcs.get(keyOf(name, aAlt))
                 ?? doc?.visitResult?.preds.get(keyOf(name, a)) ?? doc?.visitResult?.preds.get(keyOf(name, aAlt))
             if (sig) return sig
         }
         return this.funcs.get(keyOf(name, a)) ?? this.funcs.get(keyOf(name, aAlt))
             ?? this.preds.get(keyOf(name, a)) ?? this.preds.get(keyOf(name, aAlt))
-            ?? exportManager.lookupFunc(name, a) ?? exportManager.lookupFunc(name, aAlt)
+            ?? this.exportManager.lookupFunc(name, a) ?? this.exportManager.lookupFunc(name, aAlt)
     }
     private varKey(term: Term): string {
         if (['!/1', '!./1', '!:/1'].includes(term.nameArity)) {

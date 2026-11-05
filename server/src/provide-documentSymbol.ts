@@ -2,15 +2,15 @@ import { CancellationToken, DocumentSymbol, DocumentSymbolParams, SymbolInformat
 import { semanticNameArityOf, sleep } from './utils'
 import { termRange, StartEndTokenToRange, Term } from './term'
 import { stream } from './stream'
-import { DefaultMercuryDocuments, mercuryDocuments } from './document-manager'
 import { URI } from 'vscode-uri'
+import type { MercuryServices } from './services'
 import { SemanticType } from './document-visitor'
 import { checkCancel } from './promise-util'
 import { MultiMap } from './multimap'
 type a=1;
-export async function DocumentSymbolProvider(params: DocumentSymbolParams,cancelToken:CancellationToken) {
+export async function DocumentSymbolProvider(services: MercuryServices, params: DocumentSymbolParams,cancelToken:CancellationToken) {
     let uri  = params.textDocument.uri;
-    let document =mercuryDocuments.getOrCreateDocument(URI.parse(uri))
+    let document =services.documents.getOrCreateDocument(URI.parse(uri))
     let symbols :DocumentSymbol[]=[];
     while(!document.visitResult){
         await sleep(10)

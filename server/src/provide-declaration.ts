@@ -2,13 +2,12 @@ import { DeclarationParams, Location } from 'vscode-languageserver'
 import {  sameArity, sameSemanticType, sleep, termTokenRange } from './utils'
 import { Term, termRange } from './term'
 import { stream } from './stream'
-import { DefinitionProvider, findAtTextDocumentPositionTerm, uriTerm } from './provide-definition'
-import { moduleManager } from './document-moduleManager'
-import { mercuryDocuments } from './document-manager'
+import { findAtTextDocumentPositionTerm, uriTerm } from './provide-definition'
 import { URI } from 'vscode-uri'
+import type { MercuryServices } from './services'
 
-export async function DeclarationProvider(params:DeclarationParams) {
-    let uriTerm = await findAtTextDocumentPositionTerm(params)
+export async function DeclarationProvider(services: MercuryServices, params:DeclarationParams) {
+    let uriTerm = await findAtTextDocumentPositionTerm(services, params)
     if(!uriTerm)
         return 
     let term = uriTerm.term
@@ -19,7 +18,7 @@ export async function DeclarationProvider(params:DeclarationParams) {
     }
     
     if(semanticType=="module"){
-        let doc = moduleManager.get(term);
+        let doc = services.moduleManager.get(term);
         if(!doc)
             return []
         let defTerm = doc.visitResult!.module!
@@ -28,7 +27,7 @@ export async function DeclarationProvider(params:DeclarationParams) {
     }
     /* 如果有module属性 在 module里查找 */
     if(term.qualified){
-        let doc  =  moduleManager.get(term.qualified)
+        let doc  =  services.moduleManager.get(term.qualified)
         if(!doc)
             return [];
         let uri = doc.uri
@@ -41,7 +40,7 @@ export async function DeclarationProvider(params:DeclarationParams) {
     }
     /* 在本文件查找 */
     let uri = uriTerm.uri;
-    let doc  = mercuryDocuments.getOrCreateDocument(uri);
+    let doc  = services.documents.getOrCreateDocument(uri);
     let candidates = doc.visitResult!.declaration.get(term.name);
     let res = stream(candidates)
         .filter(x=>sameArity(x,term))
@@ -52,7 +51,7 @@ export async function DeclarationProvider(params:DeclarationParams) {
 
     /**如果本文件没查找到 在导入的文件里找 */
     // res = stream(doc.visitResult!.imports)
-    //     .map(x=>moduleManager.get(x))
+    //     .map(x=>services.moduleManager.get(x))
     //     .nonNullable()
     //     .map(targetDoc=>targetDoc.visitResult?.exports)
     //     .nonNullable()

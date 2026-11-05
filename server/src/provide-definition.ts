@@ -3,28 +3,28 @@ import { sameArity, sleep, termTokenRange } from './utils'
 import { Term, search, termRange } from './term'
 import { DefTerm, Document } from './document'
 import { EMPTY_STREAM, Stream, stream } from './stream'
-import { MercuryDocument, mercuryDocuments } from './document-manager'
+import { MercuryDocument } from './document-manager'
 import { URI } from 'vscode-uri'
-import { moduleManager, exportManager } from './document-moduleManager'
+import type { MercuryServices } from './services'
 
-export async function DefinitionProvider(params:DefinitionParams):Promise<Location[]> {
+export async function DefinitionProvider(services: MercuryServices, params:DefinitionParams):Promise<Location[]> {
     // 先找到指定位置的term 
-    let termAndUri = await findAtTextDocumentPositionTerm(params);
+    let termAndUri = await findAtTextDocumentPositionTerm(services, params);
     if(!termAndUri) return []
-    return findDefTerms(termAndUri)
+    return findDefTerms(services, termAndUri)
         .map(uriTermToLocation).toArray()
 }
 
-export async function TypeDefinitionProvider(params: TypeDefinitionParams): Promise<Location[]> {
-    const termAndUri = await findAtTextDocumentPositionTerm(params)
+export async function TypeDefinitionProvider(services: MercuryServices, params: TypeDefinitionParams): Promise<Location[]> {
+    const termAndUri = await findAtTextDocumentPositionTerm(services, params)
     if (!termAndUri) return []
 
     const { term, uri } = termAndUri
-    const document = mercuryDocuments.getOrCreateDocument(uri)!
+    const document = services.documents.getOrCreateDocument(uri)!
 
     // If the term is a type or constructor reference, navigate to its definition
     if (term.semanticType && ['type', 'constructor'].includes(term.semanticType)) {
-        return findDefTerms(termAndUri)
+        return findDefTerms(services, termAndUri)
             .filter(uriTerm => uriTerm.term.semanticType === 'type' || uriTerm.term.semanticType === 'constructor')
             .map(uriTermToLocation)
             .toArray()
@@ -42,7 +42,7 @@ export async function TypeDefinitionProvider(params: TypeDefinitionParams): Prom
                 semanticArity: typeCtor.arity,
                 semanticType: 'type',
             }
-            return findDefTerms({ term: typeTerm as Term, uri })
+            return findDefTerms(services, { term: typeTerm as Term, uri })
                 .filter(uriTerm => uriTerm.term.semanticType === 'type')
                 .map(uriTermToLocation)
                 .toArray()
@@ -57,10 +57,10 @@ export async function TypeDefinitionProvider(params: TypeDefinitionParams): Prom
 //     let defterm2 = findDefinitionTerm('pred',term,document)
 //     return defterm1.concat(defterm2)
 // }
-function findDefinitionTerm(term:Term,document:MercuryDocument){
+function findDefinitionTerm(services: MercuryServices, term:Term,document:MercuryDocument){
     // term qualified
     if(term.qualified){
-        let doc =moduleManager.get(term.qualified)
+        let doc =services.moduleManager.get(term.qualified)
         if(!doc) return stream([]);
         let res = findDefTermInThisDocument(term,doc)
         return res
@@ -70,7 +70,7 @@ function findDefinitionTerm(term:Term,document:MercuryDocument){
     if (!defs1.isEmpty())
         return defs1;
     // 在本文件没找到 在其他文件里查找
-    let defs2 = findDefTermInOtherDocument(term,document)
+    let defs2 = findDefTermInOtherDocument(services, term,document)
     return defs2;
 }
 
@@ -107,11 +107,11 @@ export function defKindsForRef(refType?: string): string[] | undefined {
         default: return undefined
     }
 }
-function findDefTermInOtherDocument(term: Term, document: MercuryDocument){
+function findDefTermInOtherDocument(services: MercuryServices, term: Term, document: MercuryDocument){
     // 对于 type 和 constructor，使用 exportManager 进行全局查找
     // 因为它们经常通过多层 import 传播
     if (term.semanticType === 'type' || term.semanticType === 'constructor') {
-        const exports = exportManager.get(term.name)
+        const exports = services.exportManager.get(term.name)
         if (!exports) return stream([])
 
         const defKinds = defKindsForRef(term.semanticType)
@@ -122,7 +122,7 @@ function findDefTermInOtherDocument(term: Term, document: MercuryDocument){
                 // exportTerm.qualified 指向所属模块，从 moduleManager 获取文档
                 const moduleTerm = exportTerm.qualified
                 if (!moduleTerm) return null
-                const doc = moduleManager.get(moduleTerm)
+                const doc = services.moduleManager.get(moduleTerm)
                 if (!doc) return null
                 return uriTerm.create(doc.uri, exportTerm)
             })
@@ -136,7 +136,7 @@ function findDefTermInOtherDocument(term: Term, document: MercuryDocument){
     }
 
     let res = stream(imports)
-    .map(x => moduleManager.get(x))
+    .map(x => services.moduleManager.get(x))
     .nonNullable()
     .flatMap(doc=>findDefTermInThisDocument(term,doc))
 
@@ -161,9 +161,9 @@ export function uriTermToLocation(uriTerm:uriTerm){
     )
 }
 
-export  function findDefTerms(params:uriTerm):Stream<uriTerm> {
+export  function findDefTerms(services: MercuryServices, params:uriTerm):Stream<uriTerm> {
     let {term,uri} = params;
-    let document  = mercuryDocuments.getOrCreateDocument(uri)!;
+    let document  = services.documents.getOrCreateDocument(uri)!;
     switch (term.semanticType!) {
         case 'variable':{
             // 在 variable所在的clause里查找
@@ -184,12 +184,12 @@ export  function findDefTerms(params:uriTerm):Stream<uriTerm> {
         case 'instance':
         case 'mutable':
         case 'operator':{
-            return findDefinitionTerm(term,document);
+            return findDefinitionTerm(services, term,document);
 
         }
 
         case 'module':{
-            let document = moduleManager.get(term);
+            let document = services.moduleManager.get(term);
             if(!document)
                 return stream([]);
             let module = document.visitResult?.module
@@ -205,18 +205,18 @@ export  function findDefTerms(params:uriTerm):Stream<uriTerm> {
             // 数据/表达式位置的 functor（semanticType 未标注，如 `version_array.init(...)`、
             // 构造子引用）：解析层无法区分 func 调用 / 构造子 / pred 引用，
             // 不限类别，按名字与语义元数匹配 definition
-            return findDefinitionTerm(term, document);
+            return findDefinitionTerm(services, term, document);
         }
     }
 }
 
-export async function findAtTextDocumentPositionTerm(params: TextDocumentPositionParams){
+export async function findAtTextDocumentPositionTerm(services: MercuryServices, params: TextDocumentPositionParams){
     let pos = params.position;
     let uri = URI.parse(params.textDocument.uri);
-    while( !mercuryDocuments.getOrCreateDocument(uri)){
+    while( !services.documents.getOrCreateDocument(uri)){
         await sleep(100);
     }
-    let document = mercuryDocuments.getOrCreateDocument(uri)!
+    let document = services.documents.getOrCreateDocument(uri)!
     let rootNode =  document.parseResult.value 
     let term = search(rootNode,pos);
     if (term) return{

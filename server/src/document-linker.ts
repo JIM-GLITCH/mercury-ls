@@ -1,8 +1,7 @@
 import { CancellationToken, Diagnostic, DiagnosticSeverity } from 'vscode-languageserver'
 import { MercuryDocument } from './document-manager'
-import { stream } from './stream'
-import { equalQualified, exportManager, moduleManager } from './document-moduleManager'
 import { label, SemanticType, VisitResult } from './document-visitor'
+import type { MercuryServices } from './services'
 import { Term } from './term'
 import { sameArity } from './utils'
 import { interruptAndCheck } from './promise-util'
@@ -28,6 +27,7 @@ export interface Linker {
 }
 
 export class DefaultLinker implements Linker{
+    constructor(protected readonly services: MercuryServices) {}
     errors = [] as Diagnostic[]
     async link(document: MercuryDocument, cancelToken:CancellationToken ) {
         this.errors= []
@@ -65,13 +65,13 @@ export class DefaultLinker implements Linker{
             ...vr.declaration.get(name),
         ]
         if (ref.qualified) {
-            const targetDoc = moduleManager.get(ref.qualified)
+            const targetDoc = this.services.moduleManager.get(ref.qualified)
             if (targetDoc?.visitResult) {
                 candidates = candidates.concat(this.lookupCandidates(targetDoc.visitResult, name))
             }
         } else {
             // 全局导出索引：各模块 interface 段声明的符号，按名字直接取候选
-            candidates = candidates.concat(exportManager.get(name) as Term[])
+            candidates = candidates.concat(this.services.exportManager.get(name) as Term[])
         }
         const kinds = new Set(
             candidates
@@ -98,4 +98,3 @@ export class DefaultLinker implements Linker{
     }
     
 }
-export let linker = new DefaultLinker()

@@ -1,4 +1,3 @@
-class DeafultWoekspaceManager {
-    
+export class DeafultWoekspaceManager {
+
 }
-export let workspaceManager = new DeafultWoekspaceManager;

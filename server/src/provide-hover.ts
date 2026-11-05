@@ -1,15 +1,14 @@
 import { Hover, HoverParams, MarkupContent } from 'vscode-languageserver'
 import { semanticNameArityOf } from './utils'
 import { search, termRange } from './term'
-import { mercuryDocuments } from './document-manager'
 import { URI } from 'vscode-uri'
 import { merTypeToString, keyOf } from './document-type'
-import { exportManager } from './document-moduleManager'
+import type { MercuryServices } from './services'
 
-export async function HoverProvider(params:HoverParams) {
+export async function HoverProvider(services: MercuryServices, params:HoverParams) {
     let pos = params.position;
     let uri = params.textDocument.uri;
-    let doc = mercuryDocuments.getOrCreateDocument(URI.parse(uri));
+    let doc = services.documents.getOrCreateDocument(URI.parse(uri));
     let  term  = search(doc.parseResult.value,pos)
     if(!term)
         return 
@@ -64,7 +63,7 @@ export async function HoverProvider(params:HoverParams) {
             // 本模块优先；跨模块引用（uint.cast_to_int 等）落全局导出索引
             const fi = doc.visitResult?.funcs.get(keyOf(term.name, term.semanticArity))
                 ?? doc.visitResult?.preds.get(keyOf(term.name, term.semanticArity))
-                ?? exportManager.lookupFunc(term.name, term.semanticArity)
+                ?? services.exportManager.lookupFunc(term.name, term.semanticArity)
             if (fi) {
                 const args = fi.argTypes.map(merTypeToString).join(', ')
                 const lines = [term.semanticType === 'func'

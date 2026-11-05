@@ -1,9 +1,12 @@
-import { describe, it, expect } from 'vitest'
+import { beforeEach, describe, it, expect } from 'vitest'
 import { URI } from 'vscode-uri'
 import { Visitor } from '../document-visitor'
-import { exportManager, moduleManager } from '../document-moduleManager'
-import { linker } from '../document-linker'
-import { mercuryDocumentFactory, mercuryDocuments } from '../document-manager'
+import { createMercuryServices, type MercuryServices } from '../services'
+
+let services: MercuryServices
+beforeEach(() => {
+  services = createMercuryServices()
+})
 
 function collectTerms(root: any, nameArity: string): any[] {
   const out: any[] = []
@@ -27,15 +30,15 @@ describe('cross-module assoc_list with split pair module + recursive call', () =
   it('infers [|]/2, -/2 as constructors and K typed when assoc_list/pair are separate imported modules', async () => {
     const mk = async (src: string, name: string) => {
       const uri = URI.parse(`file:///${name}.m`)
-      const doc = mercuryDocumentFactory.fromString(src, uri)
-      mercuryDocuments.addDocument(doc)
-      await new Visitor().visit(doc, {
+      const doc = services.documentFactory.fromString(src, uri)
+      services.documents.addDocument(doc)
+      await new Visitor(services).visit(doc, {
         isCancellationRequested: false,
         onCancellationRequested: () => undefined,
       } as any)
       const mod = doc.visitResult!.module
-      if (mod) moduleManager.set(mod, doc)
-      exportManager.set(doc)
+      if (mod) services.moduleManager.set(mod, doc)
+      services.exportManager.set(doc)
       return doc
     }
     // pair 在独立模块
@@ -68,7 +71,7 @@ describe('cross-module assoc_list with split pair module + recursive call', () =
       '    map_values_only(P, KVs0, KVs).\n',
       'm',
     )
-    await linker.link(docM, {
+    await services.linker.link(docM, {
       isCancellationRequested: false,
       onCancellationRequested: () => undefined,
     } as any)

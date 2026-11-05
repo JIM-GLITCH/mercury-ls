@@ -5,7 +5,7 @@ import { Term } from './term'
 import { FuncInfo, TypeInfo, keyOf, keyOfTypeCtor } from './document-type'
 
 
-class ModuleManager {
+export class ModuleManager {
     moduleMap = new MultiMap<string,MercuryDocument>
     get(term:Term){
         let candidates = this.moduleMap.get(term.name)
@@ -34,14 +34,12 @@ export function equalQualified(term: Term, targetTerm: Term):boolean {
     }
     return true
 }
-export let moduleManager =  new ModuleManager()
-
 /**
  * 全局导出符号索引：各模块 `:- interface.` 段声明的符号（visitor 的 exports，
  * term.qualified 指向所属模块）。供 linker 按名字直接取候选，免去逐个
  * import 模块查询。文档重建/删除时需同步 set/delete。
  */
-class ExportManager {
+export class ExportManager {
     exportMap = new MultiMap<string, Term>()
     private byDoc = new Map<MercuryDocument, Term[]>()
     // 跨模块类型推断用：类型构造子表 + 函数/谓词签名表
@@ -100,4 +98,3 @@ class ExportManager {
         return this.typeMap.values()
     }
 }
-export let exportManager = new ExportManager()
