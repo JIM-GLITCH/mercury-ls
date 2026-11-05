@@ -1,6 +1,6 @@
 {
 	"name": "mercury-ls",
-	"version": "0.0.13",
+	"version": "0.0.14",
 	"author": "lilr",
 	"repository": {
 		"type": "git",
@@ -72,7 +72,9 @@
 		"vscode": "^1.63.0"
 	},
 	"keywords": [
-		"multi-root ready"
+		"mercury",
+		"mercurylang",
+		"mercury language server"
 	],
 	"license": "MIT",
 	"publisher": "lilr",
