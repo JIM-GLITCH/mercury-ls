@@ -1,6 +1,6 @@
 import { Location, ReferenceParams } from 'vscode-languageserver'
 import { semanticArityOf, sleep } from './utils'
-import { Term, search, termRange } from './term'
+import { FieldAccessInfo, Term, search, termRange } from './term'
 import { MercuryDocument } from './document-manager'
 import { equalQualified } from './document-moduleManager'
 import { URI } from 'vscode-uri'
@@ -82,12 +82,52 @@ function visibleRef(refTerm: Term, termModule: Term | undefined, doc: MercuryDoc
     if (equalQualified(vr.module, termModule)) return true
     return (vr.imports ?? []).some(imp => equalQualified(imp, termModule))
 }
+// 记录语法 `^` 字段说明符的引用名（派生规则见 term.ts 的 FieldAccessInfo）：
+// 在 `^ elem(I)` 上是 elem；在 `'elem :='` 定义上要反推回 elem；
+// 在 elem/2 选择函数或 `elem :: T` 字段标签上就是 elem 本身。
+function fieldRefBase(term: Term): string | undefined {
+    if (term.fieldAccess) return term.fieldAccess.base
+    if (term.name.endsWith(' :=')) return term.name.slice(0, -3)
+    if (term.semanticType === 'func' || term.semanticType === 'fieldname') return term.name
+    return undefined
+}
+function matchesFieldRef(term: Term, fs: FieldAccessInfo): boolean {
+    if (term.fieldAccess) return fs.base === term.fieldAccess.base
+    if (term.name.endsWith(' :='))
+        return fs.updateName === term.name && fs.updateArity === semanticArityOf(term)
+    if (term.semanticType === 'fieldname') return fs.base === term.name
+    if (term.semanticType === 'func')
+        return fs.selectionName === term.name && fs.selectionArity === semanticArityOf(term)
+    return false
+}
 function findReferences(services: MercuryServices, term:Term, termModule:Term|undefined, refs:Location[]){
+    const seen = new Set<string>()
+    const push = (doc: MercuryDocument, refTerm: Term) => {
+        const uri = doc.uri.toString()
+        const range = termRange(refTerm)
+        const key = `${uri}:${range.start.line}:${range.start.character}`
+        if (seen.has(key)) return
+        seen.add(key)
+        refs.push({uri, range})
+    }
     for (const doc of services.documents.all) {
         for (const refTerm of doc.visitResult?.reference.get(term.name)??[]) {
             if(semanticArityOf(refTerm)!=semanticArityOf(term)) continue;
             if(!visibleRef(refTerm, termModule, doc)) continue;
-            refs.push({uri:doc.uri.toString(),range:termRange(refTerm)})
+            push(doc, refTerm)
+        }
+    }
+    // 语法糖侧：field specifier `^ elem(...)` 与它展开成的 field access function
+    // 名字不同、元数不同，普通按名+元数查找搜不到，这里按派生关系补上
+    const base = fieldRefBase(term)
+    if (!base) return
+    for (const doc of services.documents.all) {
+        for (const refTerm of (doc.visitResult?.reference.get(base) ?? []) as Term[]) {
+            const fs: FieldAccessInfo | undefined = refTerm.fieldAccess
+            if (!fs || fs.base !== base) continue
+            if (!matchesFieldRef(term, fs)) continue
+            if(!visibleRef(refTerm, termModule, doc)) continue;
+            push(doc, refTerm)
         }
     }
 }

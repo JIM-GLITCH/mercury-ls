@@ -1947,4 +1947,51 @@ describe('hover shows inferred types', () => {
     expect(typedAsInt('Y').length).toBeGreaterThan(0)
     expect(typedAsInt('Z').length).toBeGreaterThan(0)
   })
+
+  it('infers state-variable accumulators and higher-order args from a polymorphic pred signature', async () => {
+    // 模拟 mercury/library/array.m 的 generate_foldl2：
+    //   :- pred generate_foldl2(int, pred(int, T, A, A, B, B), array(T), A, A, B, B).
+    //   generate_foldl2(Size, GenPred, Array, !AccA, !AccB) :- ...
+    // 头里 !AccA/!AccB 各占两个签名字段，高阶调用 GenPred(0, E, !AccA, !AccB) 亦然。
+    // 修复前：字段错位 + fresh 类型变量覆盖具名类型变量 → GenPred/AccA/AccB 显示 unknown。
+    const src = [
+      ':- module m.',
+      ':- interface.',
+      ':- pred generate_foldl2(int, pred(int, T, A, A, B, B), array(T), A, A, B, B).',
+      ':- pred generate_foldl2_2(int, int, pred(int, T, A, A, B, B), array(T), array(T), A, A, B, B).',
+      ':- end_module m.',
+      ':- implementation.',
+      'generate_foldl2(Size, GenPred, Array, !AccA, !AccB) :-',
+      '    GenPred(0, FirstElem, !AccA, !AccB),',
+      '    Array0 = unsafe_init(Size, FirstElem, 0),',
+      '    generate_foldl2_2(1, Size, GenPred, Array0, Array, !AccA, !AccB).',
+    ].join('\n')
+    const doc = await visitDoc(src, URI.parse('file:///hover-foldl2.m'))
+    const inferred = doc.visitResult!.inferred
+    const typesOf = (name: string) =>
+      [...inferred.entries()]
+        .filter(([t]: any) => {
+          const key = ['!/1', '!./1', '!:/1'].includes(t.nameArity) ? t.args[0]?.name : t.name
+          return key === name && (t.syntaxType === 'variable' || ['!/1', '!./1', '!:/1'].includes(t.nameArity))
+        })
+        .map(([, info]: any) => merTypeToString(info.type))
+    const only = (name: string, expected: string) => {
+      const types = typesOf(name)
+      expect(types.length).toBeGreaterThan(0)
+      expect(types.every(t => t === expected)).toBe(true)
+    }
+    only('GenPred', 'pred(int, T, A, A, B, B)')
+    only('AccA', 'A')
+    only('AccB', 'B')
+    only('Array', 'array(T)')
+    only('FirstElem', 'T')
+    // hover 落在 !AccA / !AccB 的内层变量节点上，这些节点也必须带上头签名类型
+    const inner = (name: string) =>
+      [...inferred.entries()]
+        .filter(([t]: any) => t.syntaxType === 'variable' && t.name === name)
+        .map(([, info]: any) => merTypeToString(info.type))
+    expect(inner('AccA').length).toBeGreaterThan(0)
+    expect(inner('AccA')).toContain('A')
+    expect(inner('AccB')).toContain('B')
+  })
 })

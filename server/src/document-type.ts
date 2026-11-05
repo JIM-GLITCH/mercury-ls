@@ -194,7 +194,12 @@ export function unify(a: MerType, b: MerType, subst: Map<string, MerType>): bool
     const b2 = applySubst(b, subst)
     if (a2.kind === 'var' && b2.kind === 'var') {
         if (a2.name === b2.name) return true
-        subst.set(a2.name, b2)
+        // 声明里的类型变量（T/A/B）与推断产生的 fresh 变量（?N）相遇时，
+        // 一律把 fresh 绑定到具名变量，而不是反过来：否则具名变量会被
+        // 覆盖成 ?N，hover 上整片签名都退化成 unknown。
+        const fresh = (name: string) => /^\?\d+$/.test(name)
+        if (!fresh(a2.name) && fresh(b2.name)) subst.set(b2.name, a2)
+        else subst.set(a2.name, b2)
         return true
     }
     if (a2.kind === 'var') {

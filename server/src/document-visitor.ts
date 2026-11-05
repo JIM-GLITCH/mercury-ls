@@ -215,12 +215,14 @@ export class Visitor {
             }
             case "=^/2":{
                 this.visitDataTerm(term.args[0]);
-                this.visitFieldList(term.args[1]);
+                this.visitFieldList(term.args[1], 'select');
                 break;
             }
             case ":=/2": {
                 if(nameArity(term.args[0],"^/1")){
-                    this.visitFieldList(term.args[0].args[0])
+                    this.visitFieldList(term.args[0].args[0], 'update')
+                } else {
+                    this.visitDataTerm(term.args[0])
                 }
                 this.visitDataTerm(term.args[1])
                 break
@@ -234,18 +236,6 @@ export class Visitor {
                 this.DcgFixArity(term);
                 this.visitPredRef(term)
         }
-    }
-    visitFieldList(term: Term) {
-        if(nameArity(term,"^/2")){
-            this.visitField(term.args[0])
-            this.visitField(term.args[1])
-        }else{
-            this.visitField(term)
-        }
-    }
-    visitField(term: Term) {
-        fieldTransform(term);
-        label(term,"pred")
     }
     visitDataTerm(term: Term) {
         if(isVariable(term)){
@@ -325,9 +315,10 @@ export class Visitor {
                 if (term.args.length > 1) this.visitDataTerm(term.args[1])
                 break
             case 'record':
-                // 记录语法： ^/2 (字段列表, 数据) 、 :=/2 (变量, 值) 、 =^/2 (数据, 字段列表)
-                this.visitDataTerm(term.args[0])
-                if (term.args.length > 1) this.visitDataTerm(term.args[1])
+                // 记录语法（Mercury: record syntax）：`Term ^ field_list`、
+                // `Term ^ field_list := Value`、DCG 的 `=^` / `^ field_list := Value`。
+                // 字段说明符不是普通 functor，它引用的是 field access function。
+                this.visitRecordSyntax(term)
                 break
             case 'unification':
                 // 项注解： @/2 (Term @ Ann)
@@ -349,6 +340,70 @@ export class Visitor {
                 this.visitDataTerm(term.args[0])
                 if (term.args.length > 1) this.visitDataTerm(term.args[1])
                 break
+        }
+    }
+    // 记录语法（Mercury reference manual §2.15.2 Record syntax）：
+    // `Term ^ field_list` 是 field selection，`Term ^ field_list := V` 是 field update。
+    // field specifier `field/N` 要求可见的 field selection function `field/(N+1)`，
+    // 更新式还要求 field update function `'field :='/(N+2)`。这里按该规则把
+    // 字段说明符索引成函数引用，并记录派生名字/元数供定义与引用互查。
+    private visitRecordSyntax(term: Term, role: 'select' | 'update' = 'select') {
+        switch (term.nameArity) {
+            case '^/2':
+                // args[0] 是数据项，args[1] 是字段列表（链式的 ^/2 也走这里）
+                if (term.args[0]?.nameArity === '^/2') this.visitRecordSyntax(term.args[0], role)
+                else this.visitDataTerm(term.args[0])
+                this.visitFieldList(term.args[1], role)
+                return
+            case ':=/2':
+                // `Term ^ field_list := V` / DCG `^ field_list := V`
+                this.visitRecordSyntax(term.args[0], 'update')
+                this.visitDataTerm(term.args[1])
+                return
+            case '=^/2':
+                this.visitDataTerm(term.args[0])
+                this.visitFieldList(term.args[1], role)
+                return
+            case '^/1':
+                // DCG 的 `^ field_list`
+                this.visitFieldList(term.args[0], 'update')
+                return
+            default:
+                this.visitDataTerm(term.args[0])
+                if (term.args.length > 1) this.visitDataTerm(term.args[1])
+        }
+    }
+    // 字段列表：`field` 或 `field1 ^ field2`；逐个字段说明符建索引
+    private visitFieldList(term: Term, role: 'select' | 'update' = 'select') {
+        if (!term) return
+        if (term.nameArity === '^/2' || term.nameArity === '^/1') {
+            for (const arg of term.args) this.visitFieldList(arg, role)
+            return
+        }
+        this.visitFieldSpecifier(term, role)
+    }
+    private visitFieldSpecifier(term: Term, role: 'select' | 'update') {
+        if (isVariable(term)) {
+            this.visitVariable(term)
+            return
+        }
+        const head = this.visitQualifiedTerm(term)
+        const n = head.arity
+        // 语义实体是 field access function（不是构造子字段标签 fieldname）
+        label(head, 'func')
+        head.semanticArity = n + 1
+        head.fieldAccess = {
+            base: head.name,
+            specArity: n,
+            role,
+            selectionName: head.name,
+            selectionArity: n + 1,
+            updateName: head.name + ' :=',
+            updateArity: n + 2,
+        }
+        this.addReference(head)
+        for (const arg of head.args ?? []) {
+            if (!isVariable(arg)) this.visitDataTerm(arg)
         }
     }
     visitExpliciType(term: Term) {
@@ -1506,6 +1561,22 @@ export class Visitor {
             if (!this.varMode.has(key)) this.varMode.set(key, mode)
         }
     }
+    // 状态变量 !X 在解析树里只占一个参数节点，语义上却对应签名的两个字段
+    //（!.X / !:X）；!.X、!:X 各占一个。按语义宽度对齐，否则 `p(A, B, C, !X, !Y)`
+    // 会把 !Y 错对到第 4 个签名字段（推成 X 的类型）。
+    private argWidth(term: Term): number {
+        return term.nameArity === '!/1' ? 2 : 1
+    }
+    // 按签名字段对齐实参：!X 吃掉两个字段但只推断一次（两个字段类型相同）
+    private inferSignatureArgs(args: Term[], sig: FuncInfo) {
+        const argTypes = sig.argTypes.map(a => applySubst(a, this.subst))
+        let ti = 0
+        for (const arg of args) {
+            this.markVarMode(arg, sig.argModes?.[ti] ?? 'in')
+            this.inferTerm(arg, argTypes[ti])
+            ti += this.argWidth(arg)
+        }
+    }
     // 头签名 → 头参数类型/mode（状态变量 !X / !.X / !:X 视为同一变量 X）
     private inferHead(head: Term) {
         // 带体的函数子句 `f(A1..An) = R :- Body`：头是 =(f(A1..An), R)，
@@ -1514,11 +1585,7 @@ export class Visitor {
             const call = head.args[0]
             const sig = this.signatureOf(call)
             if (sig) {
-                const argTypes = sig.argTypes.map(a => applySubst(a, this.subst))
-                for (let i = 0; i < call.args.length; i++) {
-                    this.markVarMode(call.args[i], sig.argModes?.[i] ?? 'in')
-                    this.inferTerm(call.args[i], argTypes[i])
-                }
+                this.inferSignatureArgs(call.args, sig)
                 this.markVarMode(head.args[1], sig.resultMode ?? 'out')
                 if (sig.resultType) this.inferTerm(head.args[1], sig.resultType)
                 return
@@ -1529,11 +1596,7 @@ export class Visitor {
         }
         const sig = this.signatureOf(head)
         if (!sig) return
-        const argTypes = sig.argTypes.map(a => applySubst(a, this.subst))
-        for (let i = 0; i < head.args.length; i++) {
-            this.markVarMode(head.args[i], sig.argModes?.[i] ?? 'in')
-            this.inferTerm(head.args[i], argTypes[i])
-        }
+        this.inferSignatureArgs(head.args, sig)
     }
     // 目标遍历（goal 位置：调用 p(args) / 统一 X = rhs）
     private inferGoal(term: Term) {
@@ -1616,7 +1679,11 @@ export class Visitor {
             if (term.nameArity.startsWith('(/') && term.args.length >= 2 && isVariable(term.args[0])) {
                 const calleeTerm = term.args[0]
                 const callArgs = term.args.slice(1)
-                const n = callArgs.length
+                // !X 在调用里同样占两个高阶参数字段；按语义宽度算 n，否则
+                // pred(int,T,A,A,B,B) 配 P(0, E, !A, !B) 会被判定元数不符，
+                // 退化成全 fresh 的高阶类型并把签名里的类型变量冲成 unknown
+                const widths = callArgs.map(a => this.argWidth(a))
+                const n = widths.reduce((s, w) => s + w, 0)
                 const calleeKey = this.varKey(calleeTerm)
                 const calleeType = this.varTypes.get(calleeKey)
                 const resolved = calleeType ? applySubst(calleeType, this.subst) : undefined
@@ -1629,18 +1696,18 @@ export class Visitor {
                     if (calleeType) unify(calleeType, freshHo, this.subst)
                     else { const v: MerType = { kind: 'var', name: this.freshVar() }; this.varTypes.set(calleeKey, v); unify(v, freshHo, this.subst) }
                 }
-                for (let i = 0; i < n; i++) this.inferTerm(callArgs[i], hoArgs[i])
+                let ti = 0
+                for (let i = 0; i < callArgs.length; i++) {
+                    this.inferTerm(callArgs[i], hoArgs[ti])
+                    ti += widths[i]
+                }
                 return
             }
             // 非 pred/func（未知标识符）：兜底当数据 functor，安全不抛
             this.inferFunctor(term)
             return
         }
-        const argTypes = sig.argTypes.map(a => applySubst(a, this.subst))
-        for (let i = 0; i < term.args.length; i++) {
-            this.markVarMode(term.args[i], sig.argModes?.[i] ?? 'in')
-            this.inferTerm(term.args[i], argTypes[i])
-        }
+        this.inferSignatureArgs(term.args, sig)
     }
     // 统一目标：rhs 类型需与 lhs 一致；lhs 若已有具体类型（来自头签名）则约束 rhs。
     // 首次出现在绑定位置的变量记子句级 mode out（head 形参已在 inferHead 标记，不会被覆盖）
@@ -1670,8 +1737,12 @@ export class Visitor {
     }
     private pushVarType(term: Term, resolved: MerType) {
         const key = this.varKey(term)
-        const occurrences = term.clause?.varMap.get(key) ?? [term]
+        // 状态变量外层节点（!X / !.X / !:X）不在 varMap 里，parser 只收了内层 X；
+        // 以前只写外层节点，hover 落在内层 X 上就只看到后续推断覆盖出的 unknown。
+        const varMap = term.clause?.varMap ?? this.currentClause?.varMap
+        const occurrences = varMap?.get(key) ?? []
         const info = { type: resolved, mode: this.varMode.get(key) }
+        this.inferred.set(term, info)
         for (const occ of occurrences) this.inferred.set(occ, info)
     }
     // 项/变量 → 类型（数据位置）；状态变量映射到底层变量名
@@ -2022,16 +2093,6 @@ function isLambdaExpr(term: Term) {
         label (term,"lambda")
         return true
     }
-}
-
-function fieldTransform(term: Term) {
-    term.name == term.name + " :=";
-    term.arity +=1
-    updateNameArity(term) 
-}
-
-function updateNameArity(term: Term) {
-    term.nameArity = term.name + "/"+term.arity
 }
 
 export type SemanticType =

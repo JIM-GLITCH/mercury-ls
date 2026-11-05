@@ -19,7 +19,24 @@ type SyntaxType =
     '$rootNode'
 
 
+/**
+ * 记录语法（record syntax）`^` 处的字段说明符（Mercury: field specifier）与
+ * 它展开成的字段访问函数（field access function）的派生名字/元数。
+ * `A ^ elem(I)`     → `elem(I, A)`        （field selection function, N+1）
+ * `A ^ elem(I) := V` → `'elem :='(I, A, V)`（field update function,    N+2）
+ */
+export interface FieldAccessInfo {
+    base: string                       // 字段名 elem
+    specArity: number                  // 字段说明符的参数个数 N
+    role: 'select' | 'update'
+    selectionName: string              // elem
+    selectionArity: number             // N + 1
+    updateName: string                 // elem :=（源码里写作 'elem :='）
+    updateArity: number                // N + 2
+}
+
 export interface Term {
+    fieldAccess?: FieldAccessInfo
     definition?: Term
     qualified?: Term
     /** The container node in the AST; every node except the root node has a container. */
@@ -77,6 +94,7 @@ export interface Term {
     range: Range
 }
 export class TermImpl implements Term {
+    fieldAccess?: FieldAccessInfo
     semanticType?: SemanticType
     semanticArity: number
     nameArity: string

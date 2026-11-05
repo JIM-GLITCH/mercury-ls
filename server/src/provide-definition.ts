@@ -1,5 +1,5 @@
 import { DefinitionParams, Location, TextDocumentPositionParams, TypeDefinitionParams } from 'vscode-languageserver'
-import { sameArity, sleep, termTokenRange } from './utils'
+import { sameArity, semanticArityOf, sleep, termTokenRange } from './utils'
 import { Term, search, termRange } from './term'
 import { DefTerm, Document } from './document'
 import { EMPTY_STREAM, Stream, stream } from './stream'
@@ -161,9 +161,59 @@ export function uriTermToLocation(uriTerm:uriTerm){
     )
 }
 
+/**
+ * 记录语法 `^` 处的字段说明符 → field access function 定义。
+ * Mercury 参考手册 §2.15.2：field specifier `field/N` 展开为
+ * `field/(N+1)`（selection）与 `'field :='/(N+2)`（update）；另外
+ * `field :: Type` 的字段标签（field label）是这些函数的来源。
+ */
+function findFieldAccessDefinitions(
+    services: MercuryServices, term: Term, document: MercuryDocument,
+): Stream<uriTerm> {
+    const spec = term.fieldAccess!
+    const selection = { name: spec.selectionName, arity: spec.selectionArity, kinds: ['func'] }
+    const update = { name: spec.updateName, arity: spec.updateArity, kinds: ['func'] }
+    const label = { name: spec.base, arity: 0, kinds: ['fieldname'] }
+    const queries = spec.role === 'update'
+        ? [update, selection, label]
+        : [selection, update, label]
+    const docs: MercuryDocument[] = [document]
+    for (const imp of document.visitResult?.imports ?? []) {
+        const doc = services.moduleManager.get(imp)
+        if (doc && !docs.includes(doc)) docs.push(doc)
+    }
+    const result: uriTerm[] = []
+    const seen = new Set<string>()
+    const push = (uri: URI, def: Term) => {
+        const key = `${uri.toString()}:${def.token.line}:${def.token.col}`
+        if (seen.has(key)) return
+        seen.add(key)
+        result.push(uriTerm.create(uri, def))
+    }
+    for (const q of queries) {
+        for (const doc of docs) {
+            const vr = doc.visitResult
+            if (!vr) continue
+            for (const def of [...vr.definition.get(q.name), ...vr.declaration.get(q.name)]) {
+                if (semanticArityOf(def) !== q.arity) continue
+                if (!q.kinds.includes(def.semanticType ?? '')) continue
+                push(doc.uri, def)
+            }
+        }
+        // 别的模块 interface 段导出的同名函数
+        for (const exp of services.exportManager.get(q.name)) {
+            if (semanticArityOf(exp) !== q.arity || !q.kinds.includes(exp.semanticType ?? '')) continue
+            const doc = exp.qualified ? services.moduleManager.get(exp.qualified) : undefined
+            if (doc) push(doc.uri, exp)
+        }
+    }
+    return stream(result)
+}
+
 export  function findDefTerms(services: MercuryServices, params:uriTerm):Stream<uriTerm> {
     let {term,uri} = params;
     let document  = services.documents.getOrCreateDocument(uri)!;
+    if (term.fieldAccess) return findFieldAccessDefinitions(services, term, document);
     switch (term.semanticType!) {
         case 'variable':{
             // 在 variable所在的clause里查找
