@@ -736,9 +736,6 @@ export class Visitor {
             case "postfix/1":
                 this.visitOperatorDecl(term)
                 break
-            case "<=/2":
-                this.visitDecl(term.args[0])
-                break
             default:
                 break
         }

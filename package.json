@@ -1,6 +1,6 @@
 {
 	"name": "mercury-ls",
-	"version": "0.0.11",
+	"version": "0.0.13",
 	"author": "lilr",
 	"repository": {
 		"type": "git",
@@ -78,7 +78,7 @@
 	"publisher": "lilr",
 	"scripts": {
 		"vscode:prepublish": "npm run compile",
-		"compile": "tsc -b",
+		"compile": "node esbuild.js",
 		"watch": "tsc -b -w",
 		"lint": "eslint ./client/src ./server/src --ext .ts,.tsx",
 		"postinstall": "cd client && npm install && cd ../server && npm install && cd ..",
@@ -86,5 +86,8 @@
 		"test:unit": "vitest run",
 		"test:unit:watch": "vitest"
 	},
-	"type": "module"
+	"type": "module",
+	"dependencies": {
+		"esbuild": "^0.28.2"
+	}
 }
