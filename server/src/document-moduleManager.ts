@@ -34,6 +34,22 @@ export function equalQualified(term: Term, targetTerm: Term):boolean {
     }
     return true
 }
+/** 把模块限定名 Term（可能带 `./2` 链）还原成 `std.array` 这样的点分字符串 */
+export function moduleQualifiedName(term: Term): string {
+    const parts: string[] = []
+    const walk = (t: Term | undefined) => {
+        if (!t) return
+        if (t.nameArity === './2') {
+            walk(t.args[0])
+            walk(t.args[1])
+            return
+        }
+        walk(t.qualified)
+        parts.push(t.name)
+    }
+    walk(term)
+    return parts.join('.')
+}
 /**
  * 全局导出符号索引：各模块 `:- interface.` 段声明的符号（visitor 的 exports，
  * term.qualified 指向所属模块）。供 linker 按名字直接取候选，免去逐个
@@ -86,6 +102,14 @@ export class ExportManager {
     }
     get(name: string): readonly Term[] {
         return this.exportMap.get(name)
+    }
+    /** 某个模块（点分限定名，如 `std.array`）interface 段导出的全部符号 */
+    getByModule(moduleName: string): Term[] {
+        const result: Term[] = []
+        this.exportMap.forEach(t => {
+            if (t.qualified && moduleQualifiedName(t.qualified) === moduleName) result.push(t)
+        })
+        return result
     }
     // 跨模块推断查询
     lookupType(ctorKey: string): TypeInfo | undefined {

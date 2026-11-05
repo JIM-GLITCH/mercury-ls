@@ -7,9 +7,6 @@ import {
     ProposedFeatures,
     InitializeParams,
     DidChangeConfigurationNotification,
-    CompletionItem,
-    CompletionItemKind,
-    TextDocumentPositionParams,
     TextDocumentSyncKind,
     InitializeResult,
     Position,
@@ -85,9 +82,10 @@ function onInitialize(params: InitializeParams) {
     const result: InitializeResult = {
         capabilities: {
             textDocumentSync: TextDocumentSyncKind.Incremental,
-            // Tell the client that this server supports code completion.
+            // 敲下 `.` 时按 `.` 前方的模块名补全其导出符号
             completionProvider: {
-                resolveProvider: true
+                resolveProvider: true,
+                triggerCharacters: ['.']
             },
             hoverProvider:true,
             definitionProvider:true,
@@ -233,41 +231,10 @@ function getDocumentSettings(resource: string): Thenable<ExampleSettings> {
 
 
 
-// This handler provides the initial list of the completion items.
-connection.onCompletion(
-    (_textDocumentPosition: TextDocumentPositionParams): CompletionItem[] => {
-        // The pass parameter contains the position of the text document in
-        // which code complete got requested. For the example we ignore this
-        // info and always provide the same completion items.
-        return [
-            {
-                label: 'TypeScript',
-                kind: CompletionItemKind.Text,
-                data: 1
-            },
-            {
-                label: 'JavaScript',
-                kind: CompletionItemKind.Text,
-                data: 2
-            }
-        ];
-    }
-);
-
-// This handler resolves additional information for the item selected in
-// the completion list.
-connection.onCompletionResolve(
-    (item: CompletionItem): CompletionItem => {
-        if (item.data === 1) {
-            item.detail = 'TypeScript details';
-            item.documentation = 'TypeScript documentation';
-        } else if (item.data === 2) {
-            item.detail = 'JavaScript details';
-            item.documentation = 'JavaScript documentation';
-        }
-        return item;
-    }
-);
+// `module.` 补全：`provide-completion.ts` 里读原始文本取 `.` 前方的 token，
+// 按模块限定名查全局导出索引。走 cancelableRequest 与其它 provider 一致。
+connection.onCompletion(cancelableRequest(services.providers.completion));
+connection.onCompletionResolve(services.providers.completionResolve);
 
 
 

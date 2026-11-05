@@ -26,6 +26,7 @@ import { HoverProvider } from './provide-hover'
 import { DocumentSymbolProvider } from './provide-documentSymbol'
 import { incomingCallsProvider, outgoingCallsProvider, prepareCallHierarchyProvider } from './provide-callHierarchy'
 import { semanticTokensForDocument } from './provide-semantic-tokens'
+import { CompletionProvider, CompletionResolve } from './provide-completion'
 
 /**
  * LSP 输出通道。把 `connection`/状态栏从 document-builder 中抽象出来，
@@ -59,6 +60,8 @@ export type MercuryProviders = {
     incomingCalls: Bound<typeof incomingCallsProvider>
     outgoingCalls: Bound<typeof outgoingCallsProvider>
     semanticTokens: typeof semanticTokensForDocument
+    completion: Bound<typeof CompletionProvider>
+    completionResolve: Bound<typeof CompletionResolve>
     findDefTerms: Bound<typeof findDefTerms>
     findAtTextDocumentPositionTerm: Bound<typeof findAtTextDocumentPositionTerm>
     uriTermToLocation: typeof uriTermToLocation
@@ -95,6 +98,8 @@ function createMercuryProviders(services: MercuryServices): MercuryProviders {
         incomingCalls: params => incomingCallsProvider(services, params),
         outgoingCalls: params => outgoingCallsProvider(services, params),
         semanticTokens: semanticTokensForDocument,
+        completion: params => CompletionProvider(services, params),
+        completionResolve: item => CompletionResolve(services, item),
         findDefTerms: params => findDefTerms(services, params),
         findAtTextDocumentPositionTerm: params => findAtTextDocumentPositionTerm(services, params),
         uriTermToLocation,
