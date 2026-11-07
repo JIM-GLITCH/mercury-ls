@@ -4,7 +4,7 @@ import {
 } from 'vscode-languageserver'
 import { TextDocument } from 'vscode-languageserver-textdocument'
 import { URI } from 'vscode-uri'
-import { moduleQualifiedName } from './document-moduleManager'
+import { moduleQualifiedName } from './document-index'
 import { merTypeToString } from './document-type'
 import type { MercuryServices } from './services'
 import type { Term } from './term'
@@ -68,7 +68,7 @@ function completionKind(term: Term): CompletionItemKind {
 
 /** 用已收集的 func/pred 签名给出补全项的 detail */
 function signatureOf(services: MercuryServices, name: string, arity: number): string | undefined {
-    const fi = services.exportManager.lookupFunc(name, arity)
+    const fi = services.index.lookupFuncAnywhere(name, arity)
     if (!fi) return undefined
     const args = fi.argTypes.map(merTypeToString).join(', ')
     return fi.resultType
@@ -111,7 +111,7 @@ export async function CompletionProvider(
     const q = qualifierBeforeDot(textDocument, params.position)
     if (!q) return []
 
-    const exported = services.exportManager.getByModule(q.moduleName)
+    const exported = services.index.getExportedTermsByModule(q.moduleName)
     // 全局索引尚未收录当前文档时（例如刚打开尚未 build），用本文件的 exports 兜底
     if (exported.length === 0) {
         const own = indexed?.visitResult

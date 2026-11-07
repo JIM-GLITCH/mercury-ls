@@ -200,7 +200,7 @@ goal ---> unify_expr(Ctx, Term, Term, Purity)        % X = Y
 但定义位置唯一（含多处子句定义时按 head 归并）。注意：构造子与 pred/func 调用在解析树层
 **同形**（都是 functor），归类延迟到类型检查/linker 阶段（见 §5.1、§9.1）。
 
-**LS 实现的索引结构**（`document-visitor.ts`，均随 `VisitResult` 输出）：
+**LS 实现的索引结构**（`document-index.ts` 的 `Visitor`，均随 `doc.visitResult` 输出）：
 
 | 索引 | 内容 | 跳转定义 | 查找引用 |
 |---|---|---|---|
@@ -246,7 +246,7 @@ func/pred 签名。由此 `pair` 类型哪怕定义在别的模块，`list(pair(
 重载项误标（无类型上下文的重载项继续走 linker 的类别唯一近似）。
 
 **高阶闭包推断**：`inferTerm` 识别 `func(...) = ...` / `(pred(...) is det)` /
-带 `:- Body` 的闭包（`document-visitor.ts` 的 `inferHigherOrder`）。当闭包作为实参传入、
+带 `:- Body` 的闭包（`document-typeinfer.ts` 的 `inferHigherOrder`）。当闭包作为实参传入、
 其 expected 为 `ho` 类型时，用签名给闭包头绑定变量赋类型并递归推断闭包头/体；
 于是闭包内 `X - Y` 在 `func(A,B)=pair(A,B)` 签名下会被推成 pair 构造子而非减法函数。
 linker 额外消费 `vr.inferred` 中未被索引遍历收集为 reference 的闭包内项，避免漏标
@@ -284,16 +284,15 @@ hover 不显示类型行。**goal 遍历覆盖 if-then-else**：解析树为 `el
 不到 X 的 head 类型而显示 unknown。另外 `inferUnify` 合一后会**刷新**两侧已写入的推断条目
 （先推断一侧可能存了未合一的 stale 类型）。
 
-**构建编排：import 先于 importer 的 visit**（`document-builder.ts` 的 `scanHeader` + `orderByImports`）：
-跨模块推断在 `visit` 阶段从全局 `exportManager` 取导入模块的签名，而 `exportManager.set` 在
-各文档 `visit` 之后才执行。因此构建管线对 visit 阶段按 import 依赖做**拓扑序**——先对所有已
-parse 文档做轻量头扫描（`scanHeader` 从 parse 树抽 `:- module` 名与 `:- import_module` 目标，
-不必完整 visit），再用 `orderByImports` 把 import 目标排在 importer 之前。仅对批次内互相可见
-的依赖边排序；依赖目标不在批次（已构建/外部，签名已在全局单例里）则忽略该边。这样无论文件以
-何种顺序打开，import 的 `(visit + exportManager.set)` 都先于 importer 的 `visit`，跨模块精确
-消歧稳定可用。注：`collectDocuments` 已把 `state < Validated` 的文档拉入批次，故从未构建的
-import 也会进批次并被正确排序；Mercury 的 `import_module` 无环，拓扑序不必迭代（此前称"fixpoint"
-为误称，实为拓扑序 + 失效重链）。
+**构建编排：parse → 全局 index → 推导/qualified → link → validate**（`document-builder.ts`）：
+所有文档先 parse 并做纯索引（Visitor 不再做类型推导），随后一次性把定义、模块依赖与
+interface 段导出标记写入全局符号表 `GlobalIndex`（`document-index.ts`）；之后 `TypeInferer`
+（`document-typeinfer.ts`）才对每个 clause 的 body 做类型推导与名称解析，最后 link / validate。
+因为推导发生在全局符号表齐备之后，签名不再依赖文件访问顺序，原来的 import 拓扑排序
+（`document-order.ts`）与 `ModuleManager` / `ExportManager` 两套全局索引均已移除。
+跨模块可见性由 `GlobalIndex.visibleModules`（沿 import/use 边求闭包，interface 段 import
+可传递）和符号的 `exported` 标记判定；限定名按点分模块名精确查。
+上文 203-275 段的阶段编号、`exportManager` / `moduleManager` 称呼与逐 clause 推断描述均属旧实现，以本节为准。
 
 find references 按**名字 + 语义元数 + 可见性**过滤（Mercury 名字解析规则）：
 限定引用 `M.f` 只保留限定到目标模块的；非限定引用只保留目标模块自身或

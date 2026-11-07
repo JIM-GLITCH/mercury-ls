@@ -4,7 +4,7 @@ import { ParseResult, Parser } from './mercury-parser'
 import { Clause, Term } from './term'
 import { readFileSync } from 'fs'
 import { Stream, stream } from './stream'
-import { VisitResult } from './document-visitor'
+import type { VisitResult } from './document-index'
 import { Diagnostic, Position } from 'vscode-languageserver'
 import type { MercuryServices } from './services'
 

@@ -1,6 +1,6 @@
 import { beforeEach, describe, it, expect } from 'vitest'
 import { URI } from 'vscode-uri'
-import { Visitor } from '../document-visitor'
+import { Visitor } from '../document-index'
 import { createMercuryServices, type MercuryServices } from '../services'
 
 let services: MercuryServices
@@ -37,8 +37,7 @@ describe('cross-module assoc_list with split pair module + recursive call', () =
         onCancellationRequested: () => undefined,
       } as any)
       const mod = doc.visitResult!.module
-      if (mod) services.moduleManager.set(mod, doc)
-      services.exportManager.set(doc)
+      services.index.set(doc)
       return doc
     }
     // pair 在独立模块

@@ -1,11 +1,11 @@
 import { CallHierarchyIncomingCall, CallHierarchyIncomingCallsParams, CallHierarchyItem, CallHierarchyOutgoingCall, CallHierarchyOutgoingCallsParams, CallHierarchyPrepareParams, CancellationToken, SymbolKind } from 'vscode-languageserver'
 import {   semanticNameArityOf, sameArity, sameSemanticType, sleep, termTokenRange, tokenRange } from './utils'
 import { Term, termRange } from './term'
-import { SemanticType } from "./document-visitor"
+import type { SemanticType } from './document-index'
 import { stream } from './stream'
 import { findDefTerms, findAtTextDocumentPositionTerm, uriTerm } from './provide-definition'
 import { MercuryDocument } from './document-manager'
-import { equalQualified } from './document-moduleManager'
+import { equalQualified } from './document-index'
 import { URI } from 'vscode-uri'
 import type { MercuryServices } from './services'
 /**
@@ -121,11 +121,11 @@ function uriTermToCallHierarchyOutgoingCall(services: MercuryServices, uriTerm: 
 }
 
 function findModuleOutgoingCalls(services: MercuryServices, { uri, term}:uriTerm): CallHierarchyOutgoingCall[]  {
-    let document = services.moduleManager.get(term);
+    let document = services.index.getModuleDoc(term);
     if(!document)
         return []
     return stream(document.visitResult?.imports??[])
-        .map(x=>services.moduleManager.get(x)?.visitResult?.module)
+        .map(x=>services.index.getModuleDoc(x)?.visitResult?.module)
         .nonNullable()
         .map(moduleTerm=>uriTermToCallHierarchyOutgoingCall(services, {uri,term:moduleTerm}))
         .nonNullable().toArray()

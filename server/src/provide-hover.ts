@@ -1,5 +1,5 @@
 import { Hover, HoverParams, MarkupContent } from 'vscode-languageserver'
-import { semanticNameArityOf } from './utils'
+import { semanticArityOf, semanticNameArityOf } from './utils'
 import { search, termRange } from './term'
 import { URI } from 'vscode-uri'
 import { merTypeToString, keyOf } from './document-type'
@@ -12,6 +12,7 @@ export async function HoverProvider(services: MercuryServices, params:HoverParam
     let  term  = search(doc.parseResult.value,pos)
     if(!term)
         return 
+    const displayName = term.qualifiedName ?? term.name
     let header: string
     if(term.semanticType){
         switch (term.semanticType){
@@ -25,16 +26,16 @@ export async function HoverProvider(services: MercuryServices, params:HoverParam
             case "instance":
             case "pragma":
             case "operator":
-                header = `(${term.semanticType}) ${semanticNameArityOf(term)}`
+                header = `(${term.semanticType}) ${displayName}/${semanticArityOf(term)}`
                 break ;
             case 'module':
             case "variable":
             case "mutable":
             case "determinism":
-                header = `(${term.semanticType}) ${term.name}`
+                header = `(${term.semanticType}) ${displayName}`
                 break ;
             default:
-                header = `(${term.semanticType}) ${term.name}`
+                header = `(${term.semanticType}) ${displayName}`
         }
     }
     else{
@@ -60,10 +61,7 @@ export async function HoverProvider(services: MercuryServices, params:HoverParam
     let typeStr: string | undefined
     if (term.semanticType !== 'module') {
         if (term.semanticType === 'func' || term.semanticType === 'pred') {
-            // 本模块优先；跨模块引用（uint.cast_to_int 等）落全局导出索引
-            const fi = doc.visitResult?.funcs.get(keyOf(term.name, term.semanticArity))
-                ?? doc.visitResult?.preds.get(keyOf(term.name, term.semanticArity))
-                ?? services.exportManager.lookupFunc(term.name, term.semanticArity)
+            const fi = doc.visitResult?.signatures.get(term)
             if (fi) {
                 const args = fi.argTypes.map(merTypeToString).join(', ')
                 const lines = [term.semanticType === 'func'

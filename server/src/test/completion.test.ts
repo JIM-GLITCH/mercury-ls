@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import { URI } from 'vscode-uri'
-import { Visitor } from '../document-visitor'
+import { Visitor } from '../document-index'
 import { createMercuryServices, type MercuryServices } from '../services'
 
 let services: MercuryServices
@@ -14,9 +14,7 @@ async function mk(src: string, name: string, index = true) {
     isCancellationRequested: false,
     onCancellationRequested: () => undefined,
   } as any)
-  const mod = doc.visitResult!.module
-  if (mod && index) services.moduleManager.set(mod, doc)
-  if (index) services.exportManager.set(doc)
+  if (!index) services.index.delete(doc)
   return doc
 }
 

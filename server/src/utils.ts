@@ -5,6 +5,32 @@ import type { Document } from './document'
 import { RootNode, Term, termRange } from './term'
 import { MercuryDocument } from './document-manager'
 
+/** 把模块限定名 Term（可能带 `./2` 链）还原成 `std.array` 这样的点分字符串 */
+export function moduleQualifiedName(term: Term): string {
+    const parts: string[] = []
+    const walk = (t: Term | undefined) => {
+        if (!t) return
+        if (t.nameArity === './2') {
+            walk(t.args[0])
+            walk(t.args[1])
+            return
+        }
+        walk(t.qualified)
+        parts.push(t.name)
+    }
+    walk(term)
+    return parts.join('.')
+}
+
+/** 模块限定名比较：只写末段模块名时按 qualified 链宽松匹配 */
+export function equalQualified(term: Term, targetTerm: Term): boolean {
+    if (term.name !== targetTerm.name) return false
+    if (targetTerm.qualified && term.qualified) {
+        return equalQualified(targetTerm.qualified, term.qualified)
+    }
+    return true
+}
+
 export function errorToken(message: string, token: Token, ps: { errors: Diagnostic[] }) {
     let range = tokenRange(token);
     ps.errors.push({

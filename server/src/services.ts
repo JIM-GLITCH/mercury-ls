@@ -11,7 +11,8 @@ import {
     DefaultMercuryDocumentFactory, DefaultMercuryDocuments,
     MercuryDocumentFactory, MercuryDocuments,
 } from './document-manager'
-import { ExportManager, ModuleManager } from './document-moduleManager'
+import { GlobalIndex } from './document-index'
+import { TypeInferer } from './document-typeinfer'
 import { DefaultDocumentValidator, DocumentValidator } from './document-validator'
 import { DefaultLinker, Linker } from './document-linker'
 import { DefaultDocumentBuilder } from './document-builder'
@@ -72,8 +73,10 @@ export type MercuryServices = {
     textDocuments: TextDocuments<TextDocument>
     documentFactory: MercuryDocumentFactory
     documents: MercuryDocuments
-    moduleManager: ModuleManager
-    exportManager: ExportManager
+    /** 阶段 2 的全局符号表：定义 / import / 导出标记（也是模块/导出符号的唯一入口） */
+    index: GlobalIndex
+    /** 阶段 3 的类型推导 + 名称解析 */
+    typeInferer: TypeInferer
     linker: Linker
     validator: DocumentValidator
     builder: DefaultDocumentBuilder
@@ -111,8 +114,8 @@ const mercuryServicesModule: Module<MercuryServices> = {
     textDocuments: () => new TextDocuments(TextDocument),
     documentFactory: services => new DefaultMercuryDocumentFactory(services),
     documents: services => new DefaultMercuryDocuments(services),
-    moduleManager: () => new ModuleManager(),
-    exportManager: () => new ExportManager(),
+    index: () => new GlobalIndex(),
+    typeInferer: services => new TypeInferer(services.index),
     linker: services => new DefaultLinker(services),
     validator: () => new DefaultDocumentValidator(),
     builder: services => new DefaultDocumentBuilder(services),

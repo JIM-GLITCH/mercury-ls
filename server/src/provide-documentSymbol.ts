@@ -4,7 +4,7 @@ import { termRange, StartEndTokenToRange, Term } from './term'
 import { stream } from './stream'
 import { URI } from 'vscode-uri'
 import type { MercuryServices } from './services'
-import { SemanticType } from './document-visitor'
+import type { SemanticType } from './document-index'
 import { checkCancel } from './promise-util'
 import { MultiMap } from './multimap'
 type a=1;

@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import { URI } from 'vscode-uri'
-import { Visitor } from '../document-visitor'
+import { Visitor } from '../document-index'
 import { createMercuryServices, type MercuryServices } from '../services'
 import { findDefTerms } from '../provide-definition'
 import { ReferenceProvider } from '../provide-reference'
@@ -106,7 +106,7 @@ describe('record syntax ^ field specifier → field access function indexing', (
       textDocument: { uri: doc.uri.toString() },
       position: termRange(spec).start,
     } as any)
-    expect(hover?.contents?.value).toContain('(func) elem/2')
+    expect(hover?.contents?.value).toContain('(func) m.elem/2')
     expect(hover?.contents?.value).toContain('type elem(')
   })
 

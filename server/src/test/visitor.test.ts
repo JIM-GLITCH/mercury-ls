@@ -1,14 +1,13 @@
 import { beforeEach, describe, it, expect } from 'vitest'
 
 import { Parser } from '../mercury-parser'
-import { Visitor } from '../document-visitor'
+import { Visitor } from '../document-index'
 import { URI } from 'vscode-uri'
 import { TextDocument } from 'vscode-languageserver-textdocument'
 import { sameArity, semanticNameArityOf } from '../utils'
 import { termRange } from '../term'
 import { uriTermToLocation } from '../provide-definition'
 import { createMercuryServices, type MercuryServices } from '../services'
-import { orderByImports, scanHeader } from '../document-order'
 import { merTypeToString } from '../document-type'
 import { modeRefToInsts } from '../document-mode'
 import { semanticTokensForDocument } from '../provide-semantic-tokens'
@@ -892,8 +891,7 @@ describe('goto definition / find references for insts (providers)', () => {
         onCancellationRequested: () => undefined,
       } as any)
       const mod = doc.visitResult!.module
-      if (mod) services.moduleManager.set(mod, doc)
-      services.exportManager.set(doc)
+      services.index.set(doc)
       return doc
     }
     // mint 导出 `-/2` 函数（减法）；mpair 导出 `-/2` 构造子（pair 的 K - V）
@@ -922,8 +920,7 @@ describe('goto definition / find references for insts (providers)', () => {
         onCancellationRequested: () => undefined,
       } as any)
       const mod = doc.visitResult!.module
-      if (mod) services.moduleManager.set(mod, doc)
-      services.exportManager.set(doc)
+      services.index.set(doc)
       return doc
     }
     // mpair 导出类型 pair(K, V) ---> K - V（构造子 `-`/2 在另一模块）
@@ -959,8 +956,7 @@ describe('goto definition / find references for insts (providers)', () => {
         onCancellationRequested: () => undefined,
       } as any)
       const mod = doc.visitResult!.module
-      if (mod) services.moduleManager.set(mod, doc)
-      services.exportManager.set(doc)
+      services.index.set(doc)
       return doc
     }
     await mk(':- module mpair.\n:- interface.\n:- type pair(K, V) ---> K - V.\n:- end_module mpair.\n', 'mpair-direct')
@@ -1097,8 +1093,7 @@ describe('goto definition / find references for insts (providers)', () => {
         onCancellationRequested: () => undefined,
       } as any)
       const mod = doc.visitResult!.module
-      if (mod) services.moduleManager.set(mod, doc)
-      services.exportManager.set(doc)
+      services.index.set(doc)
       return doc
     }
     await mk(
@@ -1149,8 +1144,7 @@ describe('goto definition / find references for insts (providers)', () => {
         onCancellationRequested: () => undefined,
       } as any)
       const mod = doc.visitResult!.module
-      if (mod) services.moduleManager.set(mod, doc)
-      services.exportManager.set(doc)
+      services.index.set(doc)
       return doc
     }
     // va 模块 interface 段导出 empty/0
@@ -1295,8 +1289,7 @@ describe('goto definition / find references for insts (providers)', () => {
       ':- end_module generic_pair.',
       '',
     ].join('\n'), pairUri)
-    services.moduleManager.set(pairDoc.visitResult!.module!, pairDoc)
-    services.exportManager.set(pairDoc)
+    services.index.set(pairDoc)
 
     const useUri = URI.parse('file:///generic-use.m')
     const useDoc = await visitDoc([
@@ -1371,39 +1364,6 @@ describe('goto definition / find references for insts (providers)', () => {
     expect(refs[0].range.start.line).toBe(3)
   })
 
-  it('scanHeader extracts module name and import_module targets', () => {
-    const src = [
-      ':- module muser.',
-      ':- interface.',
-      ':- import_module mpair, mlist.',
-      ':- import_module mset.',
-      ':- end_module muser.',
-    ].join('\n')
-    const h = scanHeader(Parser.parse(src).value as any)
-    expect(h.module).toBe('muser')
-    // 逗号形式 mpair, mlist 与单独 import_module mset 都要抽到
-    expect(h.imports.sort()).toEqual(['mlist', 'mpair', 'mset'])
-  })
-
-  it('orderByImports orders import targets before importers', () => {
-    const docs = [
-      { name: 'muser', imports: ['mpair', 'mlist'] },
-      { name: 'mpair', imports: [] },
-      { name: 'mlist', imports: ['mpair'] },
-      { name: 'orphan', imports: [] },
-    ]
-    const ordered = orderByImports(
-      docs,
-      d => d.name,
-      d => d.imports,
-    )
-    const pos = (n: string) => ordered.findIndex(d => d.name === n)
-    // mpair 必须排在依赖它的 muser / mlist 之前
-    expect(pos('mpair')).toBeLessThan(pos('muser'))
-    expect(pos('mpair')).toBeLessThan(pos('mlist'))
-    // 依赖目标不在批次（如 external）时不影响顺序，orphan 仍出现
-    expect(ordered.map(d => d.name)).toContain('orphan')
-  })
 })
 
 describe('hover shows inferred types', () => {
@@ -1435,7 +1395,7 @@ describe('hover shows inferred types', () => {
       position: termRange(addRef).start,
     } as any)
     const value: string = (hover!.contents as any).value
-    expect(value).toContain('(func) add/2')
+    expect(value).toContain('(func) m.add/2')
     // 第二行：type + 类型签名（不带 mode）；第三行：mode + mode 声明
     expect(value).toContain('type add(int, int) = int')
     expect(value).toContain('mode add(in, in) = (out)')
@@ -1463,11 +1423,11 @@ describe('hover shows inferred types', () => {
     }
     // 类型行 + mode 行（复合 mode in(i_node) 原样渲染；mode 行带 determinism）
     const q = await hoverOf('q/1')
-    expect(q).toContain('(pred) q/1')
+    expect(q).toContain('(pred) m.q/1')
     expect(q).toContain('type q(int)')
     expect(q).toContain('mode q(in(i_node)) is det')
     const f = await hoverOf('f/1')
-    expect(f).toContain('(func) f/1')
+    expect(f).toContain('(func) m.f/1')
     expect(f).toContain('type f(int) = int')
     expect(f).toContain('mode f(in) = (out) is det')
   })
@@ -1583,8 +1543,7 @@ describe('hover shows inferred types', () => {
         onCancellationRequested: () => undefined,
       } as any)
       const mod = doc.visitResult!.module
-      if (mod) services.moduleManager.set(mod, doc)
-      services.exportManager.set(doc)
+      services.index.set(doc)
       return doc
     }
     await mk(':- module array.\n:- interface.\n:- pred map(pred(int, int), list(int), list(int)) is det.\n:- end_module array.\n', 'array-hocall')
@@ -1613,8 +1572,7 @@ describe('hover shows inferred types', () => {
         onCancellationRequested: () => undefined,
       } as any)
       const mod = doc.visitResult!.module
-      if (mod) services.moduleManager.set(mod, doc)
-      services.exportManager.set(doc)
+      services.index.set(doc)
       return doc
     }
     // 标准库风格：uint 模块导出 cast_to_int/1（模拟 library/uint.m 被构建后的导出索引）
@@ -1671,8 +1629,7 @@ describe('hover shows inferred types', () => {
         onCancellationRequested: () => undefined,
       } as any)
       const mod = doc.visitResult!.module
-      if (mod) services.moduleManager.set(mod, doc)
-      services.exportManager.set(doc)
+      services.index.set(doc)
       return doc
     }
     await mk([
@@ -1785,8 +1742,7 @@ describe('hover shows inferred types', () => {
         onCancellationRequested: () => undefined,
       } as any)
       const mod = doc.visitResult!.module
-      if (mod) services.moduleManager.set(mod, doc)
-      services.exportManager.set(doc)
+      services.index.set(doc)
       return doc
     }
     await mk([
@@ -1839,8 +1795,7 @@ describe('hover shows inferred types', () => {
         onCancellationRequested: () => undefined,
       } as any)
       const mod = doc.visitResult!.module
-      if (mod) services.moduleManager.set(mod, doc)
-      services.exportManager.set(doc)
+      services.index.set(doc)
       return doc
     }
     await mk(':- module pair.\n:- interface.\n:- type pair(K, V) ---> K - V.\n:- end_module pair.\n', 'pair-imported-head')
@@ -1872,8 +1827,7 @@ describe('hover shows inferred types', () => {
         onCancellationRequested: () => undefined,
       } as any)
       const mod = doc.visitResult!.module
-      if (mod) services.moduleManager.set(mod, doc)
-      services.exportManager.set(doc)
+      services.index.set(doc)
       return doc
     }
     // array 模块导出 size/2 (in, in)；本地模块也有同名 size/2 (out, out)
@@ -1908,8 +1862,7 @@ describe('hover shows inferred types', () => {
         onCancellationRequested: () => undefined,
       } as any)
       const mod = doc.visitResult!.module
-      if (mod) services.moduleManager.set(mod, doc)
-      services.exportManager.set(doc)
+      services.index.set(doc)
       return doc
     }
     await mk(':- module array.\n:- interface.\n:- pred size(int, int).\n:- mode size(in, out) is det.\n:- end_module array.\n', 'array-sz')

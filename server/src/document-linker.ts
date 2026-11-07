@@ -1,6 +1,6 @@
 import { CancellationToken, Diagnostic, DiagnosticSeverity } from 'vscode-languageserver'
 import { MercuryDocument } from './document-manager'
-import { label, SemanticType, VisitResult } from './document-visitor'
+import { label, type SemanticType, type VisitResult } from './document-index'
 import type { MercuryServices } from './services'
 import { Term } from './term'
 import { sameArity } from './utils'
@@ -65,21 +65,32 @@ export class DefaultLinker implements Linker{
             ...vr.declaration.get(name),
         ]
         if (ref.qualified) {
-            const targetDoc = this.services.moduleManager.get(ref.qualified)
+            const targetDoc = this.services.index.getModuleDoc(ref.qualified)
             if (targetDoc?.visitResult) {
                 candidates = candidates.concat(this.lookupCandidates(targetDoc.visitResult, name))
             }
         } else {
             // 全局导出索引：各模块 interface 段声明的符号，按名字直接取候选
-            candidates = candidates.concat(this.services.exportManager.get(name) as Term[])
+            candidates = candidates.concat(this.services.index.getExportedTerms(name) as Term[])
         }
         const kinds = new Set(
             candidates
                 .filter(d => sameArity(d, ref) && d.semanticType)
                 .map(d => d.semanticType as SemanticType)
         )
-        if (kinds.size !== 1) return undefined
-        return kinds.values().next().value
+        if (kinds.size === 1) return kinds.values().next().value
+        // 阶段 3 的名称解析结果兜底：全局符号表已带导出/可见性，类别唯一即可定性
+        const resolved = vr.resolved?.get(ref)
+        if (resolved?.length) {
+            const resolvedKinds = new Set<SemanticType>()
+            for (const s of resolved) {
+                if (['func', 'pred', 'constructor', 'type', 'inst', 'mode'].includes(s.kind)) {
+                    resolvedKinds.add(s.kind as SemanticType)
+                }
+            }
+            if (resolvedKinds.size === 1) return resolvedKinds.values().next().value
+        }
+        return undefined
     }
     private lookupCandidates(vr: VisitResult, name: string): Term[] {
         return [...vr.definition.get(name), ...vr.declaration.get(name)]

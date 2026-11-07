@@ -3,9 +3,8 @@ import { DocumentState, MercuryDocument } from './document-manager'
 import { interruptAndCheck } from './promise-util'
 import { MultiMap } from './multimap'
 import { URI } from 'vscode-uri'
-import { Visitor } from './document-visitor'
+import { Visitor } from './document-index'
 import { stream } from './stream'
-import { orderByImports, scanHeader } from './document-order'
 import type { MercuryServices } from './services'
 
 export type DocumentBuildListener = (built: MercuryDocument[], cancelToken: CancellationToken) => void | Promise<void>
@@ -30,37 +29,36 @@ export class DefaultDocumentBuilder{
                 await interruptAndCheck((cancelToken))
             }
         }
-        // 0.5 按 import 依赖拓扑排序 visit 阶段：保证 import 目标的 (visit + exportManager.set)
-        // 先于 importer 的 visit（跨模块推断据此从全局 exportManager 取到导入模块的类型/函数签名）
-        const headers = new Map<MercuryDocument, { module?: string; imports: string[] }>()
-        for (const doc of documents) headers.set(doc, scanHeader(doc.parseResult.value))
-        const ordered = orderByImports(
-            documents,
-            d => headers.get(d)!.module,
-            d => headers.get(d)!.imports,
-        )
-        for (const doc of ordered) {
+        // 2a/2b/2c. index：所有文档先做纯索引（visitor 不再做类型推导），
+        // 再一次性把定义、模块依赖、interface 导出标记同步进全局符号表。
+        // 这样阶段 3 拿到的签名是「所有文件 + 全部声明」，与文件访问顺序无关，
+        // 不再需要按 import 拓扑排序 visit。
+        for (const doc of documents) {
             if(doc.state <DocumentState.Visited){
-                let visitor = new Visitor(this.services);
-                await visitor.visit(doc,cancelToken);
-                let visitResult = doc.visitResult!
-                if(visitResult.module){
-                    this.services.moduleManager.set(visitResult.module,doc);
-                }
-                // 同步全局导出符号索引（linker 按名字取候选用）
-                this.services.exportManager.set(doc);
+                await new Visitor(this.services).visit(doc, cancelToken, {infer:false});
                 doc.state = DocumentState.Visited;
-                await interruptAndCheck((cancelToken))
+                await interruptAndCheck(cancelToken)
             }
         }
+        for (const doc of documents) {
+            if (!doc.visitResult) continue
+            this.services.index.set(doc);
+            await interruptAndCheck(cancelToken)
+        }
+        // 3. 全局符号表就绪后，才对 clause body 做类型推导 + qualified 名称解析
+        this.services.client.setStatus('$(sync~spin)inferring')
+        for (const doc of documents) {
+            await this.services.typeInferer.inferDocument(doc, cancelToken);
+            await interruptAndCheck(cancelToken)
+        }
         this.services.client.setStatus('$(sync~spin)linking')
-        // 3. linking
+        // 4. linking
         for (const doc of documents) {
             await this.services.linker.link(doc,cancelToken);
             doc.state = DocumentState.Linked
             await interruptAndCheck((cancelToken))
         }
-        // 4.vlaidate  
+        // 5. validate
         this.services.client.setStatus('$(sync~spin)validating')
         for (const doc of documents) {
             await this.validate(doc,cancelToken);
@@ -77,8 +75,7 @@ export class DefaultDocumentBuilder{
             // to stay away from memory leak
             let deletedDocument = this.services.documents.deleteDocument(deletedUri);
             if(deletedDocument){
-                this.services.moduleManager.delete(deletedDocument);
-                this.services.exportManager.delete(deletedDocument);
+                this.services.index.delete(deletedDocument);
                 deletedDocuments.push(deletedDocument)
             }
         }

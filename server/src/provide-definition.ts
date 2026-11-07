@@ -60,7 +60,7 @@ export async function TypeDefinitionProvider(services: MercuryServices, params: 
 function findDefinitionTerm(services: MercuryServices, term:Term,document:MercuryDocument){
     // term qualified
     if(term.qualified){
-        let doc =services.moduleManager.get(term.qualified)
+        let doc =services.index.getModuleDoc(term.qualified)
         if(!doc) return stream([]);
         let res = findDefTermInThisDocument(term,doc)
         return res
@@ -82,11 +82,22 @@ function findDefTermInThisDocument( term: Term, document: MercuryDocument){
     // 按引用处的 semanticType 限定可匹配的定义类别：
     // 例如 type 引用不应命中同名的 inst / pred / mode 定义
     const defKinds = defKindsForRef(term.semanticType)
-    let res = stream(definition.get(term.name))
+    let defs = stream(definition.get(term.name))
         .filter(x=>sameArity(x,term))
         .filter(x=>!defKinds || defKinds.includes(x.semanticType ?? ''))
         .map(term=>(uriTerm.create(uri,term)))
-    return res;
+        .toArray()
+    if (defs.length) return stream(defs)
+    // 只有声明而没有定义子句的目标（如 `:- pred g(int).` 的高阶谓词值引用 `G = g`）
+    // 也应能跳转，回退到声明项
+    const declaration = document.visitResult?.declaration
+    if (!declaration) return stream([])
+    let decls = stream(declaration.get(term.name))
+        .filter(x=>sameArity(x,term))
+        .filter(x=>!defKinds || defKinds.includes(x.semanticType ?? ''))
+        .map(term=>(uriTerm.create(uri,term)))
+        .toArray()
+    return stream(decls)
 
 }
 
@@ -108,10 +119,10 @@ export function defKindsForRef(refType?: string): string[] | undefined {
     }
 }
 function findDefTermInOtherDocument(services: MercuryServices, term: Term, document: MercuryDocument){
-    // 对于 type 和 constructor，使用 exportManager 进行全局查找
+    // 对于 type 和 constructor，使用全局符号表的导出项查找
     // 因为它们经常通过多层 import 传播
     if (term.semanticType === 'type' || term.semanticType === 'constructor') {
-        const exports = services.exportManager.get(term.name)
+        const exports = services.index.getExportedTerms(term.name)
         if (!exports) return stream([])
 
         const defKinds = defKindsForRef(term.semanticType)
@@ -119,10 +130,10 @@ function findDefTermInOtherDocument(services: MercuryServices, term: Term, docum
             .filter(x => sameArity(x, term))
             .filter(x => !defKinds || defKinds.includes(x.semanticType ?? ''))
             .map(exportTerm => {
-                // exportTerm.qualified 指向所属模块，从 moduleManager 获取文档
+                // exportTerm.qualified 指向所属模块，从全局符号表取回文档
                 const moduleTerm = exportTerm.qualified
                 if (!moduleTerm) return null
-                const doc = services.moduleManager.get(moduleTerm)
+                const doc = services.index.getModuleDoc(moduleTerm)
                 if (!doc) return null
                 return uriTerm.create(doc.uri, exportTerm)
             })
@@ -136,7 +147,7 @@ function findDefTermInOtherDocument(services: MercuryServices, term: Term, docum
     }
 
     let res = stream(imports)
-    .map(x => services.moduleManager.get(x))
+    .map(x => services.index.getModuleDoc(x))
     .nonNullable()
     .flatMap(doc=>findDefTermInThisDocument(term,doc))
 
@@ -179,7 +190,7 @@ function findFieldAccessDefinitions(
         : [selection, update, label]
     const docs: MercuryDocument[] = [document]
     for (const imp of document.visitResult?.imports ?? []) {
-        const doc = services.moduleManager.get(imp)
+        const doc = services.index.getModuleDoc(imp)
         if (doc && !docs.includes(doc)) docs.push(doc)
     }
     const result: uriTerm[] = []
@@ -201,9 +212,9 @@ function findFieldAccessDefinitions(
             }
         }
         // 别的模块 interface 段导出的同名函数
-        for (const exp of services.exportManager.get(q.name)) {
+        for (const exp of services.index.getExportedTerms(q.name)) {
             if (semanticArityOf(exp) !== q.arity || !q.kinds.includes(exp.semanticType ?? '')) continue
-            const doc = exp.qualified ? services.moduleManager.get(exp.qualified) : undefined
+            const doc = exp.qualified ? services.index.getModuleDoc(exp.qualified) : undefined
             if (doc) push(doc.uri, exp)
         }
     }
@@ -239,7 +250,7 @@ export  function findDefTerms(services: MercuryServices, params:uriTerm):Stream<
         }
 
         case 'module':{
-            let document = services.moduleManager.get(term);
+            let document = services.index.getModuleDoc(term);
             if(!document)
                 return stream([]);
             let module = document.visitResult?.module

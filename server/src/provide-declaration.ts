@@ -18,7 +18,7 @@ export async function DeclarationProvider(services: MercuryServices, params:Decl
     }
     
     if(semanticType=="module"){
-        let doc = services.moduleManager.get(term);
+        let doc = services.index.getModuleDoc(term);
         if(!doc)
             return []
         let defTerm = doc.visitResult!.module!
@@ -27,7 +27,7 @@ export async function DeclarationProvider(services: MercuryServices, params:Decl
     }
     /* 如果有module属性 在 module里查找 */
     if(term.qualified){
-        let doc  =  services.moduleManager.get(term.qualified)
+        let doc  =  services.index.getModuleDoc(term.qualified)
         if(!doc)
             return [];
         let uri = doc.uri
@@ -51,7 +51,7 @@ export async function DeclarationProvider(services: MercuryServices, params:Decl
 
     /**如果本文件没查找到 在导入的文件里找 */
     // res = stream(doc.visitResult!.imports)
-    //     .map(x=>services.moduleManager.get(x))
+    //     .map(x=>services.index.getModuleDoc(x))
     //     .nonNullable()
     //     .map(targetDoc=>targetDoc.visitResult?.exports)
     //     .nonNullable()

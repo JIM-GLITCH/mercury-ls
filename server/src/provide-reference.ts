@@ -2,7 +2,7 @@ import { Location, ReferenceParams } from 'vscode-languageserver'
 import { semanticArityOf, sleep } from './utils'
 import { FieldAccessInfo, Term, search, termRange } from './term'
 import { MercuryDocument } from './document-manager'
-import { equalQualified } from './document-moduleManager'
+import { equalQualified } from './document-index'
 import { URI } from 'vscode-uri'
 import type { MercuryServices } from './services'
 

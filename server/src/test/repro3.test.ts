@@ -1,6 +1,6 @@
 import { beforeEach, describe, it, expect } from 'vitest'
 import { URI } from 'vscode-uri'
-import { Visitor } from '../document-visitor'
+import { Visitor } from '../document-index'
 import { createMercuryServices, type MercuryServices } from '../services'
 import { merTypeToString } from '../document-type'
 
@@ -32,8 +32,7 @@ describe('repro3: only assoc_list loaded, pair NOT separately loaded', () => {
         onCancellationRequested: () => undefined,
       } as any)
       const mod = doc.visitResult!.module
-      if (mod) services.moduleManager.set(mod, doc)
-      services.exportManager.set(doc)
+      services.index.set(doc)
       return doc
     }
     // assoc_list 模块导入 pair；pair 也单独加载（模拟 re-analyze 后两个模块都就位）

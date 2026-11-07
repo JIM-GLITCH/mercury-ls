@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { Parser } from '../mercury-parser'
-import { Visitor } from '../document-visitor'
+import { Visitor } from '../document-index'
 import { createMercuryServices } from '../services'
 
 describe('import module declarations', () => {

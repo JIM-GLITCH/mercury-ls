@@ -3,7 +3,7 @@
 import { Location, Position, Range } from 'vscode-languageserver'
 import { Token } from './mercury-lexer'
 import { MultiMap } from './multimap'
-import { SemanticType } from "./document-visitor"
+import type { SemanticType } from './document-index'
 import { tokenRange } from './utils'
 import { Document, RefTerm } from './document'
 import { MercuryDocument } from './document-manager'
@@ -39,6 +39,8 @@ export interface Term {
     fieldAccess?: FieldAccessInfo
     definition?: Term
     qualified?: Term
+    /** 阶段 2/3 定好的限定名 `module.name`；hover 等消费端只读，模块名未知时不设置 */
+    qualifiedName?: string
     /** The container node in the AST; every node except the root node has a container. */
     container?: Term
     /** 
@@ -95,6 +97,7 @@ export interface Term {
 }
 export class TermImpl implements Term {
     fieldAccess?: FieldAccessInfo
+    qualifiedName?: string
     semanticType?: SemanticType
     semanticArity: number
     nameArity: string
