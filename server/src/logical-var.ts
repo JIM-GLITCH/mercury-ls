@@ -1,41 +1,52 @@
-export interface LogicalVar {
+export interface LogicVar<T = unknown> {
     get bound(): boolean;
-    deref(): unknown;
+    deref(): T | undefined;
 }
 
-export function createLogicalVar(): LogicalVar {
-    return new LogicalVarImpl()
+/**
+ * 可含逻辑变量的项：T 本身、包住整个 T 的变量、或 T 的任意（含嵌套、数组元素）
+ * 属性被 LogicalVar 包住。T 由非变量实参推断；未标注变量是 LogicalVar<never>，
+ * 既不注入 unknown 候选，也因 never 是 bottom 而可赋给任意 LogicalVar<X>。
+ */
+export type Logical<T> =
+    | T
+    | LogicVar<T>
+    | (T extends object ? { [K in keyof T]: Logical<T[K]> } : never)
+
+/** 默认 never = 未定型的推断洞；需要具体类型时显式写 createLogicalVar<number>()。 */
+export function createLogicalVar<T = never>(): LogicVar<T> {
+    return new LogicVarImpl<T>()
 }
 
 let varId = 0
 
-class LogicalVarImpl implements LogicalVar {
+class LogicVarImpl<T = unknown> implements LogicVar<T> {
     id = varId++
     // value 三态：undefined = 自由变量；LogicalVarImpl = 链接到另一变量；其他 = 绑定到值。
     // bound 由链尾惰性决定，所以 A -> B -> 1 里 A 与 B 会同时表现为已绑定，
     // 不需要在绑定时向链上其它变量传播回调或复制状态。
-    value: unknown = undefined
+    value: T | undefined = undefined
     get bound(): boolean {
         return this.deref() !== undefined
     }
-    deref(): unknown {
-        let v: LogicalVarImpl = this
-        const seen = new Set<LogicalVarImpl>()
-        while (v.value instanceof LogicalVarImpl) {
+    deref(): T | undefined {
+        let v: LogicVarImpl = this
+        const seen = new Set<LogicVarImpl>()
+        while (v.value instanceof LogicVarImpl) {
             if (seen.has(v)) return undefined
             seen.add(v)
             v = v.value
         }
-        return v.value
+        return v.value as T | undefined
     }
 }
 
-export function isUnboundLogicalVar(x: Object): x is LogicalVar {
+export function isUnboundLogicalVar(x: Object): x is LogicVar {
     return isUnboundVarImpl(x)
 }
 
-function isUnboundVarImpl(x: unknown): x is LogicalVarImpl {
-    return x instanceof LogicalVarImpl && !x.bound
+function isUnboundVarImpl(x: unknown): x is LogicVarImpl {
+    return x instanceof LogicVarImpl && !x.bound
 }
 
 type Seen = WeakMap<object, WeakSet<object>>
@@ -60,34 +71,54 @@ export function undo(trail: Trail, mark = 0): void {
     trail.length = mark
 }
 
-function bind(v: LogicalVarImpl, value: unknown, trail: Trail): void {
+function bind(v: LogicVarImpl, value: unknown, trail: Trail): void {
     trail.push({ v, value: v.value })
     v.value = value
 }
 
-function rootOf(x: LogicalVarImpl) {
-    if (!(x.value instanceof LogicalVarImpl)) {
+function rootOf(x: LogicVarImpl) {
+    if (!(x.value instanceof LogicVarImpl)) {
         return x
     }
     return rootOf(x.value)
 }
 
 function deref(x: unknown): unknown {
-    return x instanceof LogicalVarImpl && x.bound ? x.deref() : x
+    return x instanceof LogicVarImpl && x.bound ? x.deref() : x
 }
 
 function isObject(x: unknown): x is object {
     return typeof x === 'object' && x !== null
 }
 
-export function unify(x: Object, y: Object, trail: Trail = createTrail()): boolean {
+/** 变量 v 是否出现在 x（含 x 里已绑定变量的值）里。 */
+function occursIn(v: LogicVarImpl, x: unknown, seen: WeakSet<object>): boolean {
+    if (x instanceof LogicVarImpl) {
+        if (rootOf(x) === rootOf(v)) return true
+        const value = x.deref()
+        return value !== undefined && occursIn(v, value, seen)
+    }
+    if (!isObject(x)) return false
+    if (seen.has(x)) return false
+    seen.add(x)
+    for (const key of Object.keys(x)) {
+        if (occursIn(v, (x as Record<string, unknown>)[key], seen)) return true
+    }
+    return false
+}
+
+/**
+ * T 从非变量实参推断；显式写 unify<Foo> 可强制按 Foo 的结构检查。
+ * occursCheck 默认关闭以允许有理树；类型推断这类需要纯树结果的场景可开启。
+ */
+export function unify<T>(x: Logical<T>, y: Logical<T>, trail: Trail = createTrail(), occursCheck = false) {
     const mark = trail.length
-    const ok = unifyImpl(x, y, new WeakMap(), trail)
+    const ok = unifyImpl(x, y, new WeakMap(), trail, occursCheck)
     if (!ok) undo(trail, mark)
     return ok
 }
 
-function unifyImpl(x: unknown, y: unknown, seen: Seen, trail: Trail): boolean {
+function unifyImpl(x: unknown, y: unknown, seen: Seen, trail: Trail, occursCheck: boolean): boolean {
     if (isUnboundVarImpl(x) && isUnboundVarImpl(y)) {
         if (x === y) return true
         const rootX = rootOf(x)
@@ -99,12 +130,14 @@ function unifyImpl(x: unknown, y: unknown, seen: Seen, trail: Trail): boolean {
     else if (isUnboundVarImpl(x) && !isUnboundVarImpl(y)) {
         const rootX = rootOf(x)
         const value = deref(y)
+        if (occursCheck && occursIn(rootX, value, new WeakSet())) return false
         bind(rootX, value, trail)
         return true
     }
     else if (!isUnboundVarImpl(x) && isUnboundVarImpl(y)) {
         const value = deref(x)
         const rootY = rootOf(y)
+        if (occursCheck && occursIn(rootY, value, new WeakSet())) return false
         bind(rootY, value, trail)
         return true
     }
@@ -112,7 +145,7 @@ function unifyImpl(x: unknown, y: unknown, seen: Seen, trail: Trail): boolean {
         const a = deref(x)
         const b = deref(y)
         if (a !== x || b !== y) {
-            return unifyImpl(a, b, seen, trail)
+            return unifyImpl(a, b, seen, trail, occursCheck)
         }
         if (!isObject(a) || !isObject(b)) {
             return a === b
@@ -134,7 +167,7 @@ function unifyImpl(x: unknown, y: unknown, seen: Seen, trail: Trail): boolean {
         if (keys.length !== Object.keys(b).length) return false
         for (const key of keys) {
             if (!Object.prototype.hasOwnProperty.call(b, key)) return false
-            if (!unifyImpl(xa[key], yb[key], seen, trail)) return false
+            if (!unifyImpl(xa[key], yb[key], seen, trail, occursCheck)) return false
         }
         return true
     }
@@ -145,19 +178,27 @@ function unifyImpl(x: unknown, y: unknown, seen: Seen, trail: Trail): boolean {
  *
  * - 已绑定变量（含 A -> B -> 值 的变量链）递归展开，值里嵌套的变量也会继续展开；
  * - 未绑定变量替换为 free（默认 undefined，可传 null / 字符串等占位值）；
+ *   free 也可传 (v) => 值，按每个自由变量分别生成占位值；
  * - 不修改原式子，也不改变变量绑定，适合在 undo 之前取快照；
  * - 对象/数组按自身可枚举属性重建（与 unify 的遍历范围一致），共享引用与环
  *   （如 A = {a: A}）按图保留，不会无限递归。
  */
+export function resolve<T = unknown>(x: unknown, free: (v: LogicVar) => unknown): T
+export function resolve<T = unknown>(x: unknown, free?: unknown): T
 export function resolve<T = unknown>(x: unknown, free: unknown = undefined): T {
-    const placeholder = resolveImpl(free, new Map(), undefined)
+    const placeholder = typeof free === 'function'
+        ? free
+        : resolveImpl(free, new Map(), undefined)
     return resolveImpl(x, new Map(), placeholder) as T
 }
 
 function resolveImpl(x: unknown, memo: Map<object, unknown>, free: unknown): unknown {
-    if (x instanceof LogicalVarImpl) {
+    if (x instanceof LogicVarImpl) {
         const value = x.deref()
-        return value === undefined ? free : resolveImpl(value, memo, free)
+        if (value === undefined) {
+            return typeof free === 'function' ? (free as (v: LogicVar) => unknown)(x) : free
+        }
+        return resolveImpl(value, memo, free)
     }
     if (!isObject(x)) return x
     if (memo.has(x)) return memo.get(x)
@@ -178,3 +219,40 @@ function resolveImpl(x: unknown, memo: Map<object, unknown>, free: unknown): unk
     }
     return out
 }
+
+/** 目标可以是 [x, y] 合一式，也可以是返回 boolean 的 thunk。 */
+type Goal = [unknown, unknown] | (() => boolean)
+
+/**
+ * 把一条 trail 包成目标求解器：conj 失败时整体回滚；disj 每个分支从干净状态开始，
+ * yield 之后（消费者取完当前解）再撤销该分支的绑定，适合重载候选筛选。
+ */
+export function useTrail() {
+    const trail = createTrail()
+    const unifyIn = (x: unknown, y: unknown) => unify(x as Logical<unknown>, y as Logical<unknown>, trail)
+    const run = (goal: Goal): boolean =>
+        Array.isArray(goal) ? unifyIn(goal[0], goal[1]) : goal()
+    const conj = (...goals: Goal[]): boolean => {
+        const mark = trail.length
+        for (const goal of goals) {
+            if (!run(goal)) { undo(trail, mark); return false }
+        }
+        return true
+    }
+    function* disj(...branches: Goal[]): Generator<boolean> {
+        for (const branch of branches) {
+            const mark = trail.length
+            if (run(branch)) yield true
+            undo(trail, mark)
+        }
+    }
+    return {
+        trail,
+        unify: unifyIn,
+        conj,
+        disj,
+        mark: () => trail.length,
+        undo: (mark = 0) => undo(trail, mark),
+    }
+}
+

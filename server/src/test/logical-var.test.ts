@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { createLogicalVar, createTrail, isUnboundLogicalVar, resolve, undo, unify } from '../logical-var'
+import { createLogicalVar, createTrail, isUnboundLogicalVar, resolve, undo, unify, useTrail } from '../logical-var'
 
 
 describe('unify / variable binding', () => {
@@ -193,5 +193,38 @@ describe('resolve / remove logical vars from a term', () => {
     undo(trail, mark)
     expect(snapshot).toStrictEqual({ a: 5 })
     expect(A.bound).toBe(false)
+  })
+})
+
+describe('useTrail / conj & disj', () => {
+  it('accepts unify pairs as goals', () => {
+    const A = createLogicalVar()
+    const B = createLogicalVar()
+    const C = createLogicalVar()
+    const D = createLogicalVar()
+    const ctx = useTrail()
+    expect(ctx.conj([A, B], [C, D], [B, C], [D, 1], [2, 2])).toBe(true)
+    expect(A.deref()).toBe(1)
+  })
+  it('still accepts thunk goals', () => {
+    const A = createLogicalVar()
+    const ctx = useTrail()
+    expect(ctx.conj(() => ctx.unify(A, 1), () => ctx.unify(A, 1))).toBe(true)
+    expect(A.deref()).toBe(1)
+  })
+  it('rolls back all bindings when a pair fails', () => {
+    const A = createLogicalVar()
+    const ctx = useTrail()
+    expect(ctx.conj([A, 1], [1, 2])).toBe(false)
+    expect(A.bound).toBe(false)
+  })
+  it('disj tries each branch from a clean state', () => {
+    const A = createLogicalVar()
+    const ctx = useTrail()
+    const branches = ctx.disj([A, 1], [A, 2])
+    expect(branches.next().value).toBe(true)
+    expect(A.deref()).toBe(1)
+    expect(branches.next().value).toBe(true)
+    expect(A.deref()).toBe(2)
   })
 })
