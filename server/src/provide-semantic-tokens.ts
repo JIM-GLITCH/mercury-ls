@@ -52,17 +52,6 @@ function classifyTerm(term: Term): number | undefined {
   if (semanticType && tokenTypeIndexBySemanticType[semanticType] !== undefined) {
     return tokenTypeIndexBySemanticType[semanticType]
   }
-  switch (term.syntaxType) {
-    case 'variable':
-      return tokenTypeIndexBySemanticType.variable
-    case 'string':
-      return tokenTypeIndexBySemanticType.string
-    case 'integer':
-    case 'float':
-      return tokenTypeIndexBySemanticType.integer
-    default:
-      return undefined
-  }
 }
 
 function emitTokenRange(
