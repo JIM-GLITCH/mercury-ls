@@ -113,9 +113,6 @@ function rootOf(x: LogicVarImpl) {
 
 /** freeze/2 用的私有属性键，值是等待唤醒的目标队列。 */
 const FREEZE_ATTR = Symbol('freeze')
-// 跨变量链合并后仍按 freeze 的调用顺序唤醒，避免约束传播依赖链接方向。
-const frozenOrder = new WeakMap<BoolGoal, number>()
-let frozenSeq = 0
 
 function asImpl(v: LogicVar): LogicVarImpl {
     if (!(v instanceof LogicVarImpl)) throw new TypeError('expected a logical variable')
@@ -159,10 +156,10 @@ function mergeAttrs(from: LogicVarImpl, to: LogicVarImpl, trail: Trail): void {
     trail.push({ undo: () => { restoreAttrs(src, oldSrc); restoreAttrs(dst, oldDst) } })
     for (const [key, value] of src) {
         if (key === FREEZE_ATTR) {
+            // 同一变量内保持挂起顺序；跨链合并时链尾原有队列在前，不做全局排序。
             const waiting = (dst.get(key) as BoolGoal[] | undefined) ?? []
             const added = Array.isArray(value) ? value as BoolGoal[] : [value as BoolGoal]
-            dst.set(key, [...waiting, ...added].sort(
-                (a, b) => (frozenOrder.get(a) ?? 0) - (frozenOrder.get(b) ?? 0)))
+            dst.set(key, [...waiting, ...added])
         } else if (!dst.has(key)) {
             // 同名普通属性以链尾已有的为准，避免后来的链静默覆盖先挂上的约束。
             dst.set(key, value)
@@ -193,7 +190,6 @@ function wakeGoals(v: LogicVarImpl, trail: Trail): boolean {
 export function freeze(v: LogicVar, goal: BoolGoal, trail?: Trail): boolean {
     const impl = asImpl(v)
     if (!isUnboundVarImpl(impl)) return goal()
-    frozenOrder.set(goal, frozenSeq++)
     const waiting = (getAttr(impl, FREEZE_ATTR) as BoolGoal[] | undefined) ?? []
     putAttr(impl, FREEZE_ATTR, [...waiting, goal], trail)
     return true
