@@ -1,6 +1,14 @@
+/** 变量属性的键；symbol 可用来声明模块私有属性，避免和用户的 key 撞名。 */
+export type AttrKey = string | symbol
+
+/** 冻结目标：返回 false 表示合一失败（连同整条 trail 一起回滚）。 */
+export type BoolGoal = () => boolean
+
 export interface LogicVar<T = unknown> {
     get bound(): boolean;
     deref(): T | undefined;
+    /** 只读视图；写入请用 putAttr/delAttr，这样修改才会进 trail、可以回溯。 */
+    readonly attributes: ReadonlyMap<AttrKey, unknown>;
 }
 
 /**
@@ -19,16 +27,21 @@ export function createLogicalVar<T = never>(): LogicVar<T> {
 }
 
 let varId = 0
-
+let currentTrail: Trail | undefined = undefined
 class LogicVarImpl<T = unknown> implements LogicVar<T> {
     id = varId++
     // value 三态：undefined = 自由变量；LogicalVarImpl = 链接到另一变量；其他 = 绑定到值。
     // bound 由链尾惰性决定，所以 A -> B -> 1 里 A 与 B 会同时表现为已绑定，
-    // 不需要在绑定时向链上其它变量传播回调或复制状态。
+    // 不必在绑定时向链上其它变量传播 bound 状态；属性则在链接时并入链尾。
     value: T | undefined = undefined
+    // 一条变量链共享链尾（root）的这一份属性表：读写都经 rootOf 委托过去，
+    // 两条链合一（A -> B）时把 A 的属性并入 B，绑定值后统一唤醒。
+    readonly attributes = new Map<AttrKey, unknown>()
+
     get bound(): boolean {
         return this.deref() !== undefined
     }
+
     deref(): T | undefined {
         let v: LogicVarImpl = this
         const seen = new Set<LogicVarImpl>()
@@ -58,7 +71,9 @@ interface MutableVar {
 // 一次合一里所有变量写入的撤销日志。默认每次 unify 自带一条，失败即整体撤销；
 // 调用方也可复用同一条 trail，用 mark = trail.length + undo(trail, mark)
 // 撤销「成功但未被采用」的试探（如重载候选筛选）。
-export type Trail = { v: MutableVar; value: unknown }[]
+// 属性表（Map）的写入用闭包记下旧状态，和变量绑定一起按后进先出撤销。
+type TrailEntry = { v: MutableVar; value: unknown } | { undo: () => void }
+export type Trail = TrailEntry[]
 
 export function createTrail(): Trail {
     return []
@@ -66,14 +81,27 @@ export function createTrail(): Trail {
 
 export function undo(trail: Trail, mark = 0): void {
     for (let i = trail.length - 1; i >= mark; i--) {
-        trail[i].v.value = trail[i].value
+        const entry = trail[i]
+        if ('undo' in entry) entry.undo()
+        else entry.v.value = entry.value
     }
     trail.length = mark
 }
 
-function bind(v: LogicVarImpl, value: unknown, trail: Trail): void {
+/** 省略 trail 参数时优先复用 runWithTrail/useTrail 建立的求解上下文。 */
+function trailOf(trail?: Trail): Trail {
+    return trail ?? currentTrail ?? createTrail()
+}
+
+function bind(v: LogicVarImpl, value: unknown, trail: Trail): boolean {
+    if (value instanceof LogicVarImpl) {
+        // 变量与变量合一只是链接，变量仍未实例化，冻结目标继续挂起。
+        mergeAttrs(v, value, trail)
+    }
     trail.push({ v, value: v.value })
     v.value = value
+    // 只有绑定到非变量值时才唤醒；目标失败等价于合一失败，由调用方回滚整条 trail。
+    return value instanceof LogicVarImpl ? true : wakeGoals(v, trail)
 }
 
 function rootOf(x: LogicVarImpl) {
@@ -81,6 +109,94 @@ function rootOf(x: LogicVarImpl) {
         return x
     }
     return rootOf(x.value)
+}
+
+/** freeze/2 用的私有属性键，值是等待唤醒的目标队列。 */
+const FREEZE_ATTR = Symbol('freeze')
+// 跨变量链合并后仍按 freeze 的调用顺序唤醒，避免约束传播依赖链接方向。
+const frozenOrder = new WeakMap<BoolGoal, number>()
+let frozenSeq = 0
+
+function asImpl(v: LogicVar): LogicVarImpl {
+    if (!(v instanceof LogicVarImpl)) throw new TypeError('expected a logical variable')
+    return v as LogicVarImpl
+}
+
+/** 属性读写都委托给链尾，因此同一条变量链上的所有变量看到同一份属性。 */
+export function getAttr(v: LogicVar, key: AttrKey): unknown {
+    return rootOf(asImpl(v)).attributes.get(key)
+}
+
+/** 写入属性；旧值（含「原本不存在」）记入 trail，undo 时精确恢复。 */
+export function putAttr(v: LogicVar, key: AttrKey, value: unknown, trail?: Trail): void {
+    const attrs = rootOf(asImpl(v)).attributes
+    const had = attrs.has(key)
+    const old = attrs.get(key)
+    trailOf(trail).push({ undo: () => { if (had) attrs.set(key, old); else attrs.delete(key) } })
+    attrs.set(key, value)
+}
+
+export function delAttr(v: LogicVar, key: AttrKey, trail?: Trail): void {
+    const attrs = rootOf(asImpl(v)).attributes
+    if (!attrs.has(key)) return
+    const old = attrs.get(key)
+    trailOf(trail).push({ undo: () => attrs.set(key, old) })
+    attrs.delete(key)
+}
+
+function restoreAttrs(attrs: Map<AttrKey, unknown>, snapshot: Map<AttrKey, unknown>): void {
+    attrs.clear()
+    for (const [k, v] of snapshot) attrs.set(k, v)
+}
+
+/** 两条自由变量链合一：把 from 的属性并入链尾 to（freeze 目标合并成队列）。 */
+function mergeAttrs(from: LogicVarImpl, to: LogicVarImpl, trail: Trail): void {
+    const src = from.attributes
+    if (src.size === 0) return
+    const dst = to.attributes
+    const oldSrc = new Map(src)
+    const oldDst = new Map(dst)
+    trail.push({ undo: () => { restoreAttrs(src, oldSrc); restoreAttrs(dst, oldDst) } })
+    for (const [key, value] of src) {
+        if (key === FREEZE_ATTR) {
+            const waiting = (dst.get(key) as BoolGoal[] | undefined) ?? []
+            const added = Array.isArray(value) ? value as BoolGoal[] : [value as BoolGoal]
+            dst.set(key, [...waiting, ...added].sort(
+                (a, b) => (frozenOrder.get(a) ?? 0) - (frozenOrder.get(b) ?? 0)))
+        } else if (!dst.has(key)) {
+            // 同名普通属性以链尾已有的为准，避免后来的链静默覆盖先挂上的约束。
+            dst.set(key, value)
+        }
+    }
+    src.clear()
+}
+
+/** 绑定值后依次执行冻结目标；返回 false 让外层 unify 失败并回滚。 */
+function wakeGoals(v: LogicVarImpl, trail: Trail): boolean {
+    const attrs = v.attributes
+    const goals = attrs.get(FREEZE_ATTR) as BoolGoal[] | undefined
+    if (!goals?.length) return true
+    trail.push({ undo: () => attrs.set(FREEZE_ATTR, goals) })
+    attrs.delete(FREEZE_ATTR)
+    for (const goal of goals) {
+        if (!goal()) return false
+    }
+    return true
+}
+
+/**
+ * freeze/2：第一个参数是逻辑变量，第二个参数是 () => boolean 目标。
+ * 变量未绑定时目标挂起，等该变量（或它所在变量链）被绑定到值时唤醒；
+ * 变量已绑定则立即执行。目标返回 false 视为合一失败，整条 trail 一起回滚。
+ * 目标内部再调用 unify/freeze 且不传 trail 时，会复用 runWithTrail 的上下文。
+ */
+export function freeze(v: LogicVar, goal: BoolGoal, trail?: Trail): boolean {
+    const impl = asImpl(v)
+    if (!isUnboundVarImpl(impl)) return goal()
+    frozenOrder.set(goal, frozenSeq++)
+    const waiting = (getAttr(impl, FREEZE_ATTR) as BoolGoal[] | undefined) ?? []
+    putAttr(impl, FREEZE_ATTR, [...waiting, goal], trail)
+    return true
 }
 
 function deref(x: unknown): unknown {
@@ -111,7 +227,7 @@ function occursIn(v: LogicVarImpl, x: unknown, seen: WeakSet<object>): boolean {
  * T 从非变量实参推断；显式写 unify<Foo> 可强制按 Foo 的结构检查。
  * occursCheck 默认关闭以允许有理树；类型推断这类需要纯树结果的场景可开启。
  */
-export function unify<T>(x: Logical<T>, y: Logical<T>, trail: Trail = createTrail(), occursCheck = false) {
+export function unify<T>(x: Logical<T>, y: Logical<T>, trail: Trail = currentTrail ?? createTrail(), occursCheck = false) {
     const mark = trail.length
     const ok = unifyImpl(x, y, new WeakMap(), trail, occursCheck)
     if (!ok) undo(trail, mark)
@@ -124,22 +240,19 @@ function unifyImpl(x: unknown, y: unknown, seen: Seen, trail: Trail, occursCheck
         const rootX = rootOf(x)
         const rootY = rootOf(y)
         if (rootX === rootY) return true
-        bind(rootX, rootY, trail)
-        return true
+        return bind(rootX, rootY, trail)
     }
     else if (isUnboundVarImpl(x) && !isUnboundVarImpl(y)) {
         const rootX = rootOf(x)
         const value = deref(y)
         if (occursCheck && occursIn(rootX, value, new WeakSet())) return false
-        bind(rootX, value, trail)
-        return true
+        return bind(rootX, value, trail)
     }
     else if (!isUnboundVarImpl(x) && isUnboundVarImpl(y)) {
         const value = deref(x)
         const rootY = rootOf(y)
         if (occursCheck && occursIn(rootY, value, new WeakSet())) return false
-        bind(rootY, value, trail)
-        return true
+        return bind(rootY, value, trail)
     }
     else {
         const a = deref(x)
@@ -220,18 +333,39 @@ function resolveImpl(x: unknown, memo: Map<object, unknown>, free: unknown): unk
     return out
 }
 
+/**
+ * 在一条共享 trail 上运行求解过程：期间不带 trail 参数的 unify/freeze/putAttr
+ * 都写进这条 trail；f 返回 false（或抛错）时整体回滚。支持嵌套，退出时恢复外层上下文。
+ */
+export function runWithTrail(f: () => boolean, trail: Trail = createTrail()) {
+    const outer = currentTrail
+    currentTrail = trail
+    const mark = trail.length
+    try {
+        const flag = f()
+        if (!flag) undo(trail, mark)
+        return flag
+    } catch (e) {
+        undo(trail, mark)
+        throw e
+    } finally {
+        currentTrail = outer
+    }
+}
+
 /** 目标可以是 [x, y] 合一式，也可以是返回 boolean 的 thunk。 */
 type Goal = [unknown, unknown] | (() => boolean)
 
 /**
  * 把一条 trail 包成目标求解器：conj 失败时整体回滚；disj 每个分支从干净状态开始，
  * yield 之后（消费者取完当前解）再撤销该分支的绑定，适合重载候选筛选。
+ * 目标执行期间建立 currentTrail 上下文，冻结目标里不带 trail 的调用共享同一条 trail。
  */
 export function useTrail() {
     const trail = createTrail()
     const unifyIn = (x: unknown, y: unknown) => unify(x as Logical<unknown>, y as Logical<unknown>, trail)
     const run = (goal: Goal): boolean =>
-        Array.isArray(goal) ? unifyIn(goal[0], goal[1]) : goal()
+        runWithTrail(() => Array.isArray(goal) ? unifyIn(goal[0], goal[1]) : goal(), trail)
     const conj = (...goals: Goal[]): boolean => {
         const mark = trail.length
         for (const goal of goals) {
@@ -255,4 +389,3 @@ export function useTrail() {
         undo: (mark = 0) => undo(trail, mark),
     }
 }
-

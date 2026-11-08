@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest'
-import { createLogicalVar, createTrail, isUnboundLogicalVar, resolve, undo, unify, useTrail } from '../logical-var'
+import {
+  createLogicalVar, createTrail, delAttr, freeze, getAttr, isUnboundLogicalVar,
+  putAttr, resolve, runWithTrail, undo, unify, useTrail,
+} from '../logical-var'
 
 
 describe('unify / variable binding', () => {
@@ -226,5 +229,115 @@ describe('useTrail / conj & disj', () => {
     expect(A.deref()).toBe(1)
     expect(branches.next().value).toBe(true)
     expect(A.deref()).toBe(2)
+  })
+})
+
+describe('freeze/2', () => {
+  it('变量未绑定时挂起，绑定值时唤醒且只执行一次', () => {
+    const A = createLogicalVar()
+    let seen: unknown = 'not-run'
+    let calls = 0
+    expect(freeze(A, () => { calls++; seen = A.deref(); return true })).toBe(true)
+    expect(seen).toBe('not-run')
+    expect(unify(A, 42)).toBe(true)
+    expect(seen).toBe(42)
+    expect(unify(A, 42)).toBe(true)
+    expect(calls).toBe(1)
+  })
+  it('已绑定变量立即执行目标并返回其结果', () => {
+    const A = createLogicalVar()
+    unify(A, 1)
+    let calls = 0
+    expect(freeze(A, () => { calls++; return false })).toBe(false)
+    expect(freeze(A, () => { calls++; return true })).toBe(true)
+    expect(calls).toBe(2)
+  })
+  it('A = B 不唤醒，链尾绑定到值时才唤醒', () => {
+    const A = createLogicalVar()
+    const B = createLogicalVar()
+    let calls = 0
+    freeze(A, () => { calls++; return true })
+    expect(freeze(B, () => { calls++; return true })).toBe(true)
+    expect(unify(A, B)).toBe(true)
+    expect(calls).toBe(0)
+    expect(unify(B, 3)).toBe(true)
+    expect(calls).toBe(2)
+  })
+  it('跨变量链的多个目标按 freeze 调用顺序唤醒', () => {
+    const A = createLogicalVar()
+    const B = createLogicalVar()
+    const order: string[] = []
+    freeze(A, () => { order.push('a1'); return true })
+    freeze(B, () => { order.push('b1'); return true })
+    freeze(A, () => { order.push('a2'); return true })
+    expect(unify(A, B)).toBe(true)
+    expect(order).toEqual([])
+    expect(unify(B, 5)).toBe(true)
+    expect(order).toEqual(['a1', 'b1', 'a2'])
+  })
+  it('目标返回 false 时合一失败，绑定回滚且目标重新挂起', () => {
+    const A = createLogicalVar()
+    let calls = 0
+    freeze(A, () => { calls++; return calls > 1 })
+    expect(unify(A, 1)).toBe(false)
+    expect(A.bound).toBe(false)
+    expect(A.deref()).toBe(undefined)
+    expect(unify(A, 2)).toBe(true)
+    expect(calls).toBe(2)
+    expect(A.deref()).toBe(2)
+  })
+  it('回溯到 freeze 之后会恢复挂起状态，可在下一个解里再次唤醒', () => {
+    const A = createLogicalVar()
+    const trail = createTrail()
+    let calls = 0
+    freeze(A, () => { calls++; return true }, trail)
+    const mark = trail.length
+    expect(unify(A, 1, trail)).toBe(true)
+    expect(calls).toBe(1)
+    undo(trail, mark)
+    expect(A.bound).toBe(false)
+    expect(unify(A, 2, trail)).toBe(true)
+    expect(calls).toBe(2)
+    expect(A.deref()).toBe(2)
+  })
+  it('runWithTrail：冻结目标内部的绑定与外层共享同一条 trail', () => {
+    const A = createLogicalVar()
+    const B = createLogicalVar()
+    let calls = 0
+    expect(runWithTrail(() => {
+      freeze(A, () => { calls++; return unify(B, 7) })
+      return unify(A, 1)
+    })).toBe(true)
+    expect(calls).toBe(1)
+    expect(A.deref()).toBe(1)
+    expect(B.deref()).toBe(7)
+  })
+  it('runWithTrail：目标失败时绑定与属性一起回滚', () => {
+    const A = createLogicalVar()
+    const B = createLogicalVar()
+    let calls = 0
+    expect(runWithTrail(() => {
+      freeze(A, () => { calls++; unify(B, 7); return false })
+      return unify(A, 1)
+    })).toBe(false)
+    expect(calls).toBe(1)
+    expect(A.bound).toBe(false)
+    expect(B.bound).toBe(false)
+    expect(A.attributes.size).toBe(0)
+  })
+  it('useTrail：conj 里挂起的约束在失败时一并回滚', () => {
+    const A = createLogicalVar()
+    const ctx = useTrail()
+    let calls = 0
+    expect(ctx.conj(
+      () => { freeze(A, () => { calls++; return false }); return true },
+      [A, 1],
+    )).toBe(false)
+    expect(calls).toBe(1)
+    expect(A.bound).toBe(false)
+    expect(A.attributes.size).toBe(0)
+  })
+  it('第一个参数不是逻辑变量时报错', () => {
+    expect(() => freeze(1 as never, () => true)).toThrow(TypeError)
   })
 })
