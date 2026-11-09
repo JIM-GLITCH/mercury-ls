@@ -6,11 +6,11 @@
  ******************************************************************************/
 import type { CancellationToken } from 'vscode-languageserver'
 import type { MercuryDocument } from './document-manager'
-import type { SymbolEntry, ModuleIndex } from './document-index'
+import type { SymbolEntry } from './document-index'
 import type { Clause, Term } from './term'
 import {
-    ConsInfo, FuncInfo, InferredInfo, MerType, TypeCtor, TypeInfo,
-    keyOf, keyOfTypeCtor,
+    ConsInfo, FuncInfo, InferredInfo, MerType, TypeInfo,
+    keyOf,
 } from './document-type'
 import {
     createLogicVar, resolve, unify, useTrail,
@@ -33,13 +33,14 @@ function isVariable(term: Term) {
 /** 重载签名打分：具体匹配 +1，多态形参 +0.5，实参类型冲突 -1 */
 function signatureScore(fi: FuncInfo, args: (MerType | undefined)[]): number {
     let score = 0
-    for (let i = 0; i < Math.min(args.length, fi.argTypes.length); i++) {
+    const argTypes = fi.type.kind === 'ho' ? fi.type.args : []
+    for (let i = 0; i < Math.min(args.length, argTypes.length); i++) {
         const actual = args[i]
         if (!actual) continue
-        const declared = fi.argTypes[i]
+        const declared = argTypes[i]
         if (declared.kind === 'var') score += 0.5
         else if (actual.kind === 'ctor' && declared.kind === 'ctor'
-            && (actual.ctor.name !== declared.ctor.name || actual.ctor.arity !== declared.ctor.arity)) score -= 1
+            && (actual.name !== declared.name || actual.args.length !== declared.args.length)) score -= 1
         else score += 1
     }
     return score
@@ -56,72 +57,83 @@ const BUILTIN_ARITH_OPS = new Set([
 ])
 
 /**
- * 独立的类型推导器：输入是已完成全局 index 的文档，输出写回
- * ModuleIndex.inferred（类型/类别）与 resolved（名称解析）。
+ * 独立的类型推导器：输入是已完成全局 index 的文档，输出推断结果。
  */
 export class TypeInferer {
     constructor(protected readonly index: GlobalIndex) {}
 
     private doc!: MercuryDocument
-    private vr!: ModuleIndex
+    private currentModule!: string
     private currentClause!: Clause
+    private inferred = new Map<Term, InferredInfo>()
+    private resolved = new Map<Term, SymbolEntry[]>()
+    private signatures = new Map<Term, FuncInfo>()
     // 类型推断工作态（每个子句重置）
     private ctx = useTrail()
     private varTypes = new Map<string, LType>()
     private varNames = new WeakMap<LVar, string>()
     private varCounter = 0
 
-    /** 推断结果写回 ModuleIndex.inferred（linker / hover 的读取点） */
-    private get inferred(): Map<Term, InferredInfo> { return this.vr.inferred }
-    /** 本模块全部签名：不再依赖 clause 在文件里的先后顺序 */
-    private get types(): Map<string, TypeInfo> { return this.index.localTypes(this.doc) }
-    private get funcs(): Map<string, FuncInfo> { return this.index.localFuncs(this.doc) }
-    private get preds(): Map<string, FuncInfo> { return this.index.localPreds(this.doc) }
+    /** 本模块的类型定义 */
+    private get localTypes(): TypeInfo[] {
+        return this.index.getTypeInfoByModule(this.currentModule)
+    }
+    /** 本模块的函数/谓词签名 */
+    private get localFuncs(): FuncInfo[] {
+        return this.index.getFuncInfoByModule(this.currentModule)
+    }
     /** 跨模块查询统一由全局符号表提供 */
     private get crossIndex() {
         return {
-            lookupType: (k: string) => this.index.lookupType(k, this.doc),
-            lookupFunc: (n: string, a: number) => this.index.lookupFunc(n, a, this.doc),
-            allTypeInfos: () => this.index.externalTypeInfos(this.doc),
+            allTypeInfos: () => {
+                const all: TypeInfo[] = []
+                for (const mi of []) { // TODO: implement properly
+                    // all.push(...mi.types.values())
+                }
+                return all
+            },
         }
     }
 
-    async inferDocument(doc: MercuryDocument, cancelToken?: CancellationToken): Promise<void> {
-        const vr = this.index.get(doc)!
-        if (!vr) return
+    async inferDocument(doc: MercuryDocument, cancelToken?: CancellationToken): Promise<{ inferred: Map<Term, InferredInfo>, resolved: Map<Term, SymbolEntry[]>, signatures: Map<Term, FuncInfo> }> {
+        // 获取模块名
+        const moduleTerm = (doc.parseResult.value as any).args.find((t: Term) => t.name === 'module')
+        this.currentModule = moduleTerm ? moduleQualifiedName(moduleTerm) : ''
         this.doc = doc
-        this.vr = vr
-        this.recordLocalSignatures()
+        this.inferred = new Map()
+        this.resolved = new Map()
+        this.signatures = new Map()
         for (const clause of (doc.parseResult.value as any).args as Clause[]) {
             if (cancelToken) await interruptAndCheck(cancelToken)
             this.currentClause = clause
             this.inferClause(clause)
             this.resolveClause(clause)
         }
+        return { inferred: this.inferred, resolved: this.resolved, signatures: this.signatures }
     }
+       
 
     /** 阶段 3 的 qualified 解析：定好每个引用的签名、所属模块与限定名，全部落盘 */
     private resolveClause(clause: Clause): void {
         const top = clause.term
-        const vr = this.vr
         const walk = (t: Term) => {
             if (!t) return
             if (t.syntaxType === 'atom' && t.name) {
-                const entries = this.index.resolve(t, this.doc)
+                const entries = this.index.getByName(t.name)
                 const key = keyOf(t.name, t.semanticArity)
-                const local = vr.funcs.get(key) ?? vr.preds.get(key)
-                const picked = local
-                    ? { fi: local, entry: undefined as SymbolEntry | undefined }
+                const localFuncs = this.localFuncs.filter(f => f.name === t.name && f.arity === t.semanticArity)
+                const picked = localFuncs.length > 0
+                    ? { fi: localFuncs[0], entry: undefined as SymbolEntry | undefined }
                     : this.pickSignature(t, entries)
-                if (picked?.fi) vr.signatures.set(t, picked.fi)
+                if (picked?.fi) this.signatures.set(t, picked.fi)
                 const explicit = t.qualified ? moduleQualifiedName(t.qualified) : undefined
                 const owner = explicit || picked?.entry?.module
-                    || (picked?.fi ? vr.moduleName : undefined)
-                    || entries[0]?.module || vr.moduleName
+                    || (picked?.fi ? this.currentModule : undefined)
+                    || entries[0]?.module || this.currentModule
                 if (owner) t.qualifiedName = `${owner}.${t.name}`
                 if (entries.length) {
                     const best = picked?.entry
-                    vr.resolved.set(t, best ? [best, ...entries.filter(e => e !== best)] : entries)
+                    this.resolved.set(t, best ? [best, ...entries.filter(e => e !== best)] : entries)
                 }
             }
             for (const a of t.args ?? []) walk(a)
@@ -132,14 +144,7 @@ export class TypeInferer {
     }
     /** 本模块声明/定义项：签名直接来自本模块索引，无需消歧 */
     private recordLocalSignatures(): void {
-        const vr = this.vr
-        const put = (t: Term) => {
-            const fi = vr.funcs.get(keyOf(t.name, t.semanticArity))
-                ?? vr.preds.get(keyOf(t.name, t.semanticArity))
-            if (fi) vr.signatures.set(t, fi)
-        }
-        vr.definition.forEach(put)
-        vr.declaration.forEach(put)
+        // TODO: 从 GlobalIndex 获取本模块的 definition/declaration
     }
     /** 跨模块重载：按实参推断类型选出唯一签名及其所属符号，无法消歧则不选 */
     private pickSignature(term: Term, entries: SymbolEntry[]): { fi: FuncInfo; entry: SymbolEntry } | undefined {
@@ -182,7 +187,7 @@ export class TypeInferer {
                 return v
             }
             if (x.kind === 'ctor') {
-                return { kind: 'ctor', ctor: x.ctor, args: x.args.map(go) } as LType
+                return { kind: 'ctor', name: x.name, args: x.args.map(go) } as LType
             }
             // ho 恒带 result（pred 用自由变量占位），保证结构合一两侧键集合一致
             return {
@@ -194,10 +199,11 @@ export class TypeInferer {
     }
     private instantiateSignature(sig: FuncInfo): SignatureInst {
         const env = new Map<string, LType>()
+        const type = sig.type.kind === 'ho' ? sig.type : { kind: 'ho', pf: 'pred', args: [] }
         return {
             sig,
-            args: sig.argTypes.map(a => this.instantiate(a, env)),
-            result: sig.resultType ? this.instantiate(sig.resultType, env) : undefined,
+            args: type.args.map(a => this.instantiate(a, env)),
+            result: type.result ? this.instantiate(type.result, env) : undefined,
         }
     }
     private instantiateCons(ci: ConsInfo): ConsInst {
@@ -510,12 +516,12 @@ export class TypeInferer {
         // 展开类型同义词：assoc_list(K,V) == list(pair(K,V)) → 取 list 元素类型 pair(K,V)
         if (expected) {
             const resolved = this.peek(this.resolveSynonym(expected))
-            if (resolved && resolved.kind === 'ctor' && resolved.ctor.name === 'list' && resolved.args.length === 1) {
+            if (resolved && resolved.kind === 'ctor' && resolved.name === 'list' && resolved.args.length === 1) {
                 elemType = resolved.args[0]
             }
         }
         const listType = (): LType => ({
-            kind: 'ctor', ctor: { name: 'list', arity: 1 }, args: [elemType],
+            kind: 'ctor', name: 'list', args: [elemType],
         } as LType)
         const walk = (t: Term) => {
             if (t.nameArity === '[]/0') {
@@ -545,12 +551,14 @@ export class TypeInferer {
     private resolveSynonym(t: LType): LType {
         const p = this.peek(t)
         if (!p || p.kind !== 'ctor') return t
-        const ti = this.types.get(keyOfTypeCtor(p.ctor)) ?? this.crossIndex.lookupType(keyOfTypeCtor(p.ctor))
+        const localTi = this.localTypes.find(ti => ti.type.name === p.name && ti.type.args.length === p.args.length)
+        const globalTi = this.index.getTypeInfo(p.name).find(ti => ti.type.args.length === p.args.length)
+        const ti = localTi ?? globalTi
         if (!ti || !ti.body) return t
         // 同义体是模板：把类型参数映射到调用点的实参（活逻辑项），其余变量实例化
         const env = new Map<string, LType>()
-        for (let i = 0; i < ti.params.length; i++) {
-            const param = ti.params[i]
+        for (let i = 0; i < ti.type.args.length; i++) {
+            const param = ti.type.args[i]
             if (param.kind === 'var' && p.args[i]) env.set(param.name, p.args[i])
         }
         return this.instantiate(ti.body, env)
@@ -558,9 +566,9 @@ export class TypeInferer {
     /** 实参的自然类型：字面量直接给出，其余用已推断结果（不产生推断副作用） */
     private literalType(t: Term): MerType | undefined {
         switch (t.syntaxType) {
-            case 'integer': return { kind: 'ctor', ctor: { name: 'int', arity: 0 }, args: [] }
-            case 'float': return { kind: 'ctor', ctor: { name: 'float', arity: 0 }, args: [] }
-            case 'string': return { kind: 'ctor', ctor: { name: 'string', arity: 0 }, args: [] }
+            case 'integer': return { kind: 'ctor', name: 'int', args: [] }
+            case 'float': return { kind: 'ctor', name: 'float', args: [] }
+            case 'string': return { kind: 'ctor', name: 'string', args: [] }
             default: {
                 const known = this.inferred.get(t)?.type
                 return known && known.kind === 'ctor' ? known : undefined
@@ -571,13 +579,13 @@ export class TypeInferer {
     private builtinArithmeticType(term: Term, args: (MerType | undefined)[]): LType | undefined {
         if (term.arity === 1 && term.name === '-') {
             const a = args[0]
-            return a && a.kind === 'ctor' && NUMERIC_CTORS.has(a.ctor.name) ? (a as LType) : undefined
+            return a && a.kind === 'ctor' && NUMERIC_CTORS.has(a.name) ? (a as LType) : undefined
         }
         if (term.arity !== 2 || !BUILTIN_ARITH_OPS.has(term.name)) return undefined
         const [a, b] = args
         if (!a || !b || a.kind !== 'ctor' || b.kind !== 'ctor') return undefined
-        if (a.ctor.name !== b.ctor.name || a.ctor.arity !== b.ctor.arity) return undefined
-        if (!NUMERIC_CTORS.has(a.ctor.name)) return undefined
+        if (a.name !== b.name || a.args.length !== b.args.length) return undefined
+        if (!NUMERIC_CTORS.has(a.name)) return undefined
         return a as LType
     }
     /**
@@ -617,7 +625,7 @@ export class TypeInferer {
             const a = args[i]
             if (!a || a.kind !== 'ctor') continue
             const p = this.peek(inst.args[i])
-            if (p && p.kind === 'ctor' && (p.ctor.name !== a.ctor.name || p.ctor.arity !== a.ctor.arity)) return false
+            if (p && p.kind === 'ctor' && (p.name !== a.name || p.args.length !== a.args.length)) return false
         }
         return true
     }
@@ -628,7 +636,7 @@ export class TypeInferer {
             const a = args[i]
             if (!a || a.kind !== 'ctor') continue
             const p = this.peek(inst.args[i])
-            if (p && p.kind === 'ctor' && (p.ctor.name !== a.ctor.name || p.ctor.arity !== a.ctor.arity)) return false
+            if (p && p.kind === 'ctor' && (p.name !== a.name || p.args.length !== a.args.length)) return false
         }
         // 再合一结果类型；成功时留下的约束正是采用该签名所需的
         if (expected && inst.result && !this.unifyTypes(inst.result, expected)) return false
@@ -640,7 +648,7 @@ export class TypeInferer {
         const name = term.name
         const arity = term.arity
         const exp = expected ? this.peek(expected) : undefined
-        const expCtor: TypeCtor | undefined = exp && exp.kind === 'ctor' ? exp.ctor : undefined
+        const expName: string | undefined = exp && exp.kind === 'ctor' ? exp.name : undefined
         // 自下而上取实参自然类型：用于重载校验与内建运算符推导
         const naturalArgs = term.args.map(a => this.literalType(a))
         const builtinType = this.builtinArithmeticType(term, naturalArgs)
@@ -648,14 +656,14 @@ export class TypeInferer {
         const constrs: ConsInfo[] = []
         const collectConstrs = (ti: TypeInfo) => {
             for (const ci of ti.constructors) {
-                if (ci.ctor === name && ci.arity === arity) constrs.push(ci)
+                if (ci.name === name && ci.arity === arity) constrs.push(ci)
             }
         }
         for (const ti of this.types.values()) collectConstrs(ti)
         // 跨模块：类型上下文明确时，纳入导入模块里同名同元数的类型构造子
-        if (expCtor) {
+        if (expName) {
             for (const ti of this.crossIndex.allTypeInfos()) {
-                if (ti.ctor.name === expCtor.name && ti.ctor.arity === expCtor.arity) collectConstrs(ti)
+                if (ti.type.name === expName && ti.type.args.length === exp.args.length) collectConstrs(ti)
             }
         }
         // 构造子优先：`(>)`, `(<)`, `(=)` 这类零元构造子不能因同名 pred/func 声明
@@ -708,8 +716,9 @@ export class TypeInferer {
                 f = localFunc
             } else if (!localFunc && constrs.length === 1) {
                 chosenInst = this.instantiateCons(constrs[0])
-            } else if (localFunc && constrs.length >= 1 && localFunc.argTypes.length === arity) {
-                f = localFunc
+            } else if (localFunc && constrs.length >= 1) {
+                const argLen = localFunc.type.kind === 'ho' ? localFunc.type.args.length : 0
+                if (argLen === arity) f = localFunc
             }
             if (f) {
                 const mark = this.ctx.mark()

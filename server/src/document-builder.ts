@@ -32,7 +32,7 @@ export class DefaultDocumentBuilder{
         // {infer:false} 关闭 index 内的类型推导，阶段 3 拿到的是
         // 「所有文件 + 全部声明」，与文件访问顺序无关，不再需要按 import 拓扑排序。
         for (const doc of documents) {
-            await this.services.index.index(doc, cancelToken, { infer: false });
+            await this.services.index.update(doc, cancelToken, { infer: false });
             await interruptAndCheck(cancelToken)
         }
         // 3. 全局符号表就绪后，才对 clause body 做类型推导 + qualified 名称解析

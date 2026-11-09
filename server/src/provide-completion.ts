@@ -118,7 +118,7 @@ export async function CompletionProvider(
 
     // 索引结果只存在 GlobalIndex 里：文档刚打开、还没走 build 时现场补一次索引。
     if (indexed && !services.index.get(indexed)) {
-        await services.index.index(indexed, NOOP_CANCEL, { infer: false })
+        await services.index.update(indexed, NOOP_CANCEL, { infer: false })
     }
     const exported = services.index.getExportedTermsByModule(q.moduleName)
     // 模块名匹配时，用本文件的 exports 兜底

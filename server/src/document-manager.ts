@@ -6,6 +6,9 @@ import { readFileSync } from 'fs'
 import { Stream, stream } from './stream'
 import { Diagnostic, Position } from 'vscode-languageserver'
 import type { MercuryServices } from './services'
+import type { InferredInfo } from './document-type'
+import type { SymbolEntry } from './document-index'
+import type { FuncInfo } from './document-type'
 
 export enum DocumentState {
     /**
@@ -54,7 +57,7 @@ export enum DocumentState {
 export interface MercuryDocument{
 
     importedByDocs: MercuryDocument[]
-    
+
     /** The Uniform Resource Identifier (URI) of the document */
     readonly uri: URI;
     /** The text document used to convert between offsets and positions */
@@ -69,6 +72,12 @@ export interface MercuryDocument{
     references: Term[];
     /** Result of the validation phase */
     diagnostics?: Diagnostic[]
+    /** Type inference results: term → inferred type/category */
+    inferred?: Map<Term, InferredInfo>
+    /** Name resolution results: term → symbol entries */
+    resolved?: Map<Term, SymbolEntry[]>
+    /** Signature resolution results: term → func/pred signature */
+    signatures?: Map<Term, FuncInfo>
 }
 export interface MercuryDocumentFactory {
     /**
