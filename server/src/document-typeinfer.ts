@@ -57,7 +57,7 @@ const BUILTIN_ARITH_OPS = new Set([
 
 /**
  * 独立的类型推导器：输入是已完成全局 index 的文档，输出写回
- * visitResult.inferred（类型/类别/mode）与 visitResult.resolved（名称解析）。
+ * visitResult.inferred（类型/类别）与 visitResult.resolved（名称解析）。
  */
 export class TypeInferer {
     constructor(protected readonly index: GlobalIndex) {}
@@ -69,7 +69,6 @@ export class TypeInferer {
     private ctx = useTrail()
     private varTypes = new Map<string, LType>()
     private varNames = new WeakMap<LVar, string>()
-    private varMode = new Map<string, string>()
     private varCounter = 0
 
     /** 推断结果写回 visitResult.inferred（linker / hover 的读取点） */
@@ -256,12 +255,11 @@ export class TypeInferer {
         return resolve<MerType>(t, v => ({ kind: 'var', name: this.freeName(v) }))
     }
     /** inferred 只持有活的逻辑项，不冻结；读取时才 resolve，后到的绑定自动可见 */
-    private inferredInfo(t: LType, extra: { category?: InferredInfo['category']; mode?: string } = {}): InferredInfo {
+    private inferredInfo(t: LType, extra: { category?: InferredInfo['category'] } = {}): InferredInfo {
         const inferer = this
         return {
             get type(): MerType { return inferer.solidify(t) },
             category: extra.category,
-            mode: extra.mode,
         }
     }
     private inferClause(clause: Clause) {
@@ -272,7 +270,6 @@ export class TypeInferer {
         // varNames / varCounter 保持实例级：变量名在读取时才用到，不能被后续子句清掉
         this.ctx = useTrail()
         this.varTypes = new Map()
-        this.varMode = new Map()
         try {
             if (top.nameArity === ':-/2') {
                 this.inferHead(top.args[0])
@@ -282,7 +279,6 @@ export class TypeInferer {
                 const sig = this.signatureOf(clause.callee)
                 const inst = sig ? this.instantiateSignature(sig) : undefined
                 if (sig && inst) {
-                    this.markVarMode(top.args[1], sig.resultMode ?? 'out')
                     if (inst.result) this.inferTerm(top.args[1], inst.result)
                 }
                 // 头与结果共用同一份签名实例，保证 f(T) = T 的类型变量一致
@@ -295,13 +291,6 @@ export class TypeInferer {
             // 推断异常不向外抛，保持索引稳定
         }
     }
-    // 变量子句级 mode 标记（只记首次；head 形参优先于后续绑定处推断）
-    private markVarMode(term: Term, mode: string) {
-        if (isVariable(term) || ['!/1', '!./1', '!:/1'].includes(term.nameArity)) {
-            const key = this.varKey(term)
-            if (!this.varMode.has(key)) this.varMode.set(key, mode)
-        }
-    }
     // 状态变量 !X 在解析树里只占一个参数节点，语义上却对应签名的两个字段
     //（!.X / !:X）；!.X、!:X 各占一个。按语义宽度对齐，否则 `p(A, B, C, !X, !Y)`
     // 会把 !Y 错对到第 4 个签名字段（推成 X 的类型）。
@@ -312,12 +301,11 @@ export class TypeInferer {
     private inferSignatureArgs(args: Term[], inst: SignatureInst) {
         let ti = 0
         for (const arg of args) {
-            this.markVarMode(arg, inst.sig.argModes?.[ti] ?? 'in')
             this.inferTerm(arg, inst.args[ti])
             ti += this.argWidth(arg)
         }
     }
-    // 头签名 → 头参数类型/mode（状态变量 !X / !.X / !:X 视为同一变量 X）
+    // 头签名 → 头参数类型（状态变量 !X / !.X / !:X 视为同一变量 X）
     private inferHead(head: Term, outer?: SignatureInst) {
         // 带体的函数子句 `f(A1..An) = R :- Body`：头是 =(f(A1..An), R)，
         // 参数按签名推断，结果变量 R 按返回类型推断
@@ -327,7 +315,6 @@ export class TypeInferer {
             if (sig) {
                 const inst = outer ?? this.instantiateSignature(sig)
                 this.inferSignatureArgs(call.args, inst)
-                this.markVarMode(head.args[1], sig.resultMode ?? 'out')
                 if (inst.result) this.inferTerm(head.args[1], inst.result)
                 return
             }
@@ -457,26 +444,11 @@ export class TypeInferer {
         this.inferSignatureArgs(term.args, this.instantiateSignature(sig))
     }
     // 统一目标：rhs 类型需与 lhs 一致；lhs 若已有具体类型（来自头签名）则约束 rhs。
-    // 首次出现在绑定位置的变量记子句级 mode out（head 形参已在 inferHead 标记，不会被覆盖）
+    // 类型是活引用，unify 后读取时自然可见，无需刷新快照。
     private inferUnify(lhs: Term, rhs: Term) {
-        this.markVarMode(lhs, 'out')
-        this.markVarMode(rhs, 'out')
         const lt = this.inferTerm(lhs)
         const rt = this.inferTerm(rhs, lt)
         this.unifyTypes(lt, rt)
-        // 类型是活引用，unify 后读取时自然可见；这里只刷新 varMode 快照
-        this.refreshVarTypes(lhs)
-        this.refreshVarTypes(rhs)
-    }
-    // 递归刷新 term 下所有变量出现处的 mode 快照
-    private refreshVarTypes(term: Term) {
-        if (isVariable(term) || ['!/1', '!./1', '!:/1'].includes(term.nameArity)) {
-            const key = this.varKey(term)
-            const t = this.varTypes.get(key)
-            if (t) this.pushVarType(term, t)
-            return
-        }
-        for (const a of term.args ?? []) this.refreshVarTypes(a)
     }
     private pushVarType(term: Term, t: LType) {
         const key = this.varKey(term)
@@ -484,7 +456,7 @@ export class TypeInferer {
         // 以前只写外层节点，hover 落在内层 X 上就只看到后续推断覆盖出的 unknown。
         const varMap = term.clause?.varMap ?? this.currentClause?.varMap
         const occurrences = varMap?.get(key) ?? []
-        const info = this.inferredInfo(t, { mode: this.varMode.get(key) })
+        const info = this.inferredInfo(t)
         this.inferred.set(term, info)
         for (const occ of occurrences) this.inferred.set(occ, info)
     }

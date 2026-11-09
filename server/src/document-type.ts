@@ -73,13 +73,10 @@ export function argModesOf(args: Term[]): (string | undefined)[] | undefined {
     return modes.some(m => m !== undefined) ? modes : undefined
 }
 
-// 推断结果：某项的类型，以及在类型上下文可消歧时给出的类别（构造子/函数）；
-// mode 为变量的子句级模式近似（head 形参的声明 mode / 局部绑定变量 out / 调用 in 实参）
+// 推断结果：某项的类型，以及在类型上下文可消歧时给出的类别（构造子/函数）。
 export interface InferredInfo {
     type: MerType
     category?: 'constructor' | 'func' | 'pred'
-    mode?: string           // 变量出现点的 inst 字符串（Phase C 逐出现点记录，hover 标 inst；
-                            //  无记录时为子句级近似 in/out，hover 标 mode）
 }
 
 export function keyOfTypeCtor(tc: TypeCtor): string {
