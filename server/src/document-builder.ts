@@ -33,12 +33,14 @@ export class DefaultDocumentBuilder{
         // 「所有文件 + 全部声明」，与文件访问顺序无关，不再需要按 import 拓扑排序。
         for (const doc of documents) {
             await this.services.index.update(doc, cancelToken, { infer: false });
+            doc.state = DocumentState.Indexed
             await interruptAndCheck(cancelToken)
         }
         // 3. 全局符号表就绪后，才对 clause body 做类型推导 + qualified 名称解析
         this.services.client.setStatus('$(sync~spin)inferring')
         for (const doc of documents) {
             await this.services.typeInferer.inferDocument(doc, cancelToken);
+            doc.state = DocumentState.Inferred
             await interruptAndCheck(cancelToken)
         }
         this.services.client.setStatus('$(sync~spin)linking')
