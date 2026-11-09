@@ -22,7 +22,7 @@ export type Logical<T> =
     | (T extends object ? { [K in keyof T]: Logical<T[K]> } : never)
 
 /** 默认 never = 未定型的推断洞；需要具体类型时显式写 createLogicalVar<number>()。 */
-export function createLogicalVar<T = never>(): LogicVar<T> {
+export function createLogicVar<T = never>(): LogicVar<T> {
     return new LogicVarImpl<T>()
 }
 
@@ -56,6 +56,11 @@ class LogicVarImpl<T = unknown> implements LogicVar<T> {
 
 export function isUnboundLogicalVar(x: Object): x is LogicVar {
     return isUnboundVarImpl(x)
+}
+
+/** 任意逻辑变量（含已绑定）；供调用方在项里收集变量、挂 freeze 目标。 */
+export function isLogicalVar(x: unknown): x is LogicVar {
+    return x instanceof LogicVarImpl
 }
 
 function isUnboundVarImpl(x: unknown): x is LogicVarImpl {

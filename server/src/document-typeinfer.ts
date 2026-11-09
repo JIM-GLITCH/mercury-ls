@@ -13,7 +13,7 @@ import {
     keyOf, keyOfTypeCtor,
 } from './document-type'
 import {
-    createLogicalVar, resolve, unify, useTrail,
+    createLogicVar, resolve, unify, useTrail,
     type LogicVar, type Logical,
 } from './logical-var'
 import type { GlobalIndex } from './document-index'
@@ -170,7 +170,7 @@ export class TypeInferer {
     // 否则保持无类别（不标注），避免误标。推断失败不应影响索引/labeling。
     // 声明签名是模板；每个头/调用点/构造子候选各实例化一套逻辑变量，互不污染。
     private freshLogical(name?: string): LVar {
-        const v = createLogicalVar<MerType>()
+        const v = createLogicVar<MerType>()
         this.varNames.set(v, name ?? this.freshVar())
         return v
     }
