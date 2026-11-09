@@ -6,7 +6,7 @@
  ******************************************************************************/
 import type { CancellationToken } from 'vscode-languageserver'
 import type { MercuryDocument } from './document-manager'
-import type { SymbolEntry, VisitResult } from './document-index'
+import type { SymbolEntry, ModuleIndex } from './document-index'
 import type { Clause, Term } from './term'
 import {
     ConsInfo, FuncInfo, InferredInfo, MerType, TypeCtor, TypeInfo,
@@ -63,7 +63,7 @@ export class TypeInferer {
     constructor(protected readonly index: GlobalIndex) {}
 
     private doc!: MercuryDocument
-    private vr!: VisitResult
+    private vr!: ModuleIndex
     private currentClause!: Clause
     // 类型推断工作态（每个子句重置）
     private ctx = useTrail()

@@ -1,6 +1,6 @@
 import { CancellationToken, Diagnostic, DiagnosticSeverity } from 'vscode-languageserver'
 import { MercuryDocument } from './document-manager'
-import { label, type SemanticType, type VisitResult } from './document-index'
+import { label, type SemanticType, type ModuleIndex } from './document-index'
 import type { MercuryServices } from './services'
 import { Term } from './term'
 import { sameArity } from './utils'
@@ -59,7 +59,7 @@ export class DefaultLinker implements Linker{
     }
     // 消解无类别引用的 semanticType：本模块 + import 模块（限定名则为目标模块）
     // 中同名同元数的定义/声明，全部候选类别一致时返回该类别
-    private resolveRefKind(ref: Term, name: string, vr: VisitResult): SemanticType | undefined {
+    private resolveRefKind(ref: Term, name: string, vr: ModuleIndex): SemanticType | undefined {
         let candidates = [
             ...vr.definition.get(name),
             ...vr.declaration.get(name),
@@ -93,7 +93,7 @@ export class DefaultLinker implements Linker{
         }
         return undefined
     }
-    private lookupCandidates(vr: VisitResult, name: string): Term[] {
+    private lookupCandidates(vr: ModuleIndex, name: string): Term[] {
         return [...vr.definition.get(name), ...vr.declaration.get(name)]
     }
     addError(msg: string, term: Term) {
