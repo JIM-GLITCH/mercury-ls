@@ -10,20 +10,18 @@
  ******************************************************************************/
 import { CancellationToken, Diagnostic, DiagnosticSeverity } from 'vscode-languageserver'
 import { DocumentState, type MercuryDocument } from './document-manager'
-import type { Term, Clause, RootNode } from './term'
+import type { Term, Clause } from './term'
 import { MultiMap } from './multimap'
-import { TreeStreamImpl, stream } from './stream'
+import { stream } from './stream'
 import { interruptAndCheck } from './promise-util'
-import { sameArity, moduleQualifiedName, equalQualified } from './utils'
-import { TypeInferer } from './document-typeinfer'
-import type { MercuryServices } from './services'
+import { moduleQualifiedName, equalQualified } from './utils'
 import {
-    FuncInfo, InferredInfo, MerType,
-    keyOf, modeOfArg, argModesOf, termToMerType,
+    MerType, keyOf, modeOfArg,
+    varType, typeType, constructorType,
 } from './document-type'
 import {
     instTermToMerInst, instFunctorAlts, modeTermToRef, instDefHead,
-    type MerInst, type InstDef, type ModeDef, type MerModeRef,
+    type MerInst, type MerModeRef,
 } from './document-mode'
 
 // 两个纯函数放在叶子模块 utils，避免 document-index ↔ document-typeinfer 的运行时环；
@@ -56,24 +54,15 @@ export interface SymbolEntry {
     signature?: MerType
 }
 
-/**
- * 单个文件的索引结果 = index() 直接产出的那个对象本身。
- * VisitResult 与 ModuleIndex 是同一个类型别名，由 GlobalIndex 独占持有，
- * 不再需要 VisitResult → ModuleIndex 的转换层。
- */
-
-
-const arityKeys = (name: string, arity: number, altArity?: number): string[] => {
-    const keys = [keyOf(name, arity)]
-    if (altArity !== undefined && altArity !== arity) keys.push(keyOf(name, altArity))
-    return keys
-}
-
 export class GlobalIndex {
     /** 按 name 索引的符号 */
     byName = new MultiMap<string, SymbolEntry>()
     /** 按 module 索引的符号 */
     byModule = new MultiMap<string, SymbolEntry>()
+    /** 每个文档最近一次索引产出的符号，供重新索引/删除时注销 */
+    private symbolsByDoc = new Map<MercuryDocument, SymbolEntry[]>()
+    /** 当前文档遍历期间收集的符号，build 完成后由 update 统一注册 */
+    private currentSymbols: SymbolEntry[] = []
 
     /** 按 name 获取符号 */
     getByName(name: string) {
@@ -126,19 +115,24 @@ export class GlobalIndex {
 
 
 
-    /** 索引文档 */
+    /** 索引文档：重新遍历前先注销该文档上一次登记的全部符号 */
     async update(doc: MercuryDocument, cancelToken: CancellationToken, options?: { infer?: boolean }): Promise<void> {
+        const previous = this.symbolsByDoc.get(doc)
+        if (previous) this.unregisterSymbols(previous)
+        this.symbolsByDoc.delete(doc)
         this.resetVisitState()
         await this.build(doc, cancelToken)
+        this.registerSymbols(this.currentSymbols)
+        this.symbolsByDoc.set(doc, this.currentSymbols)
+        doc.state = DocumentState.Indexed
     }
 
-    /** 删除文档 */
+    /** 删除文档：注销其全部符号 */
     delete(doc: MercuryDocument): void {
-        const moduleName = doc.parseResult.value.args.find(t => t.name === 'module')
-        if (moduleName) {
-            const qualifiedName = moduleQualifiedName(moduleName)
-
-        }
+        const symbols = this.symbolsByDoc.get(doc)
+        if (!symbols) return
+        this.unregisterSymbols(symbols)
+        this.symbolsByDoc.delete(doc)
     }
     private resetVisitState(): void {
         this.module = undefined
@@ -147,6 +141,8 @@ export class GlobalIndex {
         this.moduleImports = []
         this.section = undefined
         this.errors = []
+        this.currentSymbols = []
+        this.currentTypeSignature = undefined
 
     }
 
@@ -159,6 +155,23 @@ export class GlobalIndex {
     errors: Diagnostic[] = []
 
     private currentDoc?: MercuryDocument
+    /** 当前类型定义的签名，构造子签名的结果类型用它 */
+    private currentTypeSignature?: MerType
+    /** 登记一条命名符号（定义/声明/模块项），exported 由声明所在 section 决定 */
+    private addSymbol(term: Term, kind: string, signature?: MerType): void {
+        if (!term || isVariable(term) || !this.currentDoc) return
+        if (this.currentSymbols.some(s => s.term === term)) return
+        this.currentSymbols.push({
+            name: term.name,
+            arity: term.semanticArity ?? term.arity,
+            kind,
+            term,
+            doc: this.currentDoc,
+            module: this.currentModule || undefined,
+            exported: this.section === 'interface' && kind !== 'module',
+            signature,
+        })
+    }
     /** 遍历一个文档的 AST，直接写入 GlobalIndex */
     private async build(doc: MercuryDocument, cancelToken: CancellationToken) {
         this.currentDoc = doc
@@ -497,6 +510,7 @@ export class GlobalIndex {
     }
     visitPredDef(term: Term) {
         label(term, "pred")
+        this.addSymbol(term, 'pred')
         this.currentClause.callee = term
     }
     visitRuleBody(term: Term) {
@@ -670,6 +684,7 @@ export class GlobalIndex {
     visitFuncDef(func: Term) {
         const head = this.visitQualifiedTerm(func)
         label(head, "func")
+        this.addSymbol(head, 'func')
 
     }
     visitFuncReturn(funcReturn: Term) {
@@ -905,9 +920,7 @@ export class GlobalIndex {
         }
     }
     visitTypeDeclType(term: Term) {
-        label(term, "type")
-
-        this.tryAddExport(term)
+        this.visitTypeName(term)
     }
     // 开始收集一个类型定义，返回 TypeInfo（构造子通过 currentType 追加）
 
@@ -926,6 +939,10 @@ export class GlobalIndex {
         }
         // C1/C2 是 data constructor，不是 type；单独标 constructor 以便与类型名区分
         label(term, "constructor")
+        const args = (term.args ?? []).map(a => this.termToSignature(a))
+        // 构造子的结果类型统一是所属类型应用其参数
+        const result = this.currentTypeSignature ?? typeType(term.name, [])
+        this.addSymbol(term, 'constructor', constructorType(term.name, args, result))
 
         // interface 段的具体类型，其构造子也是模块导出符号
         // （如 pair 的 `-`/2：与 int 的减法函数 `-`/2 同名，linker 消解时两者都
@@ -955,6 +972,9 @@ export class GlobalIndex {
     }
     visitTypeName(term: Term) {
         label(term, "type")
+        const signature = typeType(term.name, (term.args ?? []).map(a => this.termToSignature(a)))
+        this.currentTypeSignature = signature
+        this.addSymbol(term, 'type', signature)
 
         this.tryAddExport(term)
 
@@ -991,11 +1011,11 @@ export class GlobalIndex {
         this.section = "interface"
     }
     visitModuleDecl(term: Term) {
-        let module = this.visitModule(term)
         if (!this.module) {
-            this.module = module
-            this.currentModule = moduleQualifiedName(module)
+            this.module = this.visitQualifiedModule(term)
+            this.currentModule = moduleQualifiedName(this.module)
         }
+        this.visitModule(term)
     }
     visitEndModuleDecl(term: Term) {
         let module = this.visitModule(term)
@@ -1006,6 +1026,7 @@ export class GlobalIndex {
     visitModule(term: Term) {
         let right = this.visitQualifiedModule(term)
         label(right, "module")
+        this.addSymbol(right, 'module')
         return right
     }
 
@@ -1198,6 +1219,7 @@ export class GlobalIndex {
     }
     visitModeName(term: Term) {
         label(term, "mode")
+        this.addSymbol(term, 'mode')
 
         this.tryAddExport(term)
     }
@@ -1296,6 +1318,7 @@ export class GlobalIndex {
     }
     visitInstName(term: Term) {
         label(term, "inst")
+        this.addSymbol(term, 'inst')
         this.tryAddExport(term)
     }
     visitInst(term: Term) {
@@ -1340,15 +1363,24 @@ export class GlobalIndex {
         const annotated = (t: Term) => t.nameArity === '::/2' || t.nameArity === '>>/2'
         return args.some(annotated) || (!!ret && annotated(ret))
     }
+    /** 类型表达式 → MerType：变量、参数化类型、`::`/`>>` mode 注解统一在这里转换 */
+    private termToSignature(term: Term): MerType {
+        if (isVariable(term)) return varType(term.name)
+        if (term.nameArity === '::/2' || term.nameArity === '>>/2') {
+            return this.termToSignature(term.args[0])
+        }
+        return typeType(term.name, (term.args ?? []).map(a => this.termToSignature(a)))
+    }
     private recordFuncInfo(func: Term, ret: Term | undefined, determinism?: string) {
         const argRefs = func.args.map(a => this.argModeRefOf(a))
         const retRef = ret ? this.retModeRefOf(ret) : undefined
         const type: MerType = {
             kind: 'func',
             name: func.name,
-            args: func.args.map(a => termToMerType(a)),
-            result: ret ? termToMerType(ret) : undefined,
+            args: func.args.map(a => this.termToSignature(a)),
+            result: ret ? this.termToSignature(ret) : undefined,
         }
+        this.addSymbol(func, 'func', type)
         // 每个 mode 声明一行（Mercury 默认 mode：参数 in，函数结果 out）；带确定性后缀
         const modes = func.args.map(modeOfArg).map(m => m ?? 'in')
         const rm = ret ? modeOfArg(ret) ?? 'out' : 'out'
@@ -1361,17 +1393,9 @@ export class GlobalIndex {
         const type: MerType = {
             kind: 'pred',
             name: pred.name,
-            args: pred.args.map(a => termToMerType(a)),
+            args: pred.args.map(a => this.termToSignature(a)),
         }
-        this.byName.add(pred.name, {
-            name: pred.name,
-            arity: pred.semanticArity,
-            kind: 'pred',
-            term: pred,
-            doc: this.currentDoc!,
-            module: this.currentModule,
-            exported: false,
-        })
+        this.addSymbol(pred, 'pred', type)
     }
     // :- mode I == Init >> Final 结造化入库（Phase A）；mode 别名 `I == Body`（Body 是单个
     // mode 引用，如 array.m 的 `:- mode array_uo == out(uniq_array).`）记 alias 引用，
@@ -1465,7 +1489,9 @@ export class GlobalIndex {
         this.currentClause.callee = term
     }
     tryAddExport(term: Term) {
-        if (this.section == "interface") {
+        if (this.section !== "interface") return
+        for (const s of this.currentSymbols) {
+            if (s.term === term && s.kind !== 'module') s.exported = true
         }
     }
     visitDeterminism(determinism: Term) {

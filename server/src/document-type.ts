@@ -3,12 +3,33 @@ import type { MerModeRef } from './document-mode'
 
 // 轻量类型表示（对应编译器 mer_type），仅用于 LSP 级消歧，不含 kind / 类型类约束
 export type MerType =
-    | { kind: 'typeVar'; name: string; bind: MerType }
-    | { kind: 'typeConstructor'; name: string, args: MerType[]; result: MerType }
-    | { kind: 'pred'; name: string, args: MerType[] }
-    | { kind: 'func'; name: string, args: MerType[]; result?: MerType }
-    | { kind: "type", name: string }
+    | varType
+    | constructorType
+    | predType
+    | funcType
+    | typeType;
+type varType = { kind: 'var'; name: string; bind?: MerType }
+type constructorType = { kind: 'constructor'; name: string, args: MerType[]; result: MerType }
+type predType = { kind: 'pred'; name: string, args: MerType[] }
+type funcType = { kind: 'func'; name: string, args: MerType[]; result?: MerType }
+type typeType = { kind: "type", name: string; args: MerType[] }
 
+export function varType(name: string, bind?: MerType): varType {
+    return { kind: 'var', name, bind } 
+}
+
+export function constructorType(name: string, args: MerType[], result: MerType): constructorType {
+    return { kind: 'constructor', name, args, result }
+}
+export function predType(name: string, args: MerType[]): predType {
+    return { kind: 'pred', name, args }
+}
+export function funcType(name: string, args: MerType[], result?: MerType): funcType {
+    return { kind: 'func', name, args, result }
+}
+export function typeType(name: string, args: MerType[]): typeType {
+    return { kind: 'type', name, args }
+}
 
 
 // 一条过程 mode（对应编译器一个 procedure）：:- mode P(Modes) [is Det]. 或 :: 注解推出的默认过程
@@ -68,52 +89,35 @@ export function keyOf(name: string, arity: number): string {
     return name + '/' + arity
 }
 
-// 把类型表达式 Term 转换为 MerType。Term 是解析出的类型 AST：
-// 变量 → var；builtin/用户类型 → ctor；高阶 pred/func → ho；列表/元组 → ctor
+// 把类型表达式 Term 转换为 MerType：变量 → varType，命名/参数化类型 → typeType，
+// 高阶 pred/func 类型 → predType/funcType；全部通过构造函数生成，避免旧的 ctor/ho 表示
 export function termToMerType(term: Term): MerType {
-    // 变量（类型变量大写）
-    if (term.syntaxType === 'variable') {
-        return { kind: 'var', name: term.name }
-    }
+    if (term.syntaxType === 'variable') return varType(term.name)
     const name = term.name
     const arity = term.arity
     // 列表语法 [T] / [|]/2
-    if (name === '[]' && arity === 0) {
-        return { kind: 'ctor', name: 'list', args: [{ kind: 'var', name: '_' }] }
-    }
-    if (name === '[|]' && arity === 2) {
-        const elem = termToMerType(term.args[0])
-        return { kind: 'ctor', name: 'list', args: [elem] }
-    }
+    if (name === '[]' && arity === 0) return typeType('list', [varType('_')])
+    if (name === '[|]' && arity === 2) return typeType('list', [termToMerType(term.args[0])])
     // 元组 {}/2（'{}'）
     if ((name === '{}' || name === "'{}'") && arity >= 2) {
-        return { kind: 'ctor', name: '{}', args: term.args.map(termToMerType) }
+        return typeType('{}', term.args.map(termToMerType))
     }
     // 剥离 Type :: Inst / Type >> Mode 的模式注解，取真实类型
-    if ((name === '::' || name === '>>') && arity === 2) {
-        return termToMerType(term.args[0])
-    }
+    if ((name === '::' || name === '>>') && arity === 2) return termToMerType(term.args[0])
     // 类型表达式里的 `-`/2 恒为 pair 构造子（如 assoc_list(K,V) == list(K - V) 的 K - V）
-    if (name === '-' && arity === 2) {
-        return { kind: 'ctor', name: 'pair', args: term.args.map(termToMerType) }
-    }
+    if (name === '-' && arity === 2) return typeType('pair', term.args.map(termToMerType))
     // 高阶函数类型 func(A1,...) = R（别名 function(...)）
     if (name === '=' && arity === 2 && ['func', 'function'].includes(term.args[0]?.name)) {
-        const head = term.args[0]
-        return {
-            kind: 'ho', pf: 'func',
-            args: head.args.map(termToMerType),
-            result: termToMerType(term.args[1]),
-        }
+        return funcType('func', term.args[0].args.map(termToMerType), termToMerType(term.args[1]))
     }
     if (name === 'func' || name === 'function') {
-        return { kind: 'ho', pf: 'func', args: term.args.map(termToMerType) }
+        return funcType('func', term.args.map(termToMerType))
     }
     if (name === 'pred' || name === 'predicate') {
-        return { kind: 'ho', pf: 'pred', args: term.args.map(termToMerType) }
+        return predType('pred', term.args.map(termToMerType))
     }
     // 普通类型构造子（含 builtin int/float/string/char 与用户类型、->/2 函数类型）
-    return { kind: 'ctor', name, args: term.args.map(termToMerType) }
+    return typeType(name, term.args.map(termToMerType))
 }
 
 // MerType → 可读字符串（用于 hover 展示变量/项的类型）。
@@ -124,15 +128,13 @@ export function merTypeToString(t: MerType): string {
         switch (ty.kind) {
             case 'var':
                 return /^\?\d+$/.test(ty.name) ? 'unknown' : ty.name
-            case 'ctor':
-                if (ty.args.length === 0) return ty.name
-                return `${ty.name}(${ty.args.map(render).join(', ')})`
-            case 'ho': {
-                const args = ty.args.map(render).join(', ')
-                return ty.pf === 'func'
-                    ? `func(${args}) = ${ty.result ? render(ty.result) : '?'}`
-                    : `pred(${args})`
-            }
+            case 'type':
+            case 'constructor':
+                return ty.args.length === 0 ? ty.name : `${ty.name}(${ty.args.map(render).join(', ')})`
+            case 'pred':
+                return `pred(${ty.args.map(render).join(', ')})`
+            case 'func':
+                return `func(${ty.args.map(render).join(', ')}) = ${ty.result ? render(ty.result) : '?'}`
         }
     }
     return render(t)
