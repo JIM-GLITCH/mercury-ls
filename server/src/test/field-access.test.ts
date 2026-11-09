@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import { URI } from 'vscode-uri'
-import { Visitor } from '../document-index'
+
 import { createMercuryServices, type MercuryServices } from '../services'
 import { findDefTerms } from '../provide-definition'
 import { ReferenceProvider } from '../provide-reference'
@@ -14,7 +14,7 @@ async function visit(src: string, name: string) {
   const uri = URI.parse(`file:///${name}.m`)
   const doc = services.documentFactory.fromString(src, uri)
   services.documents.addDocument(doc)
-  await new Visitor(services).visit(doc, {
+  await services.index.index(doc, {
     isCancellationRequested: false,
     onCancellationRequested: () => undefined,
   } as any)
@@ -55,7 +55,7 @@ const locKey = (t: Term) => {
 describe('record syntax ^ field specifier → field access function indexing', () => {
   it('indexes ^ elem(N) as a reference to elem/(N+1) and elem :=/(N+2)', async () => {
     const doc = await visit(src, 'field-access')
-    const specs = [...doc.visitResult!.reference.get('elem')].filter(t => t.fieldAccess)
+    const specs = [...services.index.get(doc)!.reference.get('elem')].filter(t => t.fieldAccess)
     expect(specs).toHaveLength(3) // 两处 selection，一处 `^ ... := V` update
     for (const t of specs) {
       // 语义实体是 field access function（函数），不是构造子字段标签 fieldname
@@ -73,12 +73,12 @@ describe('record syntax ^ field specifier → field access function indexing', (
     expect(specs.filter(t => t.fieldAccess!.role === 'select')).toHaveLength(2)
     expect(specs.filter(t => t.fieldAccess!.role === 'update')).toHaveLength(1)
     // 字段说明符的参数仍按普通数据项索引（Lo + 1 等不能丢）
-    expect(doc.visitResult!.reference.get('+').length).toBeGreaterThan(0)
+    expect(services.index.get(doc)!.reference.get('+').length).toBeGreaterThan(0)
   })
 
   it('goto-definition on ^ elem finds both selection and update function decls/defs', async () => {
     const doc = await visit(src, 'field-access')
-    const spec = [...doc.visitResult!.reference.get('elem')].find(t => t.fieldAccess)!
+    const spec = [...services.index.get(doc)!.reference.get('elem')].find(t => t.fieldAccess)!
     const defs = findDefTerms(services, { term: spec, uri: doc.uri }).toArray()
     const keys = defs.map(d => `${d.term.name}/${d.term.semanticArity ?? d.term.arity}`)
     expect(keys).toContain('elem/2')       // :- func elem(...) 与 elem(...) = ...
@@ -89,19 +89,19 @@ describe('record syntax ^ field specifier → field access function indexing', (
 
   it('find-references on the elem := definition reaches the ^ elem occurrences', async () => {
     const doc = await visit(src, 'field-access')
-    const updDef = doc.visitResult!.definition.get('elem :=')[0]
+    const updDef = services.index.get(doc)!.definition.get('elem :=')[0]
     const refs: any = await ReferenceProvider(services, {
       textDocument: { uri: doc.uri.toString() },
       position: termRange(updDef).start,
     } as any)
-    const specs = [...doc.visitResult!.reference.get('elem')].filter(t => t.fieldAccess)
+    const specs = [...services.index.get(doc)!.reference.get('elem')].filter(t => t.fieldAccess)
     const keys = refs.map((r: any) => `${r.range.start.line}:${r.range.start.character}`)
     for (const spec of specs) expect(keys).toContain(locKey(spec))
   })
 
   it('hover on ^ elem shows the field selection function signature', async () => {
     const doc = await visit(src, 'field-access')
-    const spec = [...doc.visitResult!.reference.get('elem')].find(t => t.fieldAccess)!
+    const spec = [...services.index.get(doc)!.reference.get('elem')].find(t => t.fieldAccess)!
     const hover: any = await HoverProvider(services, {
       textDocument: { uri: doc.uri.toString() },
       position: termRange(spec).start,
@@ -119,9 +119,9 @@ describe('record syntax ^ field specifier → field access function indexing', (
       ':- implementation.',
       'get(R, X) :- X = R ^ elem.',
     ].join('\n'), 'field-label')
-    const spec = [...doc.visitResult!.reference.get('elem')].find(t => t.fieldAccess)!
+    const spec = [...services.index.get(doc)!.reference.get('elem')].find(t => t.fieldAccess)!
     expect(spec.semanticArity).toBe(1) // elem/0 → selection function elem/1
-    const label = doc.visitResult!.definition.get('elem').find(t => t.semanticType === 'fieldname')
+    const label = services.index.get(doc)!.definition.get('elem').find(t => t.semanticType === 'fieldname')
     expect(label).toBeDefined()
     const defs = findDefTerms(services, { term: spec, uri: doc.uri }).toArray()
     expect(defs.map(d => d.term.semanticType)).toContain('fieldname')

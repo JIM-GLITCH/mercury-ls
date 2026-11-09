@@ -1,13 +1,14 @@
 import { beforeEach, describe, it, expect } from 'vitest'
 
 import { Parser } from '../mercury-parser'
-import { Visitor } from '../document-index'
+
 import { URI } from 'vscode-uri'
 import { TextDocument } from 'vscode-languageserver-textdocument'
 import { sameArity, semanticNameArityOf } from '../utils'
 import { termRange } from '../term'
 import { uriTermToLocation } from '../provide-definition'
 import { createMercuryServices, type MercuryServices } from '../services'
+import type { GlobalIndex } from '../document-index'
 import { merTypeToString } from '../document-type'
 import { modeRefToInsts } from '../document-mode'
 import { semanticTokensForDocument } from '../provide-semantic-tokens'
@@ -25,34 +26,32 @@ interface DefEntry {
 }
 
 /** 把一段 interface 区内的声明包进最小可解析的 module 骨架里 */
-async function visitMercury(body: string): Promise<Visitor> {
+async function visitMercury(body: string): Promise<GlobalIndex> {
   const src = `:- module test.\n:- interface.\n${body}\n:- end_module test.\n`
   return visitSource(src)
 }
 
-async function visitSource(src: string): Promise<Visitor> {
+async function visitSource(src: string): Promise<GlobalIndex> {
   const doc: any = {
     parseResult: Parser.parse(src),
     uri: URI.parse('file:///test.m'),
-    visitResult: undefined,
   }
-  const v = new Visitor(services)
-  await v.visit(doc, {
+  const v = services.index
+  await v.index(doc, {
     isCancellationRequested: false,
     onCancellationRequested: () => undefined,
   } as any)
   return v
 }
 
-// 跑 visitor + linker，返回带 linkResult 的文档（端到端消歧验证用）
+// 跑 index + linker，返回带 linkResult 的文档（端到端消歧验证用）
 async function linkSource(src: string): Promise<any> {
   const doc: any = {
     parseResult: Parser.parse(src),
     uri: URI.parse('file:///test.m'),
-    visitResult: undefined,
   }
-  const v = new Visitor(services)
-  await v.visit(doc, {
+  const v = services.index
+  await v.index(doc, {
     isCancellationRequested: false,
     onCancellationRequested: () => undefined,
   } as any)
@@ -71,7 +70,7 @@ function collectTerms(term: any, nameArity: string, acc: any[] = []): any[] {
   return acc
 }
 
-function definitionsOf(v: Visitor): Map<string, DefEntry[]> {
+function definitionsOf(v: GlobalIndex): Map<string, DefEntry[]> {
   const m = new Map<string, DefEntry[]>()
   for (const [k, terms] of (v as any).definition.entriesGroupedByKey()) {
     m.set(
@@ -82,7 +81,7 @@ function definitionsOf(v: Visitor): Map<string, DefEntry[]> {
   return m
 }
 
-function declarationsOf(v: Visitor): Map<string, DefEntry[]> {
+function declarationsOf(v: GlobalIndex): Map<string, DefEntry[]> {
   const m = new Map<string, DefEntry[]>()
   for (const [k, terms] of (v as any).declaration.entriesGroupedByKey()) {
     m.set(
@@ -93,7 +92,7 @@ function declarationsOf(v: Visitor): Map<string, DefEntry[]> {
   return m
 }
 
-function typeReferencesOf(v: Visitor): Map<string, DefEntry[]> {
+function typeReferencesOf(v: GlobalIndex): Map<string, DefEntry[]> {
   const m = new Map<string, DefEntry[]>()
   for (const [k, terms] of (v as any).typeReference.entriesGroupedByKey()) {
     m.set(
@@ -104,7 +103,7 @@ function typeReferencesOf(v: Visitor): Map<string, DefEntry[]> {
   return m
 }
 
-function instReferencesOf(v: Visitor): Map<string, DefEntry[]> {
+function instReferencesOf(v: GlobalIndex): Map<string, DefEntry[]> {
   const m = new Map<string, DefEntry[]>()
   for (const [k, terms] of (v as any).instReference.entriesGroupedByKey()) {
     m.set(
@@ -115,7 +114,7 @@ function instReferencesOf(v: Visitor): Map<string, DefEntry[]> {
   return m
 }
 
-function modeReferencesOf(v: Visitor): Map<string, DefEntry[]> {
+function modeReferencesOf(v: GlobalIndex): Map<string, DefEntry[]> {
   const m = new Map<string, DefEntry[]>()
   for (const [k, terms] of (v as any).modeReference.entriesGroupedByKey()) {
     m.set(
@@ -167,10 +166,9 @@ it('produces semantic tokens for definition names', async () => {
     parseResult: Parser.parse(src),
     uri: URI.parse('file:///test.m'),
     textDocument: TextDocument.create('file:///test.m', 'mercury', 0, src),
-    visitResult: undefined,
   }
-  const v = new Visitor(services)
-  await v.visit(doc, {
+  const v = services.index
+  await v.index(doc, {
     isCancellationRequested: false,
     onCancellationRequested: () => undefined,
   } as any)
@@ -196,10 +194,9 @@ foo(_) :- true.
     parseResult: Parser.parse(src),
     uri: URI.parse('file:///test.m'),
     textDocument: TextDocument.create('file:///test.m', 'mercury', 0, src),
-    visitResult: undefined,
   }
-  const v = new Visitor(services)
-  await v.visit(doc, {
+  const v = services.index
+  await v.index(doc, {
     isCancellationRequested: false,
     onCancellationRequested: () => undefined,
   } as any)
@@ -224,10 +221,9 @@ foo(Acc0, X, Y) :-
     parseResult: Parser.parse(src),
     uri: URI.parse('file:///test.m'),
     textDocument: TextDocument.create('file:///test.m', 'mercury', 0, src),
-    visitResult: undefined,
   }
-  const v = new Visitor(services)
-  await v.visit(doc, {
+  const v = services.index
+  await v.index(doc, {
     isCancellationRequested: false,
     onCancellationRequested: () => undefined,
   } as any)
@@ -244,7 +240,7 @@ foo(Acc0, X, Y) :-
   expect(colorsAcc0).toHaveLength(0)
 })
 
-describe('visitor: type declarations', () => {
+describe('index: type declarations', () => {
   it('indexes abstract type `type T.`', async () => {
     const defs = definitionsOf(await visitMercury(':- type t_abstract.'))
     expectLabeled(defs, 't_abstract', 't_abstract/0', 'type')
@@ -309,7 +305,7 @@ describe('visitor: type declarations', () => {
   })
 })
 
-describe('visitor: qualified declaration names', () => {
+describe('index: qualified declaration names', () => {
   it('keeps qualified predicate declarations as pred symbols, not type refs', async () => {
     const v = await visitMercury([
       ':- pred bag.least_upper_bound_small_loop(map(T, int)::in, map(T, int)::in, map(T, int)::out) is det.',
@@ -320,7 +316,7 @@ describe('visitor: qualified declaration names', () => {
   })
 })
 
-describe('visitor: typeclass / instance declarations', () => {
+describe('index: typeclass / instance declarations', () => {
   it('indexes typeclass name `typeclass diet_element(T) where ...` as diet_element/1', async () => {
     const v = await visitMercury(
       ':- typeclass diet_element(T) where [ pred foo(T::in) is semidet ].',
@@ -346,7 +342,7 @@ describe('visitor: typeclass / instance declarations', () => {
   })
 })
 
-describe('visitor: inst declarations', () => {
+describe('index: inst declarations', () => {
   it('indexes inst equivalence `inst I == inst_expr.`', async () => {
     const defs = definitionsOf(await visitMercury(':- inst i_eq == ground.'))
     expectLabeled(defs, 'i_eq', 'i_eq/0', 'inst')
@@ -368,7 +364,7 @@ describe('visitor: inst declarations', () => {
   })
 })
 
-describe('visitor: mode declarations', () => {
+describe('index: mode declarations', () => {
   it('indexes `mode M == InstA >> InstB.` as M/0', async () => {
     const defs = definitionsOf(await visitMercury(':- mode m_eq == in >> out.'))
     expectLabeled(defs, 'm_eq', 'm_eq/0', 'mode')
@@ -389,7 +385,7 @@ function assertNoIsMislabeled(decls: Map<string, DefEntry[]>) {
   ).toBe(false)
 }
 
-describe('visitor: pred / func declarations', () => {
+describe('index: pred / func declarations', () => {
   // 注意：pred/func 索引进 declaration（与 type/inst/typeclass 的 definition 不同）；
   // 返回类型带 :: 注解时必须加括号：(R :: out) is det
 
@@ -426,7 +422,7 @@ describe('visitor: pred / func declarations', () => {
   })
 })
 
-describe('visitor: func definition clauses', () => {
+describe('index: func definition clauses', () => {
   it('does not label the func body RHS as type (`X ` + "`</>`" + ` Y = X ++ line ++ Y.`)', async () => {
     const src = [
       ':- module test.',
@@ -458,7 +454,7 @@ describe('visitor: func definition clauses', () => {
   })
 })
 
-describe('visitor: type references (typeReference)', () => {
+describe('index: type references (typeReference)', () => {
   it('indexes type refs in type decl bodies (==, =<, DU ctor args)', async () => {
     const v = await visitMercury(
       ':- type t_du ---> c1(int) ; c2(list(string)).\n' +
@@ -559,7 +555,7 @@ describe('visitor: type references (typeReference)', () => {
   })
 })
 
-describe('visitor: inst references (instReference)', () => {
+describe('index: inst references (instReference)', () => {
   it('indexes inst refs in parametrized modes `Type :: in(Inst)`', async () => {
     const v = await visitMercury(
       ':- pred take_min(diet(T)::in(node), interval(T)::out, diet(T)::out) is det\n' +
@@ -663,7 +659,7 @@ describe('visitor: inst references (instReference)', () => {
   })
 })
 
-describe('visitor: pred/func reference positions (reference)', () => {
+describe('index: pred/func reference positions (reference)', () => {
   it('indexes `Name/Arity` closure refs in clause bodies as pred refs', async () => {
     const v = await visitSource(
       ':- pred p(int, int).\n' +
@@ -774,7 +770,7 @@ describe('goto definition / find references for insts (providers)', () => {
   const visitDoc = async (src: string, uri: URI) => {
     const doc = services.documentFactory.fromString(src, uri)
     services.documents.addDocument(doc)
-    await new Visitor(services).visit(doc, {
+    await services.index.index(doc, {
       isCancellationRequested: false,
       onCancellationRequested: () => undefined,
     } as any)
@@ -843,7 +839,7 @@ describe('goto definition / find references for insts (providers)', () => {
     const doc = await visitDoc(src, uri)
 
     // foreign_proc 函数形式的头标 func（解包 =/2），而不是把 = 记成引用
-    const refTerm = doc.visitResult!.reference.get('init')
+    const refTerm = services.index.get(doc)!.reference.get('init')
       .find((t: any) => t.semanticType === 'func')
     expect(refTerm).toBeTruthy()
     expect((refTerm as any).semanticArity ?? (refTerm as any).arity).toBe(2)
@@ -875,9 +871,9 @@ describe('goto definition / find references for insts (providers)', () => {
     } as any)
 
     // init(N, X) 按定义消解为 func；cell(1, VA0) 是构造子，不被误标 func
-    const initRef = doc.visitResult!.reference.get('init')[0]
+    const initRef = services.index.get(doc)!.reference.get('init')[0]
     expect(initRef.semanticType).toBe('func')
-    const cellRef = doc.visitResult!.reference.get('cell')[0]
+    const cellRef = services.index.get(doc)!.reference.get('cell')[0]
     expect(cellRef.semanticType).toBe('constructor')
   })
 
@@ -886,12 +882,11 @@ describe('goto definition / find references for insts (providers)', () => {
       const uri = URI.parse(`file:///${name}.m`)
       const doc = services.documentFactory.fromString(src, uri)
       services.documents.addDocument(doc)
-      await new Visitor(services).visit(doc, {
+      await services.index.index(doc, {
         isCancellationRequested: false,
         onCancellationRequested: () => undefined,
       } as any)
-      const mod = doc.visitResult!.module
-      services.index.set(doc)
+      const mod = services.index.get(doc)!.module
       return doc
     }
     // mint 导出 `-/2` 函数（减法）；mpair 导出 `-/2` 构造子（pair 的 K - V）
@@ -906,7 +901,7 @@ describe('goto definition / find references for insts (providers)', () => {
       onCancellationRequested: () => undefined,
     } as any)
     // `-` 同时是 func 与构造子候选，类别不唯一 → 不标注（goto def 走不限类别匹配）
-    const ref = docM.visitResult!.reference.get('-')[0]
+    const ref = services.index.get(docM)!.reference.get('-')[0]
     expect(ref.semanticType).toBeUndefined()
   })
 
@@ -915,12 +910,11 @@ describe('goto definition / find references for insts (providers)', () => {
       const uri = URI.parse(`file:///${name}.m`)
       const doc = services.documentFactory.fromString(src, uri)
       services.documents.addDocument(doc)
-      await new Visitor(services).visit(doc, {
+      await services.index.index(doc, {
         isCancellationRequested: false,
         onCancellationRequested: () => undefined,
       } as any)
-      const mod = doc.visitResult!.module
-      services.index.set(doc)
+      const mod = services.index.get(doc)!.module
       return doc
     }
     // mpair 导出类型 pair(K, V) ---> K - V（构造子 `-`/2 在另一模块）
@@ -951,12 +945,11 @@ describe('goto definition / find references for insts (providers)', () => {
       const uri = URI.parse(`file:///${name}.m`)
       const doc = services.documentFactory.fromString(src, uri)
       services.documents.addDocument(doc)
-      await new Visitor(services).visit(doc, {
+      await services.index.index(doc, {
         isCancellationRequested: false,
         onCancellationRequested: () => undefined,
       } as any)
-      const mod = doc.visitResult!.module
-      services.index.set(doc)
+      const mod = services.index.get(doc)!.module
       return doc
     }
     await mk(':- module mpair.\n:- interface.\n:- type pair(K, V) ---> K - V.\n:- end_module mpair.\n', 'mpair-direct')
@@ -1011,7 +1004,7 @@ describe('goto definition / find references for insts (providers)', () => {
     ].join('\n')
     const uri = URI.parse('file:///higher-order-closure-mode.m')
     const doc = await visitDoc(src, uri)
-    const modeErrors = doc.visitResult.errors.filter((d: any) => d.source === 'mercury-ls')
+    const modeErrors = services.index.get(doc)!.errors.filter((d: any) => d.source === 'mercury-ls')
     expect(modeErrors).toEqual([])
   })
 
@@ -1088,12 +1081,11 @@ describe('goto definition / find references for insts (providers)', () => {
       const uri = URI.parse(`file:///${name}.m`)
       const doc = services.documentFactory.fromString(src, uri)
       services.documents.addDocument(doc)
-      await new Visitor(services).visit(doc, {
+      await services.index.index(doc, {
         isCancellationRequested: false,
         onCancellationRequested: () => undefined,
       } as any)
-      const mod = doc.visitResult!.module
-      services.index.set(doc)
+      const mod = services.index.get(doc)!.module
       return doc
     }
     await mk(
@@ -1129,7 +1121,7 @@ describe('goto definition / find references for insts (providers)', () => {
     expect(minus.length).toBeGreaterThan(0)
     for (const t of minus) expect(t.semanticType).toBe('constructor')
     // 头变量 K 的类型由 assoc_list(K, V) 同义词展开推为 K，而非 unknown
-    const kInfo = [...docM.visitResult!.inferred.entries()].filter(([t]: any) => t.name === 'K')
+    const kInfo = [...services.index.get(docM)!.inferred.entries()].filter(([t]: any) => t.name === 'K')
     expect(kInfo.length).toBeGreaterThan(0)
     for (const [, info] of kInfo) expect(merTypeToString((info as any).type)).toBe('K')
   })
@@ -1139,12 +1131,11 @@ describe('goto definition / find references for insts (providers)', () => {
       const uri = URI.parse(`file:///${name}.m`)
       const doc = services.documentFactory.fromString(src, uri)
       services.documents.addDocument(doc)
-      await new Visitor(services).visit(doc, {
+      await services.index.index(doc, {
         isCancellationRequested: false,
         onCancellationRequested: () => undefined,
       } as any)
-      const mod = doc.visitResult!.module
-      services.index.set(doc)
+      const mod = services.index.get(doc)!.module
       return doc
     }
     // va 模块 interface 段导出 empty/0
@@ -1159,7 +1150,7 @@ describe('goto definition / find references for insts (providers)', () => {
       isCancellationRequested: false,
       onCancellationRequested: () => undefined,
     } as any)
-    const ref = docT.visitResult!.reference.get('empty')[0]
+    const ref = services.index.get(docT)!.reference.get('empty')[0]
     expect(ref.semanticType).toBe('func')
   })
 
@@ -1179,7 +1170,7 @@ describe('goto definition / find references for insts (providers)', () => {
     const doc = await visitDoc(src, uri)
 
     // 表达式位置的 functor 引用（init(N, X)）没有 semanticType
-    const refTerm = doc.visitResult!.reference.get('init')[0]
+    const refTerm = services.index.get(doc)!.reference.get('init')[0]
     expect(refTerm.semanticType).toBeUndefined()
     const locs = (await services.providers.findDefTerms({ uri, term: refTerm } as any))
       .map(uriTermToLocation)
@@ -1228,7 +1219,7 @@ describe('goto definition / find references for insts (providers)', () => {
       URI.parse('file:///fourth.m'),
     )
 
-    const defTerm = va.visitResult!.definition.get('init')[0]
+    const defTerm = services.index.get(va)!.definition.get('init')[0]
     const refs = await services.providers.references({
       textDocument: { uri: va.uri.toString() },
       position: termRange(defTerm).start,
@@ -1250,7 +1241,7 @@ describe('goto definition / find references for insts (providers)', () => {
     const uri = URI.parse('file:///inst-goto-def.m')
     const doc = await visitDoc(src, uri)
 
-    const refTerm = doc.visitResult!.instReference.get('i_node')[0]
+    const refTerm = services.index.get(doc)!.instReference.get('i_node')[0]
     const locs = (await services.providers.findDefTerms({ uri, term: refTerm } as any))
       .map(uriTermToLocation)
       .toArray()
@@ -1271,7 +1262,7 @@ describe('goto definition / find references for insts (providers)', () => {
     const uri = URI.parse('file:///type-goto-def.m')
     const doc = await visitDoc(src, uri)
 
-    const refTerm = doc.visitResult!.typeReference.get('pair')[0]
+    const refTerm = services.index.get(doc)!.typeReference.get('pair')[0]
     const locs = await services.providers.typeDefinition({
       textDocument: { uri: uri.toString() },
       position: termRange(refTerm).start,
@@ -1289,8 +1280,6 @@ describe('goto definition / find references for insts (providers)', () => {
       ':- end_module generic_pair.',
       '',
     ].join('\n'), pairUri)
-    services.index.set(pairDoc)
-
     const useUri = URI.parse('file:///generic-use.m')
     const useDoc = await visitDoc([
       ':- module generic_use.',
@@ -1301,7 +1290,7 @@ describe('goto definition / find references for insts (providers)', () => {
       '',
     ].join('\n'), useUri)
 
-    const refTerm = useDoc.visitResult!.typeReference.get('pair')[0]
+    const refTerm = services.index.get(useDoc)!.typeReference.get('pair')[0]
     const locs = await services.providers.typeDefinition({
       textDocument: { uri: useUri.toString() },
       position: termRange(refTerm).start,
@@ -1323,7 +1312,7 @@ describe('goto definition / find references for insts (providers)', () => {
     const uri = URI.parse('file:///inst-find-refs.m')
     const doc = await visitDoc(src, uri)
 
-    const defTerm = doc.visitResult!.definition.get('j_node')[0]
+    const defTerm = services.index.get(doc)!.definition.get('j_node')[0]
     const refs = await services.providers.references({
       textDocument: { uri: uri.toString() },
       position: termRange(defTerm).start,
@@ -1346,7 +1335,7 @@ describe('goto definition / find references for insts (providers)', () => {
     const doc = await visitDoc(src, uri)
 
     // goto def：mode 引用 → mode 定义（第 3 行，0 基 2）
-    const refTerm = doc.visitResult!.modeReference.get('my_mode')[0]
+    const refTerm = services.index.get(doc)!.modeReference.get('my_mode')[0]
     expect(refTerm.semanticType).toBe('mode')
     const locs = (await services.providers.findDefTerms({ uri, term: refTerm } as any))
       .map(uriTermToLocation)
@@ -1355,7 +1344,7 @@ describe('goto definition / find references for insts (providers)', () => {
     expect(locs[0].range.start.line).toBe(2)
 
     // find refs：mode 定义 → mode 引用（第 4 行，0 基 3）
-    const defTerm = doc.visitResult!.definition.get('my_mode')[0]
+    const defTerm = services.index.get(doc)!.definition.get('my_mode')[0]
     const refs = await services.providers.references({
       textDocument: { uri: uri.toString() },
       position: termRange(defTerm).start,
@@ -1370,7 +1359,7 @@ describe('hover shows inferred types', () => {
   const visitDoc = async (src: string, uri: URI) => {
     const doc = services.documentFactory.fromString(src, uri)
     services.documents.addDocument(doc)
-    await new Visitor(services).visit(doc, {
+    await services.index.index(doc, {
       isCancellationRequested: false,
       onCancellationRequested: () => undefined,
     } as any)
@@ -1469,7 +1458,7 @@ describe('hover shows inferred types', () => {
     const uri = URI.parse('file:///hover-if.m')
     const doc = await visitDoc(src, uri)
     // Y 只出现在 then 分支：应与 head 参数 X 同为 int（此前 then 分支被当数据推断而 unknown）
-    const ys = [...doc.visitResult.inferred.entries()].filter(([t]: any) => t.name === 'Y')
+    const ys = [...services.index.get(doc)!.inferred.entries()].filter(([t]: any) => t.name === 'Y')
     expect(ys.length).toBeGreaterThan(0)
     for (const [, info] of ys) {
       expect(merTypeToString((info as any).type)).toBe('int')
@@ -1491,7 +1480,7 @@ describe('hover shows inferred types', () => {
     const uri = URI.parse('file:///mode-phase-a.m')
     const doc = await visitDoc(src, uri)
     // `--->` 体 → bound 构造子列表；body 里的变量 → inst_var 形参引用
-    expect(doc.visitResult.instDefs.get('list_skel/0')).toEqual({
+    expect(services.index.get(doc)!.instDefs.get('list_skel/0')).toEqual({
       params: [],
       body: {
         kind: 'bound',
@@ -1505,7 +1494,7 @@ describe('hover shows inferred types', () => {
       },
     })
     // 参数化 inst：形参名记入 params
-    expect(doc.visitResult.instDefs.get('pair_cell/1')).toEqual({
+    expect(services.index.get(doc)!.instDefs.get('pair_cell/1')).toEqual({
       params: ['T'],
       body: {
         kind: 'bound',
@@ -1514,23 +1503,23 @@ describe('hover shows inferred types', () => {
         ] }],
       },
     })
-    expect(doc.visitResult.instDefs.get('i2/0')).toEqual({ params: [], body: { kind: 'ground' } })
-    expect(doc.visitResult.modeDefs.get('di_uo/0')).toEqual({
+    expect(services.index.get(doc)!.instDefs.get('i2/0')).toEqual({ params: [], body: { kind: 'ground' } })
+    expect(services.index.get(doc)!.modeDefs.get('di_uo/0')).toEqual({
       params: [], initial: { kind: 'ground' }, final: { kind: 'ground' },
     })
     // 声明参数 → 结构化 mode 引用（未注解默认 in / 返回默认 out）
-    expect(doc.visitResult.preds.get('q/1')?.argModeRefs).toEqual([
+    expect(services.index.get(doc)!.preds.get('q/1')?.argModeRefs).toEqual([
       { kind: 'builtin', name: 'in', args: [] },
     ])
-    expect(doc.visitResult.funcs.get('f/1')?.argModeRefs).toEqual([
+    expect(services.index.get(doc)!.funcs.get('f/1')?.argModeRefs).toEqual([
       { kind: 'builtin', name: 'in', args: [] },
     ])
-    expect(doc.visitResult.funcs.get('f/1')?.resultModeRef).toEqual({
+    expect(services.index.get(doc)!.funcs.get('f/1')?.resultModeRef).toEqual({
       kind: 'builtin', name: 'out', args: [],
     })
     // 用户 mode 解析（形参替换在 modeRefToInsts）
-    const ref = doc.visitResult.preds.get('q/1')?.argModeRefs?.[0]
-    const insts = ref && modeRefToInsts(ref, doc.visitResult.modeDefs)
+    const ref = services.index.get(doc)!.preds.get('q/1')?.argModeRefs?.[0]
+    const insts = ref && modeRefToInsts(ref, services.index.get(doc)!.modeDefs)
     expect(insts).toEqual({ initial: { kind: 'ground' }, final: { kind: 'ground' } })
   })
 
@@ -1538,12 +1527,11 @@ describe('hover shows inferred types', () => {
     const mk = async (src: string, name: string) => {
       const doc = services.documentFactory.fromString(src, URI.parse(`file:///${name}.m`))
       services.documents.addDocument(doc)
-      await new Visitor(services).visit(doc, {
+      await services.index.index(doc, {
         isCancellationRequested: false,
         onCancellationRequested: () => undefined,
       } as any)
-      const mod = doc.visitResult!.module
-      services.index.set(doc)
+      const mod = services.index.get(doc)!.module
       return doc
     }
     await mk(':- module array.\n:- interface.\n:- pred map(pred(int, int), list(int), list(int)) is det.\n:- end_module array.\n', 'array-hocall')
@@ -1558,7 +1546,7 @@ describe('hover shows inferred types', () => {
       '    array.map(P, A1, A2).',
     ].join('\n')
     const doc = await mk(src, 'm-hocall')
-    const pInfos = [...doc.visitResult.inferred.entries()].filter(([t]: any) => t.name === 'P')
+    const pInfos = [...services.index.get(doc)!.inferred.entries()].filter(([t]: any) => t.name === 'P')
     expect(pInfos.length).toBeGreaterThan(0)
     expect(merTypeToString((pInfos.at(-1)![1] as any).type)).toBe('pred(int, int)')
   })
@@ -1567,12 +1555,11 @@ describe('hover shows inferred types', () => {
     const mk = async (src: string, name: string) => {
       const doc = services.documentFactory.fromString(src, URI.parse(`file:///${name}.m`))
       services.documents.addDocument(doc)
-      await new Visitor(services).visit(doc, {
+      await services.index.index(doc, {
         isCancellationRequested: false,
         onCancellationRequested: () => undefined,
       } as any)
-      const mod = doc.visitResult!.module
-      services.index.set(doc)
+      const mod = services.index.get(doc)!.module
       return doc
     }
     // 标准库风格：uint 模块导出 cast_to_int/1（模拟 library/uint.m 被构建后的导出索引）
@@ -1593,7 +1580,7 @@ describe('hover shows inferred types', () => {
       onCancellationRequested: () => undefined,
     } as any)
     const infoOf = (name: string) =>
-      [...doc.visitResult.inferred.entries()].filter(([t]: any) => t.name === name)
+      [...services.index.get(doc)!.inferred.entries()].filter(([t]: any) => t.name === name)
     // 修复前：./2 被当名为 `.` 的 functor 查不到 → SizeI/cast_to_int 均为 unknown
     // 修复后：按限定模块 uint 精确查 cast_to_int/1 签名 → SizeI 推为 int
     const sis = infoOf('SizeI')
@@ -1624,12 +1611,11 @@ describe('hover shows inferred types', () => {
     const mk = async (src: string, name: string) => {
       const doc = services.documentFactory.fromString(src, URI.parse(`file:///${name}.m`))
       services.documents.addDocument(doc)
-      await new Visitor(services).visit(doc, {
+      await services.index.index(doc, {
         isCancellationRequested: false,
         onCancellationRequested: () => undefined,
       } as any)
-      const mod = doc.visitResult!.module
-      services.index.set(doc)
+      const mod = services.index.get(doc)!.module
       return doc
     }
     await mk([
@@ -1650,7 +1636,7 @@ describe('hover shows inferred types', () => {
       '    assoc_list.from_corresponding_lists(Ks, Vs, AL).',
     ].join('\n')
     const doc = await mk(src, 'm-qualified-result')
-    const errors = doc.visitResult.errors.filter((d: any) => d.source === 'mercury-ls')
+    const errors = services.index.get(doc)!.errors.filter((d: any) => d.source === 'mercury-ls')
     expect(errors).toEqual([])
   })
 
@@ -1669,14 +1655,13 @@ describe('hover shows inferred types', () => {
     const doc: any = {
       parseResult: Parser.parse(src),
       uri: URI.parse('file:///bag-qualified-solo.m'),
-      visitResult: undefined,
     }
-    const v = new Visitor(services)
-    await v.visit(doc, {
+    const v = services.index
+    await v.index(doc, {
       isCancellationRequested: false,
       onCancellationRequested: () => undefined,
     } as any)
-    const errors = doc.visitResult.errors.filter((d: any) => d.source === 'mercury-ls')
+    const errors = services.index.get(doc)!.errors.filter((d: any) => d.source === 'mercury-ls')
     expect(errors).toEqual([])
   })
 
@@ -1694,7 +1679,7 @@ describe('hover shows inferred types', () => {
     ].join('\n')
     const uri = URI.parse('file:///mode-predmode.m')
     const doc = await visitDoc(src, uri)
-    const vr = doc.visitResult
+    const vr = services.index.get(doc)!
     // hover modeSigs：显式声明替换默认行（默认 in,in,in 是无注解 pred 声明的推断，不再显示）
     const sigs = vr.modeSigs.get('lookup/3') ?? []
     expect(sigs).toEqual(['lookup(in, in, out) is det'])
@@ -1727,7 +1712,7 @@ describe('hover shows inferred types', () => {
     ].join('\n')
     const uri = URI.parse('file:///mode-statevar.m')
     const doc = await visitDoc(src, uri)
-    const modeErrors = doc.visitResult.errors.filter((d: any) => d.source === 'mercury-ls')
+    const modeErrors = services.index.get(doc)!.errors.filter((d: any) => d.source === 'mercury-ls')
     // 修复前：!.A / !:A 共用一个变量键（head 里 in/out 初始化互相覆盖成 free），
     // 且调用按书写元数 slow_set/3 查签名、!A 不展开 → no-matching-mode（用户报告的现象）
     expect(modeErrors).toEqual([])
@@ -1737,12 +1722,11 @@ describe('hover shows inferred types', () => {
     const mk = async (src: string, name: string) => {
       const doc = services.documentFactory.fromString(src, URI.parse(`file:///${name}.m`))
       services.documents.addDocument(doc)
-      await new Visitor(services).visit(doc, {
+      await services.index.index(doc, {
         isCancellationRequested: false,
         onCancellationRequested: () => undefined,
       } as any)
-      const mod = doc.visitResult!.module
-      services.index.set(doc)
+      const mod = services.index.get(doc)!.module
       return doc
     }
     await mk([
@@ -1763,7 +1747,7 @@ describe('hover shows inferred types', () => {
       'wrapper(K, V, !Map) :-',
       '    tree234.remove_smallest(K, V, !Map).',
     ].join('\n'), 'm-statevar-call')
-    const modeErrors = doc.visitResult.errors.filter((d: any) => d.source === 'mercury-ls')
+    const modeErrors = services.index.get(doc)!.errors.filter((d: any) => d.source === 'mercury-ls')
     expect(modeErrors).toEqual([])
   })
 
@@ -1778,11 +1762,11 @@ describe('hover shows inferred types', () => {
     ].join('\n')
     const doc = services.documentFactory.fromString(src, URI.parse('file:///foldl-statevar.m'))
     services.documents.addDocument(doc)
-    await new Visitor(services).visit(doc, {
+    await services.index.index(doc, {
       isCancellationRequested: false,
       onCancellationRequested: () => undefined,
     } as any)
-    const modeErrors = doc.visitResult.errors.filter((d: any) => d.source === 'mercury-ls')
+    const modeErrors = services.index.get(doc)!.errors.filter((d: any) => d.source === 'mercury-ls')
     expect(modeErrors).toEqual([])
   })
 
@@ -1790,12 +1774,11 @@ describe('hover shows inferred types', () => {
     const mk = async (src: string, name: string) => {
       const doc = services.documentFactory.fromString(src, URI.parse(`file:///${name}.m`))
       services.documents.addDocument(doc)
-      await new Visitor(services).visit(doc, {
+      await services.index.index(doc, {
         isCancellationRequested: false,
         onCancellationRequested: () => undefined,
       } as any)
-      const mod = doc.visitResult!.module
-      services.index.set(doc)
+      const mod = services.index.get(doc)!.module
       return doc
     }
     await mk(':- module pair.\n:- interface.\n:- type pair(K, V) ---> K - V.\n:- end_module pair.\n', 'pair-imported-head')
@@ -1813,7 +1796,7 @@ describe('hover shows inferred types', () => {
       '    KVs = [K - V | TailKVs0].',
     ].join('\n')
     const doc = await mk(src, 'update-head-type')
-    const kvs = [...doc.visitResult.inferred.entries()].filter(([t]: any) => t.name === 'KVs')
+    const kvs = [...services.index.get(doc)!.inferred.entries()].filter(([t]: any) => t.name === 'KVs')
     const kvTypes = kvs.map(([, info]: any) => merTypeToString(info.type))
     expect(kvTypes).toContain('assoc_list(K, V)')
   })
@@ -1822,12 +1805,11 @@ describe('hover shows inferred types', () => {
     const mk = async (src: string, name: string) => {
       const doc = services.documentFactory.fromString(src, URI.parse(`file:///${name}.m`))
       services.documents.addDocument(doc)
-      await new Visitor(services).visit(doc, {
+      await services.index.index(doc, {
         isCancellationRequested: false,
         onCancellationRequested: () => undefined,
       } as any)
-      const mod = doc.visitResult!.module
-      services.index.set(doc)
+      const mod = services.index.get(doc)!.module
       return doc
     }
     // array 模块导出 size/2 (in, in)；本地模块也有同名 size/2 (out, out)
@@ -1845,7 +1827,7 @@ describe('hover shows inferred types', () => {
       '    array.size(Array, 0).',
     ].join('\n')
     const doc = await mk(src, 'm-qualcheck')
-    const modeErrors = doc.visitResult.errors.filter((d: any) => d.source === 'mercury-ls')
+    const modeErrors = services.index.get(doc)!.errors.filter((d: any) => d.source === 'mercury-ls')
     expect(modeErrors).toEqual([])
   })
 
@@ -1857,12 +1839,11 @@ describe('hover shows inferred types', () => {
     const mk = async (src: string, name: string) => {
       const doc = services.documentFactory.fromString(src, URI.parse(`file:///${name}.m`))
       services.documents.addDocument(doc)
-      await new Visitor(services).visit(doc, {
+      await services.index.index(doc, {
         isCancellationRequested: false,
         onCancellationRequested: () => undefined,
       } as any)
-      const mod = doc.visitResult!.module
-      services.index.set(doc)
+      const mod = services.index.get(doc)!.module
       return doc
     }
     await mk(':- module array.\n:- interface.\n:- pred size(int, int).\n:- mode size(in, out) is det.\n:- end_module array.\n', 'array-sz')
@@ -1876,7 +1857,7 @@ describe('hover shows inferred types', () => {
       '    array.size(Array, 0).',
     ].join('\n')
     const doc = await mk(src, 'm-sizezero')
-    const modeErrors = doc.visitResult.errors.filter((d: any) => d.source === 'mercury-ls')
+    const modeErrors = services.index.get(doc)!.errors.filter((d: any) => d.source === 'mercury-ls')
     expect(modeErrors).toEqual([])
   })
 
@@ -1892,7 +1873,7 @@ describe('hover shows inferred types', () => {
     const uri = URI.parse('file:///hover-func-body.m')
     const doc = await visitDoc(src, uri)
     const typedAsInt = (name: string) =>
-      [...doc.visitResult.inferred.entries()].filter(
+      [...services.index.get(doc)!.inferred.entries()].filter(
         ([t, info]: any) => t.name === name && info.type && merTypeToString(info.type) === 'int',
       )
     // 带体函数子句：头参数 X/Y 与结果变量 Z 都按签名推成 int
@@ -1920,7 +1901,7 @@ describe('hover shows inferred types', () => {
       '    generate_foldl2_2(1, Size, GenPred, Array0, Array, !AccA, !AccB).',
     ].join('\n')
     const doc = await visitDoc(src, URI.parse('file:///hover-foldl2.m'))
-    const inferred = doc.visitResult!.inferred
+    const inferred = services.index.get(doc)!.inferred
     const typesOf = (name: string) =>
       [...inferred.entries()]
         .filter(([t]: any) => {

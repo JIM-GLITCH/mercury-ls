@@ -45,7 +45,7 @@ describe('nullary operator constructors', () => {
 
     const ref = (name: string) => collect(
       doc.parseResult.value,
-      (t: any) => t.name === name && t.arity === 0 && doc.visitResult!.inferred.has(t),
+      (t: any) => t.name === name && t.arity === 0 && services.index.get(doc)!.inferred.has(t),
     )[0]
 
     for (const name of ['=', '<', '>']) {
@@ -53,8 +53,8 @@ describe('nullary operator constructors', () => {
       expect(t, `${name}/0`).toBeDefined()
       expect(t.semanticType).toBe('constructor')
       expect(t.semanticArity).toBe(0)
-      expect(merTypeToString(doc.visitResult!.inferred.get(t)!.type)).toBe('comparison_result')
-      expect(doc.visitResult!.inferred.get(t)!.category).toBe('constructor')
+      expect(merTypeToString(services.index.get(doc)!.inferred.get(t)!.type)).toBe('comparison_result')
+      expect(services.index.get(doc)!.inferred.get(t)!.category).toBe('constructor')
     }
 
     const gt = ref('>')

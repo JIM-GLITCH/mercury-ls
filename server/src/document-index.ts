@@ -1,16 +1,16 @@
 /******************************************************************************
  * 构建阶段 2：文档级索引 + 全局符号表
  *
- * Visitor（文档级索引）与 GlobalIndex（全局表）合并在一处：索引阶段直接产出
- * doc.visitResult，它本身就是全局表里的 ModuleIndex 条目（同一个对象）；
- * GlobalIndex.set 只登记引用，不再做 VisitResult → ModuleIndex 的派生转换。
+ * GlobalIndex 是唯一的索引入口与持有者：index() 自己遍历 AST 产出 ModuleIndex，
+ * 直接登记进 byDoc / byModule / bySymbol / byExportedTerm；MercuryDocument 上
+ * 不再挂索引结果，消费者统一用 services.index.get(doc) 读取。
  *   a. pred/func/type/inst/mode/ctor 定义与声明（含结构化签名）
  *   b. import_module / use_module / include_module
  *   c. interface 段（:- interface. 到 :- implementation. 之间）声明的导出标记
  * 全部文档 index 完成后，阶段 3 才有足够信息做 clause body 的类型推导与名称解析。
  ******************************************************************************/
 import { CancellationToken, Diagnostic, DiagnosticSeverity } from 'vscode-languageserver'
-import type { MercuryDocument } from './document-manager'
+import { DocumentState, type MercuryDocument } from './document-manager'
 import type { Term, Clause, RootNode } from './term'
 import { MultiMap } from './multimap'
 import { TreeStreamImpl, stream } from './stream'
@@ -56,11 +56,11 @@ export interface SymbolEntry {
 }
 
 /**
- * 单个文件的索引结果 = 索引阶段直接产出的那个对象本身。
- * VisitResult（文档级字段）与 ModuleIndex（全局表条目）是同一个实例，
- * GlobalIndex.set 只登记引用，不再做 VisitResult → ModuleIndex 的派生转换。
+ * 单个文件的索引结果 = index() 直接产出的那个对象本身。
+ * VisitResult 与 ModuleIndex 是同一个类型别名，由 GlobalIndex 独占持有，
+ * 不再需要 VisitResult → ModuleIndex 的转换层。
  */
-export type ModuleIndex = VisitResult
+
 
 const arityKeys = (name: string, arity: number, altArity?: number): string[] => {
     const keys = [keyOf(name, arity)]
@@ -111,12 +111,26 @@ export class GlobalIndex {
         ]
     }
 
-    /** 纯登记：doc.visitResult 已是完整 ModuleIndex，不再做任何派生转换；重复调用幂等 */
-    set(doc: MercuryDocument): ModuleIndex | undefined {
+    /**
+     * 索引唯一入口：重置遍历状态 → 遍历 AST 产出 ModuleIndex → 登记进全局表。
+     * 调用方只需一轮循环；infer 默认开启只为兼容「单文件直接 index」的调用方，
+     * builder 传 infer:false，等所有文件都进入全局表后再统一跑 TypeInferer。
+     */
+    async index(doc: MercuryDocument, cancelToken: CancellationToken, options?: { infer?: boolean }): Promise<ModuleIndex | undefined> {
+        const existing = this.get(doc)
+        if (existing && doc.state >= DocumentState.Indexed) return existing
+        this.resetVisitState()
+        const mi = await this.build(doc, cancelToken)
+        this.register(doc, mi)
+        doc.state = DocumentState.Indexed
+        if (options?.infer !== false) await new TypeInferer(this).inferDocument(doc, cancelToken)
+        return mi
+    }
+
+    /** 纯登记：mi 已是完整 ModuleIndex；重复调用幂等 */
+    private register(doc: MercuryDocument, mi: ModuleIndex): ModuleIndex {
         this.invalidateCaches()
         this.delete(doc)
-        const mi = doc.visitResult
-        if (!mi) return undefined
         this.byDoc.set(doc, mi)
         if (mi.moduleName) this.byModule.add(mi.moduleName, mi)
         for (const s of mi.symbols) this.bySymbol.add(s.name, s)
@@ -157,7 +171,7 @@ export class GlobalIndex {
         const exact = this.byModule.get(moduleQualifiedName(term))
         if (exact.length) return exact[0].doc
         for (const mi of this.byDoc.values()) {
-            const mod = mi.doc.visitResult?.module
+            const mod = mi.module
             if (mod && equalQualified(term, mod)) return mi.doc
         }
         return undefined
@@ -369,109 +383,30 @@ export class GlobalIndex {
         // 有可见候选时不引入不可见候选，避免误解析
         return [...local, ...(fromVisible.length ? fromVisible : fallback)]
     }
-}
-
-
-// ===== 文档级索引：直接产出 VisitResult / ModuleIndex（同一个对象）=====
-
-// 内置模式名：标 mode 但不进 modeReference
-const builtinModes = new Set(["in", "out", "di", "uo", "ui", "muo"])
-// 内置 inst 名：标 inst 但不进 instReference
-const builtinInsts = new Set([
-    "ground", "any", "free", "unique", "mostly_unique", "mostly_uniq",
-    "clobbered", "mostly_clobbered", "clobbered_any", "unique_any",
-    "mostly_unique_any", "not_reached", "bound_unique",
-])
-export type VisitResult = {
-    module?:Term
-    errors:Diagnostic[]
-    definition: MultiMap<string,Term>,
-    reference:MultiMap<string,Term>,
-    typeReference:MultiMap<string,Term>,
-    instReference:MultiMap<string,Term>,
-    modeReference:MultiMap<string,Term>,
-    declaration:MultiMap<string,Term>,
-    exports:MultiMap<string,Term>
-    /** 全部模块引用（import_module / use_module / include_module），供 goto def 等旧消费者使用 */
-    imports:Term[]
-    /** 阶段 2a/2b：带类别与所在 section 的模块依赖，全局符号表据此算可见性 */
-    moduleImports: ModuleImport[]
-    // 索引阶段收集的结构化签名（供阶段 3 推导）
-    types:Map<string, TypeInfo>          // 类型构造子 → 类型定义（含构造子列表）
-    funcs:Map<string, FuncInfo>          // 函数签名（name/arity → 参数+返回类型）
-    preds:Map<string, FuncInfo>          // 谓词签名（name/arity → 参数类型）
-    // name/arity → mode 声明展示串（每个声明一行，如 add(in, in) = (out)；未注解用默认 in/out）
-    modeSigs:Map<string, string[]>
-    // :- inst / :- mode 声明的结构化表示
-    instDefs:Map<string, InstDef>
-    modeDefs:Map<string, ModeDef>
-    /** 阶段 3 推断结果：项 → 推断类型/类别（供 linker 精确消歧 functor/func） */
-    inferred:Map<Term, InferredInfo>
-    /** 阶段 3 名称解析结果：body 引用 → 全局符号表候选（含导出标记与所属模块） */
-    resolved:Map<Term, SymbolEntry[]>
-    /** 阶段 3 定好的签名（含跨模块重载消歧），hover 只读渲染 */
-    signatures:Map<Term, FuncInfo>
-    // ↓ 索引阶段一次性算好并写进同一个对象；全局符号表只登记引用，不再派生第二个结构
-    doc: MercuryDocument
-    /** 点分模块名（由 module Term 还原） */
-    moduleName?: string
-    symbols: SymbolEntry[]
-    exportedKeys: Set<string>
-    /** interface 段原始导出 Term（不含实现侧同名定义） */
-    exportTerms: Term[]
-}
-
-/**
- * 索引阶段直接算出的派生字段（模块名 / 导出键 / 符号表条目）。
- * 写回同一个 VisitResult 对象，避免 VisitResult → ModuleIndex 的转换层。
- */
-function deriveIndexFields(vr: VisitResult, doc: MercuryDocument) {
-    const moduleName = vr.module ? moduleQualifiedName(vr.module) : undefined
-    const exportTerms: Term[] = []
-    const exportTermSet = new Set<Term>()
-    vr.exports.forEach(t => {
-        if (exportTermSet.has(t)) return
-        exportTermSet.add(t)
-        exportTerms.push(t)
-    })
-    const exportedKeys = new Set<string>()
-    exportTerms.forEach(t => arityKeys(t.name, t.semanticArity, t.arity).forEach(k => exportedKeys.add(k)))
-    const symbols: SymbolEntry[] = []
-    const seen = new Set<Term>()
-    const collect = (map: MultiMap<string, Term>) => map.forEach(t => {
-        if (seen.has(t)) return
-        seen.add(t)
-        symbols.push({
-            name: t.name,
-            arity: t.semanticArity,
-            kind: t.semanticType ?? 'unknown',
-            term: t,
-            doc,
-            module: moduleName,
-            exported: exportTermSet.has(t) || exportedKeys.has(keyOf(t.name, t.semanticArity))
-                || exportedKeys.has(keyOf(t.name, t.arity)),
-        })
-    })
-    collect(vr.declaration)
-    collect(vr.definition)
-    for (const imp of vr.moduleImports) {
-        if (!imp.module) imp.module = moduleQualifiedName(imp.term)
+    /** GlobalIndex 是全局单例，遍历状态只属于当前文档，每次 index 前重置。 */
+    private resetVisitState(): void {
+        this.module = undefined
+        this.imports = []
+        this.moduleImports = []
+        this.section = undefined
+        this.errors = []
+        this.definition = new MultiMap<string, Term>()
+        this.reference = new MultiMap<string, Term>()
+        this.typeReference = new MultiMap<string, Term>()
+        this.instReference = new MultiMap<string, Term>()
+        this.modeReference = new MultiMap<string, Term>()
+        this.declaration = new MultiMap<string, Term>()
+        this.exports = new MultiMap<string, Term>()
+        this.types = new Map<string, TypeInfo>()
+        this.funcs = new Map<string, FuncInfo>()
+        this.preds = new Map<string, FuncInfo>()
+        this.modeSigs = new Map<string, string[]>()
+        this.instDefs = new Map<string, InstDef>()
+        this.modeDefs = new Map<string, ModeDef>()
+        this.inferred = new Map<Term, InferredInfo>()
+        this.currentType = undefined
     }
-    return { doc, moduleName, symbols, exportedKeys, exportTerms }
-}
 
-// determinism 项 → 字符串（det/semidet/cc_multi... 均为原子；缺省 undefined）
-function detOf(term: Term | undefined): string | undefined {
-    return term?.name
-}
-
-export class Visitor {
-    /** 未显式注入容器时，用一套全新的空索引，绝不共享全局状态 */
-    protected readonly services?: MercuryServices
-    private fallbackIndex?: GlobalIndex
-    constructor(services?: MercuryServices) {
-        this.services = services
-    }
     module?:Term
     imports=[] as Term[]
     moduleImports=[] as ModuleImport[]
@@ -494,13 +429,8 @@ export class Visitor {
     inferred = new Map<Term, InferredInfo>()
     // 正在收集的类型定义（visitTypeConstrutor 往里追加构造子）
     private currentType?: TypeInfo
-    /**
-     * 阶段 1：纯索引，不做类型推导。
-     * infer 默认开启只为兼容「单文件直接 visit」的调用方；builder 传 infer:false，
-     * 等所有文件都进入全局符号表后再统一跑 TypeInferer（这才是信息完整的路径）。
-     */
-    async visit(doc: MercuryDocument, cancelToken: CancellationToken, options?: { infer?: boolean }) {
-        this.errors = []
+    /** 遍历一个文档的 AST，产出完整 ModuleIndex；结果由 register 登记，不再挂到 doc 上。 */
+    private async build(doc: MercuryDocument, cancelToken: CancellationToken): Promise<ModuleIndex> {
         let rootNode = doc.parseResult.value
         for (const clause of rootNode.args) {
             await interruptAndCheck(cancelToken)
@@ -527,14 +457,8 @@ export class Visitor {
             inferred:this.inferred,
             resolved:new Map(),
             signatures:new Map()
-        } as VisitResult
-        // 派生字段写回同一个对象：全局符号表登记的正是 doc.visitResult 本身
-        doc.visitResult = Object.assign(result, deriveIndexFields(result, doc))
-        if (options?.infer !== false) {
-            const index = this.services?.index ?? (this.fallbackIndex ??= new GlobalIndex())
-            index.set(doc)
-            await new TypeInferer(index).inferDocument(doc, cancelToken)
-        }
+        } as ModuleIndex
+        return Object.assign(result, deriveIndexFields(result, doc)) as ModuleIndex
     }
     visitClause(clause: Clause) {
         this.currentClause = clause
@@ -1931,6 +1855,101 @@ export class Visitor {
     }
 
 }
+
+
+// ===== 索引结果类型：由 GlobalIndex.index() 产出并独占持有 =====
+
+// 内置模式名：标 mode 但不进 modeReference
+const builtinModes = new Set(["in", "out", "di", "uo", "ui", "muo"])
+// 内置 inst 名：标 inst 但不进 instReference
+const builtinInsts = new Set([
+    "ground", "any", "free", "unique", "mostly_unique", "mostly_uniq",
+    "clobbered", "mostly_clobbered", "clobbered_any", "unique_any",
+    "mostly_unique_any", "not_reached", "bound_unique",
+])
+export type ModuleIndex = {
+    module?:Term
+    errors:Diagnostic[]
+    definition: MultiMap<string,Term>,
+    reference:MultiMap<string,Term>,
+    typeReference:MultiMap<string,Term>,
+    instReference:MultiMap<string,Term>,
+    modeReference:MultiMap<string,Term>,
+    declaration:MultiMap<string,Term>,
+    exports:MultiMap<string,Term>
+    /** 全部模块引用（import_module / use_module / include_module），供 goto def 等旧消费者使用 */
+    imports:Term[]
+    /** 阶段 2a/2b：带类别与所在 section 的模块依赖，全局符号表据此算可见性 */
+    moduleImports: ModuleImport[]
+    // 索引阶段收集的结构化签名（供阶段 3 推导）
+    types:Map<string, TypeInfo>          // 类型构造子 → 类型定义（含构造子列表）
+    funcs:Map<string, FuncInfo>          // 函数签名（name/arity → 参数+返回类型）
+    preds:Map<string, FuncInfo>          // 谓词签名（name/arity → 参数类型）
+    // name/arity → mode 声明展示串（每个声明一行，如 add(in, in) = (out)；未注解用默认 in/out）
+    modeSigs:Map<string, string[]>
+    // :- inst / :- mode 声明的结构化表示
+    instDefs:Map<string, InstDef>
+    modeDefs:Map<string, ModeDef>
+    /** 阶段 3 推断结果：项 → 推断类型/类别（供 linker 精确消歧 functor/func） */
+    inferred:Map<Term, InferredInfo>
+    /** 阶段 3 名称解析结果：body 引用 → 全局符号表候选（含导出标记与所属模块） */
+    resolved:Map<Term, SymbolEntry[]>
+    /** 阶段 3 定好的签名（含跨模块重载消歧），hover 只读渲染 */
+    signatures:Map<Term, FuncInfo>
+    // ↓ 索引阶段一次性算好并写进同一个对象；全局符号表只登记引用，不再派生第二个结构
+    doc: MercuryDocument
+    /** 点分模块名（由 module Term 还原） */
+    moduleName?: string
+    symbols: SymbolEntry[]
+    exportedKeys: Set<string>
+    /** interface 段原始导出 Term（不含实现侧同名定义） */
+    exportTerms: Term[]
+}
+
+/**
+ * 索引阶段直接算出的派生字段（模块名 / 导出键 / 符号表条目）。
+ * 写回同一个 VisitResult 对象，避免 VisitResult → ModuleIndex 的转换层。
+ */
+function deriveIndexFields(vr: ModuleIndex, doc: MercuryDocument) {
+    const moduleName = vr.module ? moduleQualifiedName(vr.module) : undefined
+    const exportTerms: Term[] = []
+    const exportTermSet = new Set<Term>()
+    vr.exports.forEach(t => {
+        if (exportTermSet.has(t)) return
+        exportTermSet.add(t)
+        exportTerms.push(t)
+    })
+    const exportedKeys = new Set<string>()
+    exportTerms.forEach(t => arityKeys(t.name, t.semanticArity, t.arity).forEach(k => exportedKeys.add(k)))
+    const symbols: SymbolEntry[] = []
+    const seen = new Set<Term>()
+    const collect = (map: MultiMap<string, Term>) => map.forEach(t => {
+        if (seen.has(t)) return
+        seen.add(t)
+        symbols.push({
+            name: t.name,
+            arity: t.semanticArity,
+            kind: t.semanticType ?? 'unknown',
+            term: t,
+            doc,
+            module: moduleName,
+            exported: exportTermSet.has(t) || exportedKeys.has(keyOf(t.name, t.semanticArity))
+                || exportedKeys.has(keyOf(t.name, t.arity)),
+        })
+    })
+    collect(vr.declaration)
+    collect(vr.definition)
+    for (const imp of vr.moduleImports) {
+        if (!imp.module) imp.module = moduleQualifiedName(imp.term)
+    }
+    return { doc, moduleName, symbols, exportedKeys, exportTerms }
+}
+
+// determinism 项 → 字符串（det/semidet/cc_multi... 均为原子；缺省 undefined）
+function detOf(term: Term | undefined): string | undefined {
+    return term?.name
+}
+
 
 
 function nameArity(term: Term, nameArity: string) {

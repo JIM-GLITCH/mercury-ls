@@ -1,5 +1,6 @@
 import { CancellationToken, Diagnostic } from 'vscode-languageserver'
 import { MercuryDocument } from './document-manager'
+import type { MercuryServices } from './services'
 import { interruptAndCheck } from './promise-util'
 import { stream } from './stream'
 
@@ -14,11 +15,12 @@ export interface DocumentValidator {
 }
 
 export class DefaultDocumentValidator implements DocumentValidator {
+    constructor(protected readonly services: MercuryServices) {}
 
 
     async validateDocument(document: MercuryDocument, cancelToken:CancellationToken): Promise<Diagnostic[]> {
         let parseErrors = document.parseResult.errors;
-        let visitErrors = document.visitResult?.errors ?? []
+        let visitErrors = this.services.index.get(document)?.errors ?? []
         let linkeErrors = document.linkResult?.errors ?? []
         // await interruptAndCheck(cancelToken);
 

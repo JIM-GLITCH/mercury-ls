@@ -32,7 +32,7 @@ describe('inferred types resolve when read', () => {
     // 之后 `Y = X` 才把它绑定到 head 声明里的 int
     const mk = collect(doc.parseResult.value, (t: any) => t.nameArity === 'mk/1')[0]
     expect(mk).toBeDefined()
-    expect(merTypeToString(doc.visitResult!.inferred.get(mk)!.type)).toBe('int')
+    expect(merTypeToString(services.index.get(doc)!.inferred.get(mk)!.type)).toBe('int')
 
     const hover: any = await services.providers.hover({
       textDocument: { uri: doc.uri.toString() },

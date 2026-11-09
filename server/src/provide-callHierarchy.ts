@@ -53,7 +53,7 @@ export async function incomingCallsProvider(services: MercuryServices, params:Ca
     return  stream(services.documents.all)
     .map(doc =>{
         let uri = doc.uri
-        return stream(doc.visitResult?.reference.get(term.name)??[]).map(x=>({uri,term:x}))
+        return stream(services.index.get(doc)?.reference.get(term.name)??[]).map(x=>({uri,term:x}))
     })
     .flat()
     .map(x=>uriTermToCallHierarchyIncomingItem(x)).toArray()
@@ -76,9 +76,9 @@ function SemanticTypeToSymbolKind(semanticType?: SemanticType ): SymbolKind {
             return SymbolKind.Function
     }
 }
-function findRefTermInDocument(term:Term,document:MercuryDocument){
+function findRefTermInDocument(services: MercuryServices, term:Term, document:MercuryDocument){
     let uri = document.uri.toString()
-    let terms = document.visitResult?.reference.get(term.name);
+    let terms = services.index.get(document)?.reference.get(term.name);
     let refterms = stream(terms??[])
     .filter(x=>sameArity(x,term))
     .map(x=>x.clause?.called??[])
@@ -124,8 +124,8 @@ function findModuleOutgoingCalls(services: MercuryServices, { uri, term}:uriTerm
     let document = services.index.getModuleDoc(term);
     if(!document)
         return []
-    return stream(document.visitResult?.imports??[])
-        .map(x=>services.index.getModuleDoc(x)?.visitResult?.module)
+    return stream(services.index.get(document)?.imports??[])
+        .map(x => { const d = services.index.getModuleDoc(x); return d ? services.index.get(d)?.module : undefined })
         .nonNullable()
         .map(moduleTerm=>uriTermToCallHierarchyOutgoingCall(services, {uri,term:moduleTerm}))
         .nonNullable().toArray()
@@ -136,11 +136,11 @@ function findModuleIncmoingCalls(services: MercuryServices, uriTerm: { uri: URI;
     let doc = services.documents.getOrCreateDocument(uri)
     let candidates = doc.importedByDocs
     let res =  stream(candidates).map(candidateDoc =>{
-        let module = candidateDoc.visitResult?.module
+        let module = services.index.get(candidateDoc)?.module
         if(module){
             return {
                 from:uriTermToCallHierarchyItem({uri: doc.uri, term:module}),
-                fromRanges:[termTokenRange(doc.visitResult?.imports.find(x=>equalQualified(x,term))!)]
+                fromRanges:[termTokenRange(services.index.get(doc)?.imports.find(x=>equalQualified(x,term))!)]
             }
         }
     }).nonNullable()

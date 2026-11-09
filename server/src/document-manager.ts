@@ -4,7 +4,6 @@ import { ParseResult, Parser } from './mercury-parser'
 import { Clause, Term } from './term'
 import { readFileSync } from 'fs'
 import { Stream, stream } from './stream'
-import type { VisitResult } from './document-index'
 import { Diagnostic, Position } from 'vscode-languageserver'
 import type { MercuryServices } from './services'
 
@@ -20,7 +19,8 @@ export enum DocumentState {
      * at this stage as a preprocessing step.
      */
     Parsed,
-    Visited,
+    /** AST 已被遍历并登记进全局符号表；后续阶段可直接做类型推导与链接。 */
+    Indexed,
     // /**
     //  * The `IndexManager` service has processed AST nodes of this document. This means the
     //  * exported symbols are available in the global scope and can be resolved from other documents.
@@ -63,7 +63,6 @@ export interface MercuryDocument{
     state: DocumentState;
     /** The parse result holds the Abstract Syntax Tree (AST) and potentially also parser / lexer errors */
     parseResult: ParseResult;
-    visitResult?: VisitResult
     linkResult?: {errors:Diagnostic[]}
     /** Result of the scope precomputation phase */
     /** An array of all cross-references found in the AST while linking */
@@ -289,7 +288,6 @@ export class DefaultMercuryDocuments implements MercuryDocuments{
         if(MercuryDoc){
             MercuryDoc.state = DocumentState.Changed
             MercuryDoc.references = []
-            MercuryDoc.visitResult = undefined
             MercuryDoc.linkResult = undefined
             MercuryDoc.diagnostics = []
         }

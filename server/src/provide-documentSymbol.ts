@@ -12,12 +12,12 @@ export async function DocumentSymbolProvider(services: MercuryServices, params: 
     let uri  = params.textDocument.uri;
     let document =services.documents.getOrCreateDocument(URI.parse(uri))
     let symbols :DocumentSymbol[]=[];
-    while(!document.visitResult){
+    while(!services.index.get(document)!){
         await sleep(10)
         await checkCancel(cancelToken)
     }
-    let visitResult = document.visitResult
-    let module = visitResult.module;
+    let mi = services.index.get(document)!
+    let module = mi.module;
     if(module){
         let range = termRange(module);
         symbols.push({
@@ -27,7 +27,7 @@ export async function DocumentSymbolProvider(services: MercuryServices, params: 
             selectionRange: range
         })
     }
-    let definition = document.visitResult.definition;
+    let definition = services.index.get(document)!.definition;
     let KeyValuePairs = definition.values().map(x=>[semanticNameArityOf(x),x] as [string ,Term]);
     let map  = new MultiMap(KeyValuePairs)
     for (const [displayName,funcTerms] of map.entriesGroupedByKey()) {

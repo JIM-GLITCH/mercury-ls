@@ -51,7 +51,7 @@ describe('overloaded builtin operator hover', () => {
 
     await services.builder.build([floats, ints, m], token)
     // 用户看到 `mode +(in, in) = (uo)`：uo 来自这条声明返回值的 ::uo 注解
-    expect(floats.visitResult!.funcs.get('+/2')?.resultMode).toBe('uo')
+    expect(services.index.get(floats)!.funcs.get('+/2')?.resultMode).toBe('uo')
 
     const plus = collectTerms(m.parseResult.value, '+/2')[0]
     expect(plus).toBeDefined()

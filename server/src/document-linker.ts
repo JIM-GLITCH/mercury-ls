@@ -31,7 +31,7 @@ export class DefaultLinker implements Linker{
     errors = [] as Diagnostic[]
     async link(document: MercuryDocument, cancelToken:CancellationToken ) {
         this.errors= []
-        const vr = document.visitResult
+        const vr = this.services.index.get(document)!
         if (vr) {
             // 解析期无法区分 func 调用 / 构造子 / pred 引用的无类别 functor 引用
             // （表达式/数据位置的 `f(...)`，如 `version_array.init(N, X)`）：
@@ -66,8 +66,9 @@ export class DefaultLinker implements Linker{
         ]
         if (ref.qualified) {
             const targetDoc = this.services.index.getModuleDoc(ref.qualified)
-            if (targetDoc?.visitResult) {
-                candidates = candidates.concat(this.lookupCandidates(targetDoc.visitResult, name))
+            const targetMi = targetDoc ? this.services.index.get(targetDoc) : undefined
+            if (targetMi) {
+                candidates = candidates.concat(this.lookupCandidates(targetMi, name))
             }
         } else {
             // 全局导出索引：各模块 interface 段声明的符号，按名字直接取候选

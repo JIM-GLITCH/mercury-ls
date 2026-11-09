@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import { URI } from 'vscode-uri'
-import { Visitor } from '../document-index'
+
 import { createMercuryServices, type MercuryServices } from '../services'
 
 let services: MercuryServices
@@ -10,7 +10,7 @@ async function mk(src: string, name: string, index = true) {
   const uri = URI.parse(`file:///${name}.m`)
   const doc = services.documentFactory.fromString(src, uri)
   services.documents.addDocument(doc)
-  await new Visitor(services).visit(doc, {
+  await services.index.index(doc, {
     isCancellationRequested: false,
     onCancellationRequested: () => undefined,
   } as any)

@@ -17,7 +17,7 @@ export async function ReferenceProvider(services: MercuryServices, params:Refere
 
     if(!term) return [];
     // 目标符号所属模块：引用带限定名则取其限定，否则为所在文档的模块
-    const termModule: Term | undefined = term.qualified ?? document.visitResult?.module
+    const termModule: Term | undefined = term.qualified ?? services.index.get(document)?.module
     switch (term.semanticType) {
         case 'variable':{
             // 查找 variable的引用 只需要在这个varaible在的clause范围里查找
@@ -73,11 +73,11 @@ export async function ReferenceProvider(services: MercuryServices, params:Refere
 //   显式限定到其它模块的同名引用直接排除（这是 qualified 不一致混入的根源）；
 // - 非限定引用 f：只保留目标模块自身、或 import 了目标模块的文档；
 //   文档没有模块声明（无法判定归属）时不过滤
-function visibleRef(refTerm: Term, termModule: Term | undefined, doc: MercuryDocument): boolean {
+function visibleRef(services: MercuryServices, refTerm: Term, termModule: Term | undefined, doc: MercuryDocument): boolean {
     if (!termModule) return true
     const q = refTerm.qualified
     if (q) return equalQualified(q, termModule)
-    const vr = doc.visitResult
+    const vr = services.index.get(doc)!
     if (!vr?.module) return true
     if (equalQualified(vr.module, termModule)) return true
     return (vr.imports ?? []).some(imp => equalQualified(imp, termModule))
@@ -111,9 +111,9 @@ function findReferences(services: MercuryServices, term:Term, termModule:Term|un
         refs.push({uri, range})
     }
     for (const doc of services.documents.all) {
-        for (const refTerm of doc.visitResult?.reference.get(term.name)??[]) {
+        for (const refTerm of services.index.get(doc)?.reference.get(term.name)??[]) {
             if(semanticArityOf(refTerm)!=semanticArityOf(term)) continue;
-            if(!visibleRef(refTerm, termModule, doc)) continue;
+            if(!visibleRef(services, refTerm, termModule, doc)) continue;
             push(doc, refTerm)
         }
     }
@@ -122,38 +122,38 @@ function findReferences(services: MercuryServices, term:Term, termModule:Term|un
     const base = fieldRefBase(term)
     if (!base) return
     for (const doc of services.documents.all) {
-        for (const refTerm of (doc.visitResult?.reference.get(base) ?? []) as Term[]) {
+        for (const refTerm of (services.index.get(doc)?.reference.get(base) ?? []) as Term[]) {
             const fs: FieldAccessInfo | undefined = refTerm.fieldAccess
             if (!fs || fs.base !== base) continue
             if (!matchesFieldRef(term, fs)) continue
-            if(!visibleRef(refTerm, termModule, doc)) continue;
+            if(!visibleRef(services, refTerm, termModule, doc)) continue;
             push(doc, refTerm)
         }
     }
 }
 function findTypeReferences(services: MercuryServices, term:Term, termModule:Term|undefined, refs:Location[]){
     for (const doc of services.documents.all) {
-        for (const refTerm of doc.visitResult?.typeReference.get(term.name)??[]) {
+        for (const refTerm of services.index.get(doc)?.typeReference.get(term.name)??[]) {
             if(semanticArityOf(refTerm)!=semanticArityOf(term)) continue;
-            if(!visibleRef(refTerm, termModule, doc)) continue;
+            if(!visibleRef(services, refTerm, termModule, doc)) continue;
             refs.push({uri:doc.uri.toString(),range:termRange(refTerm)})
         }
     }
 }
 function findInstReferences(services: MercuryServices, term:Term, termModule:Term|undefined, refs:Location[]){
     for (const doc of services.documents.all) {
-        for (const refTerm of doc.visitResult?.instReference.get(term.name)??[]) {
+        for (const refTerm of services.index.get(doc)?.instReference.get(term.name)??[]) {
             if(semanticArityOf(refTerm)!=semanticArityOf(term)) continue;
-            if(!visibleRef(refTerm, termModule, doc)) continue;
+            if(!visibleRef(services, refTerm, termModule, doc)) continue;
             refs.push({uri:doc.uri.toString(),range:termRange(refTerm)})
         }
     }
 }
 function findModeReferences(services: MercuryServices, term:Term, termModule:Term|undefined, refs:Location[]){
     for (const doc of services.documents.all) {
-        for (const refTerm of doc.visitResult?.modeReference.get(term.name)??[]) {
+        for (const refTerm of services.index.get(doc)?.modeReference.get(term.name)??[]) {
             if(semanticArityOf(refTerm)!=semanticArityOf(term)) continue;
-            if(!visibleRef(refTerm, termModule, doc)) continue;
+            if(!visibleRef(services, refTerm, termModule, doc)) continue;
             refs.push({uri:doc.uri.toString(),range:termRange(refTerm)})
         }
     }

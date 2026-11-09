@@ -1,6 +1,6 @@
 import { beforeEach, describe, it, expect } from 'vitest'
 import { URI } from 'vscode-uri'
-import { Visitor } from '../document-index'
+
 import { createMercuryServices, type MercuryServices } from '../services'
 
 let services: MercuryServices
@@ -32,12 +32,11 @@ describe('cross-module assoc_list with split pair module + recursive call', () =
       const uri = URI.parse(`file:///${name}.m`)
       const doc = services.documentFactory.fromString(src, uri)
       services.documents.addDocument(doc)
-      await new Visitor(services).visit(doc, {
+      await services.index.index(doc, {
         isCancellationRequested: false,
         onCancellationRequested: () => undefined,
       } as any)
-      const mod = doc.visitResult!.module
-      services.index.set(doc)
+      const mod = services.index.get(doc)!.module
       return doc
     }
     // pair 在独立模块
@@ -78,10 +77,10 @@ describe('cross-module assoc_list with split pair module + recursive call', () =
     const consList = collectTerms(docM.parseResult.value, '[|]/2')
     const minus = collectTerms(docM.parseResult.value, '-/2')
     expect(consList.length).toBeGreaterThan(0)
-    for (const t of consList) expect((docM.visitResult!.inferred.get(t) as any)?.category).toBe('constructor')
+    for (const t of consList) expect((services.index.get(docM)!.inferred.get(t) as any)?.category).toBe('constructor')
     expect(minus.length).toBeGreaterThan(0)
-    for (const t of minus) expect((docM.visitResult!.inferred.get(t) as any)?.category).toBe('constructor')
-    const kInfo = [...docM.visitResult!.inferred.entries()].filter(([t]: any) => t.name === 'K')
+    for (const t of minus) expect((services.index.get(docM)!.inferred.get(t) as any)?.category).toBe('constructor')
+    const kInfo = [...services.index.get(docM)!.inferred.entries()].filter(([t]: any) => t.name === 'K')
     expect(kInfo.length).toBeGreaterThan(0)
     for (const [, info] of kInfo) expect(merTypeToString((info as any).type)).toBe('K')
   })

@@ -32,7 +32,7 @@ export async function TypeDefinitionProvider(services: MercuryServices, params: 
 
     // If the term is a variable with an inferred type, navigate to the type's definition
     if (term.semanticType === 'variable') {
-        const inferred = document.visitResult?.inferred.get(term)
+        const inferred = services.index.get(document)?.inferred.get(term)
         if (inferred?.type && inferred.type.kind === 'ctor') {
             const typeCtor = inferred.type.ctor
             // Create a temporary term for the type constructor to use findDefTerms
@@ -62,11 +62,11 @@ function findDefinitionTerm(services: MercuryServices, term:Term,document:Mercur
     if(term.qualified){
         let doc =services.index.getModuleDoc(term.qualified)
         if(!doc) return stream([]);
-        let res = findDefTermInThisDocument(term,doc)
+        let res = findDefTermInThisDocument(services,term,doc)
         return res
     }
     // 在本文件查找 如果找到就返回
-    let defs1 = findDefTermInThisDocument(term,document)
+    let defs1 = findDefTermInThisDocument(services,term,document)
     if (!defs1.isEmpty())
         return defs1;
     // 在本文件没找到 在其他文件里查找
@@ -74,9 +74,9 @@ function findDefinitionTerm(services: MercuryServices, term:Term,document:Mercur
     return defs2;
 }
 
-function findDefTermInThisDocument( term: Term, document: MercuryDocument){
+function findDefTermInThisDocument(services: MercuryServices, term: Term, document: MercuryDocument){
     let uri = document.uri;
-    let definition =document.visitResult?.definition
+    let definition =services.index.get(document)?.definition
     if(!definition)
         return stream([])
     // 按引用处的 semanticType 限定可匹配的定义类别：
@@ -90,7 +90,7 @@ function findDefTermInThisDocument( term: Term, document: MercuryDocument){
     if (defs.length) return stream(defs)
     // 只有声明而没有定义子句的目标（如 `:- pred g(int).` 的高阶谓词值引用 `G = g`）
     // 也应能跳转，回退到声明项
-    const declaration = document.visitResult?.declaration
+    const declaration = services.index.get(document)?.declaration
     if (!declaration) return stream([])
     let decls = stream(declaration.get(term.name))
         .filter(x=>sameArity(x,term))
@@ -141,7 +141,7 @@ function findDefTermInOtherDocument(services: MercuryServices, term: Term, docum
     }
 
     // 对于 func 和 pred，保持单层查找（通常在当前模块或直接 import 中定义）
-    let imports = document.visitResult?.imports;
+    let imports = services.index.get(document)?.imports;
     if(!imports){
         return stream([])
     }
@@ -149,7 +149,7 @@ function findDefTermInOtherDocument(services: MercuryServices, term: Term, docum
     let res = stream(imports)
     .map(x => services.index.getModuleDoc(x))
     .nonNullable()
-    .flatMap(doc=>findDefTermInThisDocument(term,doc))
+    .flatMap(doc=>findDefTermInThisDocument(services,term,doc))
 
     return res;
 }
@@ -189,7 +189,7 @@ function findFieldAccessDefinitions(
         ? [update, selection, label]
         : [selection, update, label]
     const docs: MercuryDocument[] = [document]
-    for (const imp of document.visitResult?.imports ?? []) {
+    for (const imp of services.index.get(document)?.imports ?? []) {
         const doc = services.index.getModuleDoc(imp)
         if (doc && !docs.includes(doc)) docs.push(doc)
     }
@@ -203,7 +203,7 @@ function findFieldAccessDefinitions(
     }
     for (const q of queries) {
         for (const doc of docs) {
-            const vr = doc.visitResult
+            const vr = services.index.get(doc)!
             if (!vr) continue
             for (const def of [...vr.definition.get(q.name), ...vr.declaration.get(q.name)]) {
                 if (semanticArityOf(def) !== q.arity) continue
@@ -253,7 +253,7 @@ export  function findDefTerms(services: MercuryServices, params:uriTerm):Stream<
             let document = services.index.getModuleDoc(term);
             if(!document)
                 return stream([]);
-            let module = document.visitResult?.module
+            let module = services.index.get(document)?.module
             if(!module)
                 return stream([]);
             let uri = document.uri ;

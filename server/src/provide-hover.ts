@@ -61,13 +61,13 @@ export async function HoverProvider(services: MercuryServices, params:HoverParam
     let typeStr: string | undefined
     if (term.semanticType !== 'module') {
         if (term.semanticType === 'func' || term.semanticType === 'pred') {
-            const fi = doc.visitResult?.signatures.get(term)
+            const fi = services.index.get(doc)?.signatures.get(term)
             if (fi) {
                 const args = fi.argTypes.map(merTypeToString).join(', ')
                 const lines = [term.semanticType === 'func'
                     ? `type ${fi.name}(${args}) = ${fi.resultType ? merTypeToString(fi.resultType) : '?'}`
                     : `type ${fi.name}(${args})`]
-                const modeLines = doc.visitResult?.modeSigs.get(keyOf(term.name, term.semanticArity)) ?? []
+                const modeLines = services.index.get(doc)?.modeSigs.get(keyOf(term.name, term.semanticArity)) ?? []
                 if (modeLines.length > 0) {
                     for (const ml of modeLines) {
                         lines.push(`mode ${ml}`)
@@ -86,7 +86,7 @@ export async function HoverProvider(services: MercuryServices, params:HoverParam
         }
         // constructor：type 行显示构造子签名（Mercury 里构造子即函数：参数 = 结果类型）
         else if (term.semanticType === 'constructor') {
-            for (const ti of doc.visitResult?.types.values() ?? []) {
+            for (const ti of services.index.get(doc)?.types.values() ?? []) {
                 const ci = ti.constructors.find(c => c.ctor === term.name && c.arity === term.arity)
                 if (ci) {
                     const args = ci.argTypes.map(merTypeToString).join(', ')
@@ -97,7 +97,7 @@ export async function HoverProvider(services: MercuryServices, params:HoverParam
             }
         }
         if (!typeStr) {
-            const inferred = doc.visitResult?.inferred.get(term)
+            const inferred = services.index.get(doc)?.inferred.get(term)
             if (inferred?.type) {
                 const lines = [`type ${merTypeToString(inferred.type)}`]
                 typeStr = lines.join('\n')

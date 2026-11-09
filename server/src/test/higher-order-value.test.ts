@@ -26,7 +26,7 @@ function collect(root: any, pred: (t: any) => boolean, acc: any[] = []): any[] {
 }
 
 function typeOf(doc: any, t: any): string | undefined {
-  const info = doc.visitResult!.inferred.get(t)
+  const info = services.index.get(doc)!.inferred.get(t)
   return info ? merTypeToString(info.type) : undefined
 }
 
@@ -48,7 +48,7 @@ describe('higher-order pred/func values', () => {
     expect(g.semanticType).toBe('pred')
     expect(g.semanticArity).toBe(1)
     expect(typeOf(doc, g)).toBe('pred(int)')
-    expect(doc.visitResult!.inferred.get(g)!.category).toBe('pred')
+    expect(services.index.get(doc)!.inferred.get(g)!.category).toBe('pred')
     // 高阶值经 unify 传给变量 G，G(X) 才能按 pred(int) 解析实参
     expect(typeOf(doc, G)).toBe('pred(int)')
 
@@ -72,7 +72,7 @@ describe('higher-order pred/func values', () => {
     await services.builder.build([doc], token)
 
     // 取子句体里的引用（而不是类型定义 `---> leaf` 里的构造子定义项）
-    const leaf = [...doc.visitResult!.reference.get('leaf')][0]
+    const leaf = [...services.index.get(doc)!.reference.get('leaf')][0]
     expect(leaf).toBeDefined()
     expect(leaf.semanticType).toBe('constructor')
     expect(typeOf(doc, leaf)).toBe('t')
@@ -95,7 +95,7 @@ describe('higher-order pred/func values', () => {
     expect(g.semanticType).toBe('pred')
     expect(g.semanticArity).toBe(2)
     expect(typeOf(doc, g)).toBe('pred(int)')
-    expect(doc.visitResult!.inferred.get(g)!.category).toBe('pred')
+    expect(services.index.get(doc)!.inferred.get(g)!.category).toBe('pred')
     expect(typeOf(doc, G)).toBe('pred(int)')
 
     const params = {

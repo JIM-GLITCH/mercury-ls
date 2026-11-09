@@ -1,6 +1,6 @@
 import { beforeEach, describe, it, expect } from 'vitest'
 import { URI } from 'vscode-uri'
-import { Visitor } from '../document-index'
+
 import { createMercuryServices, type MercuryServices } from '../services'
 import { merTypeToString } from '../document-type'
 
@@ -22,17 +22,16 @@ function collectTerms(root: any, nameArity: string): any[] {
 }
 
 describe('repro3: only assoc_list loaded, pair NOT separately loaded', () => {
-  it('m imports assoc_list (which imports pair); pair module itself not visited', async () => {
+  it('m imports assoc_list (which imports pair); pair module itself not indexed', async () => {
     const mk = async (src: string, name: string) => {
       const uri = URI.parse(`file:///${name}.m`)
       const doc = services.documentFactory.fromString(src, uri)
       services.documents.addDocument(doc)
-      await new Visitor(services).visit(doc, {
+      await services.index.index(doc, {
         isCancellationRequested: false,
         onCancellationRequested: () => undefined,
       } as any)
-      const mod = doc.visitResult!.module
-      services.index.set(doc)
+      const mod = services.index.get(doc)!.module
       return doc
     }
     // assoc_list 模块导入 pair；pair 也单独加载（模拟 re-analyze 后两个模块都就位）
@@ -69,7 +68,7 @@ describe('repro3: only assoc_list loaded, pair NOT separately loaded', () => {
       onCancellationRequested: () => undefined,
     } as any)
 
-    const inf = docM.visitResult!.inferred
+    const inf = services.index.get(docM)!.inferred
     const dump = (label: string, t: any) => {
       const i = inf.get(t) as any
       console.log(label, '=>', i ? merTypeToString(i.type) : '(no inferred)', 'cat=', i?.category)

@@ -21,7 +21,7 @@ export async function DeclarationProvider(services: MercuryServices, params:Decl
         let doc = services.index.getModuleDoc(term);
         if(!doc)
             return []
-        let defTerm = doc.visitResult!.module!
+        let defTerm = services.index.get(doc)!.module!
         return [uriTermToLocation({uri:doc.uri,term:defTerm})]
 
     }
@@ -31,7 +31,7 @@ export async function DeclarationProvider(services: MercuryServices, params:Decl
         if(!doc)
             return [];
         let uri = doc.uri
-        let candidates  =  doc.visitResult?.exports.get(term.name)
+        let candidates  =  services.index.get(doc)?.exports.get(term.name)
         if(candidates){
             let res = stream(candidates).filter(x=>sameArity(x,term))
             .map(term=>uriTermToLocation({uri,term})).toArray()
@@ -41,7 +41,7 @@ export async function DeclarationProvider(services: MercuryServices, params:Decl
     /* 在本文件查找 */
     let uri = uriTerm.uri;
     let doc  = services.documents.getOrCreateDocument(uri);
-    let candidates = doc.visitResult!.declaration.get(term.name);
+    let candidates = services.index.get(doc)!.declaration.get(term.name);
     let res = stream(candidates)
         .filter(x=>sameArity(x,term))
         .map(term=>uriTermToLocation({uri,term}))
@@ -50,10 +50,10 @@ export async function DeclarationProvider(services: MercuryServices, params:Decl
         return res
 
     /**如果本文件没查找到 在导入的文件里找 */
-    // res = stream(doc.visitResult!.imports)
+    // res = stream(services.index.get(doc)!.imports)
     //     .map(x=>services.index.getModuleDoc(x))
     //     .nonNullable()
-    //     .map(targetDoc=>targetDoc.visitResult?.exports)
+    //     .map(targetDoc=>services.index.get(targetDoc)?.exports)
     //     .nonNullable()
     //     .map(map=>{
     //         map.get()

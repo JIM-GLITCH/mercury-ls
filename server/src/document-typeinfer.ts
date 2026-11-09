@@ -57,7 +57,7 @@ const BUILTIN_ARITH_OPS = new Set([
 
 /**
  * 独立的类型推导器：输入是已完成全局 index 的文档，输出写回
- * visitResult.inferred（类型/类别）与 visitResult.resolved（名称解析）。
+ * ModuleIndex.inferred（类型/类别）与 resolved（名称解析）。
  */
 export class TypeInferer {
     constructor(protected readonly index: GlobalIndex) {}
@@ -71,7 +71,7 @@ export class TypeInferer {
     private varNames = new WeakMap<LVar, string>()
     private varCounter = 0
 
-    /** 推断结果写回 visitResult.inferred（linker / hover 的读取点） */
+    /** 推断结果写回 ModuleIndex.inferred（linker / hover 的读取点） */
     private get inferred(): Map<Term, InferredInfo> { return this.vr.inferred }
     /** 本模块全部签名：不再依赖 clause 在文件里的先后顺序 */
     private get types(): Map<string, TypeInfo> { return this.index.localTypes(this.doc) }
@@ -87,7 +87,7 @@ export class TypeInferer {
     }
 
     async inferDocument(doc: MercuryDocument, cancelToken?: CancellationToken): Promise<void> {
-        const vr = doc.visitResult
+        const vr = this.index.get(doc)!
         if (!vr) return
         this.doc = doc
         this.vr = vr
@@ -159,7 +159,7 @@ export class TypeInferer {
         return { fi: best.fi, entry: best.s }
     }
     private signatureOfEntry(s: SymbolEntry): FuncInfo | undefined {
-        const vr = s.doc.visitResult
+        const vr = this.index.get(s.doc)!
         return vr?.funcs.get(keyOf(s.name, s.arity)) ?? vr?.preds.get(keyOf(s.name, s.arity))
     }
 

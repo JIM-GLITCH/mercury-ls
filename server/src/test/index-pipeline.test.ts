@@ -22,7 +22,7 @@ function add(src: string, name: string) {
 
 function inferredTypesOf(doc: any, name: string): string[] {
   const out: string[] = []
-  for (const [t, info] of doc.visitResult!.inferred.entries()) {
+  for (const [t, info] of services.index.get(doc)!.inferred.entries()) {
     if (t.name === name) out.push(merTypeToString(info.type))
   }
   return out
@@ -58,7 +58,7 @@ describe('parse → 全局 index → clause body 推导/qualified', () => {
 
     const mi = services.index.get(doc)!
     // 索引阶段直接产出全局表条目，不再有 VisitResult → ModuleIndex 的转换对象
-    expect(mi).toBe(doc.visitResult)
+    expect(mi).toBe(services.index.get(doc)!)
     expect(mi.moduleName).toBe('demo')
 
     // 2a：pred/func/type/ctor/inst/mode 的结构化定义
@@ -140,7 +140,7 @@ describe('parse → 全局 index → clause body 推导/qualified', () => {
 
     // qualified 解析：body 里的非限定引用解析到全局符号表中已导出的目标模块
     const helper = collectTerms(app.parseResult.value, 'helper/1')[0]
-    const entries = app.visitResult!.resolved.get(helper)
+    const entries = services.index.get(app)!.resolved.get(helper)
     expect(entries?.length).toBeGreaterThan(0)
     expect(entries?.[0].module).toBe('lib')
     expect(entries?.[0].exported).toBe(true)

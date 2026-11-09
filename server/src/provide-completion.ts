@@ -81,7 +81,7 @@ function submoduleNames(services: MercuryServices, moduleName: string): string[]
     const prefix = moduleName + '.'
     const names = new Set<string>()
     for (const doc of services.documents.all) {
-        const mod = doc.visitResult?.module
+        const mod = services.index.get(doc)?.module
         if (!mod) continue
         const full = moduleQualifiedName(mod)
         if (!full.startsWith(prefix)) continue
@@ -90,6 +90,11 @@ function submoduleNames(services: MercuryServices, moduleName: string): string[]
     }
     return [...names]
 }
+
+const NOOP_CANCEL = {
+    isCancellationRequested: false,
+    onCancellationRequested: () => undefined,
+} as any
 
 /**
  * 敲下 `.`（或手动触发 completion）时，把 `.` 前方的 token 当作模块名，
@@ -111,10 +116,14 @@ export async function CompletionProvider(
     const q = qualifierBeforeDot(textDocument, params.position)
     if (!q) return []
 
+    // 索引结果只存在 GlobalIndex 里：文档刚打开、还没走 build 时现场补一次索引。
+    if (indexed && !services.index.get(indexed)) {
+        await services.index.index(indexed, NOOP_CANCEL, { infer: false })
+    }
     const exported = services.index.getExportedTermsByModule(q.moduleName)
-    // 全局索引尚未收录当前文档时（例如刚打开尚未 build），用本文件的 exports 兜底
+    // 模块名匹配时，用本文件的 exports 兜底
     if (exported.length === 0) {
-        const own = indexed?.visitResult
+        const own = indexed ? services.index.get(indexed) : undefined
         if (own?.module && moduleQualifiedName(own.module) === q.moduleName) {
             for (const t of own.exports.values()) exported.push(t)
         }

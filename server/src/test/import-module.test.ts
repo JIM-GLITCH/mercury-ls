@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { Parser } from '../mercury-parser'
-import { Visitor } from '../document-index'
+
 import { createMercuryServices } from '../services'
 
 describe('import module declarations', () => {
@@ -10,14 +10,14 @@ describe('import module declarations', () => {
       parseResult: Parser.parse(':- module foo.\n:- import_module io, list.\n'),
     } as any
 
-    const visitor = new Visitor(services)
-    await visitor.visit(doc, {} as any)
+    const index = services.index
+    await index.index(doc, {} as any)
 
-    const moduleArityErrors = visitor.errors.filter((error: any) =>
+    const moduleArityErrors = index.errors.filter((error: any) =>
       error.message.includes("module term's arity should be zero"),
     )
 
     expect(moduleArityErrors).toEqual([])
-    expect(doc.visitResult?.imports.length).toBe(2)
+    expect(services.index.get(doc)?.imports.length).toBe(2)
   })
 })

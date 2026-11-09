@@ -26,7 +26,7 @@ function collect(root: any, pred: (t: any) => boolean, acc: any[] = []): any[] {
 }
 
 function typeOf(doc: any, t: any): string | undefined {
-  const info = doc.visitResult!.inferred.get(t)
+  const info = services.index.get(doc)!.inferred.get(t)
   return info ? merTypeToString(info.type) : undefined
 }
 
@@ -47,7 +47,7 @@ describe('type inference derives the type of +/2 directly', () => {
     const plus = collect(m.parseResult.value, (t: any) => t.nameArity === '+/2')[0]
     expect(plus).toBeDefined()
     expect(typeOf(m, plus)).toBe('int')
-    expect(m.visitResult!.inferred.get(plus)!.category).toBe('func')
+    expect(services.index.get(m)!.inferred.get(plus)!.category).toBe('func')
     const x = collect(m.parseResult.value, (t: any) => t.syntaxType === 'variable' && t.name === 'X')[0]
     expect(typeOf(m, x)).toBe('int')
   })

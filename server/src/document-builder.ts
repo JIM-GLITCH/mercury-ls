@@ -3,7 +3,6 @@ import { DocumentState, MercuryDocument } from './document-manager'
 import { interruptAndCheck } from './promise-util'
 import { MultiMap } from './multimap'
 import { URI } from 'vscode-uri'
-import { Visitor } from './document-index'
 import { stream } from './stream'
 import type { MercuryServices } from './services'
 
@@ -29,20 +28,11 @@ export class DefaultDocumentBuilder{
                 await interruptAndCheck((cancelToken))
             }
         }
-        // 2a/2b/2c. index：所有文档先做纯索引（visitor 不再做类型推导），
-        // 再一次性把定义、模块依赖、interface 导出标记同步进全局符号表。
-        // 这样阶段 3 拿到的签名是「所有文件 + 全部声明」，与文件访问顺序无关，
-        // 不再需要按 import 拓扑排序 visit。
+        // 2. index：一轮循环完成每个文档的 AST 遍历 + 全局符号表登记。
+        // {infer:false} 关闭 index 内的类型推导，阶段 3 拿到的是
+        // 「所有文件 + 全部声明」，与文件访问顺序无关，不再需要按 import 拓扑排序。
         for (const doc of documents) {
-            if(doc.state <DocumentState.Visited){
-                await new Visitor(this.services).visit(doc, cancelToken, {infer:false});
-                doc.state = DocumentState.Visited;
-                await interruptAndCheck(cancelToken)
-            }
-        }
-        for (const doc of documents) {
-            if (!doc.visitResult) continue
-            this.services.index.set(doc);
+            await this.services.index.index(doc, cancelToken, { infer: false });
             await interruptAndCheck(cancelToken)
         }
         // 3. 全局符号表就绪后，才对 clause body 做类型推导 + qualified 名称解析
@@ -95,7 +85,7 @@ export class DefaultDocumentBuilder{
         .concat(changedDocuments)
         .concat(this.services.documents.all.filter(doc =>doc.state<DocumentState.Validated ))
         .map(doc =>{
-            doc.state = Math.min(doc.state,DocumentState.Visited)
+            doc.state = Math.min(doc.state,DocumentState.Indexed)
             return doc
         })
         .toSet()
