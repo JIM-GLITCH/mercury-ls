@@ -1,15 +1,17 @@
 /******************************************************************************
  * 构建阶段 3：clause body 的类型推导 + 名称解析（qualified）
  *
- * 从索引阶段独立拆出。推断不再随 visit 逐 clause 进行：只有等阶段 2 把
- * 所有文件的定义/import/导出标记都放进 GlobalIndex 之后，签名与类型信息才完整。
+ * 基于 CLP（约束逻辑编程）的完整实现：
+ * 1. 遍历 AST 时收集所有类型约束
+ * 2. 收集完成后统一求解所有约束  
+ * 3. 处理名称可以是 func、pred、constructor 三种类型的歧义
  ******************************************************************************/
 import type { CancellationToken } from 'vscode-languageserver'
 import type { MercuryDocument } from './document-manager'
 import type { SymbolEntry } from './document-index'
 import type { Clause, Term } from './term'
 import {
-    FuncInfo, InferredInfo, MerType, varType,
+    FuncInfo, InferredInfo, MerType, varType, predType, funcType, typeType
 } from './document-type'
 import {
     createLogicVar, resolve, useTrail,
@@ -17,270 +19,743 @@ import {
 } from './logical-var'
 import type { GlobalIndex } from './document-index'
 import { interruptAndCheck } from './promise-util'
+import type { MercuryServices } from './services'
 
 // 声明里的签名是纯 MerType 模板（只读）；每次使用点实例化成可合一的逻辑项
 type LType = Logical<MerType>
 type LVar = LogicVar<MerType>
-type SignatureInst = { sig: FuncInfo; args: LType[]; result?: LType }
-/** 单条 clause 的推导上下文：逻辑变量与 trail 都是 clause 局部的，不留在服务实例上 */
-type ClauseCtx = {
-    clauseVars: Map<string, LVar>
-    termVars: Map<Term, LVar>
-    typeVars: Map<string, LVar>
-    trail: ReturnType<typeof useTrail>
+
+// ==================== CLP 核心类型定义 ====================
+
+/** 约束类型 */
+type Constraint = 
+    | { kind: 'unify'; left: LVar; right: LVar }
+    | { kind: 'call'; term: Term; candidates: TypeCandidate[]; argVars: (LVar | undefined)[]; resultVar?: LVar }
+
+/** 类型候选 */
+interface TypeCandidate {
+    signature: MerType
+    kind: 'pred' | 'func' | 'constructor'
 }
 
-const isLVar = (x: unknown): x is LVar =>
-    !!x && typeof x === 'object' && typeof (x as any).deref === 'function'
+/** 变量上下文 */
+interface VarContext {
+    vars: Map<string, LVar>
+    constraints: Constraint[]
+    termVars: Map<Term, LVar>  // 项到逻辑变量的映射
+}
+
+// ==================== 辅助函数 ====================
+
 function isVariable(term: Term) {
     return term.syntaxType === 'variable'
 }
 
+// 内建算术运算符
+const BUILTIN_ARITH_OPS = new Set([
+    '+', '-', '*', '/', '//', 'div', 'mod', 'rem', '**', '<<', '>>', '/\\', '\\/', 'xor',
+])
 
-// 内建算术运算符：即使工作区没有标准库声明，也能由实参类型直接推出结果类型
 const NUMERIC_CTORS = new Set([
     'int', 'float', 'uint',
     'int8', 'int16', 'int32', 'int64',
     'uint8', 'uint16', 'uint32', 'uint64',
 ])
-const BUILTIN_ARITH_OPS = new Set([
-    '+', '-', '*', '/', '//', 'div', 'mod', 'rem', '**', '<<', '>>', '/\\', '\\/', 'xor',
-])
 
-/**
- * 独立的类型推导器：输入是已完成全局 index 的文档，输出推断结果。
- */
+// ==================== 完整的 CLP 类型推断器 ====================
+
 export class TypeInferer {
     private index: GlobalIndex
-    constructor(index: GlobalIndex) {
-        this.index = index
+    private typeVarCounter = 0
+    
+    constructor(services: MercuryServices) {
+        this.index = services.index
     }
 
+    /**
+     * 推断文档中的类型（三阶段 CLP）
+     */
     async inferDocument(doc: MercuryDocument, cancelToken?: CancellationToken) {
         const inferred = new Map<Term, InferredInfo>()
         doc.inferred = inferred
+
+        // 阶段 1：约束收集
+        const constraints: Constraint[] = []
+        const varMap = new Map<string, LVar>() // 变量名 -> 逻辑变量
+
         for (const clause of doc.parseResult.value.args) {
             if (cancelToken) await interruptAndCheck(cancelToken)
-            for (const [term, v] of this.inferClause(clause as Clause)) {
-                inferred.set(term, { type: resolve<MerType>(v, () => varType('?0')) })
-            }
+            this.collectClauseConstraints(clause as Clause, constraints, varMap)
+        }
+
+        // 保存约束以便后续提取类别信息
+        (doc as ExtendedMercuryDocument).constraints = constraints
+
+        // 阶段 2：约束求解
+        const solved = this.solveConstraints(constraints)
+
+        // 阶段 3：结果提取
+        if (solved) {
+            this.extractResults(doc, varMap, inferred)
+        } else {
+            this.setUnknownTypes(doc, inferred)
         }
     }
-
-
-
-
+    
+    // ==================== 阶段 1：约束收集 ====================
+    
     /**
-     * 一条 clause 的 head 推导：pred/func 的 fact/rule 参数位置变量各建一个类型
-     * 逻辑变量，再与声明签名（predType/funcType）的对应字段合一。
-     * 返回 term → 逻辑变量，由 inferDocument 展开后写入 doc.inferred。
+     * 收集子句约束
      */
-    private inferClause(clause: Clause): Map<Term, LVar> {
-        const ctx: ClauseCtx = {
-            clauseVars: new Map(),
-            termVars: new Map(),
-            typeVars: new Map(),
-            trail: useTrail(),
+    private collectClauseConstraints(
+        clause: Clause,
+        constraints: Constraint[],
+        varMap: Map<string, LVar>
+    ) {
+        const ctx: VarContext = {
+            vars: new Map(),
+            constraints: constraints,
+            termVars: new Map()
         }
-        const top = clause.term
-        if (top.nameArity !== ':-/1') {
-            let t = top
-            if (t.nameArity === ':-/2') t = t.args[0] // rule：去掉 body，只留 head
-            let head: Term
-            let result: Term | undefined
-            if (t.nameArity === '=/2') {
-                head = t.args[0]                       // func fact/rule: F(Args) = Result
-                result = t.args[1]
-            } else if (t.nameArity === '-->/2') {
-                head = t.args[0]                       // DCG head
-            } else {
-                head = t                               // pred fact/rule
-            }
-            if (head.nameArity === './2') head = head.args[1] // 限定名取右项
-            const sig = this.signatureOf(head)
-            const inst = sig && (sig.kind === 'pred' || sig.kind === 'func')
-                ? this.instantiateSignature(head, sig, ctx)
-                : undefined
-            this.inferHead(head, inst, ctx)
-            if (result) {
-                const vterm = this.headVarTerm(result)
-                if (vterm) {
-                    const lv = this.varOf(vterm, ctx)
-                    if (inst?.result) ctx.trail.unify(lv, inst.result)
+
+        // 初始化变量逻辑变量
+        for (const [varName, varTerms] of clause.varMap.entriesGroupedByKey()) {
+            if (!ctx.vars.has(varName)) {
+                const lv = createLogicVar<MerType>()
+                ctx.vars.set(varName, lv)
+                // 为每个变量项也建立映射
+                for (const term of varTerms) {
+                    ctx.termVars.set(term, lv)
                 }
             }
         }
-        return ctx.termVars
-    }
-    // 状态变量 !X 在解析树里只占一个参数节点，语义上却对应签名的两个字段
-    //（!.X / !:X）；!.X、!:X 各占一个。按语义宽度对齐，否则 `p(A, B, C, !X, !Y)`
-    // 会把 !Y 错对到第 4 个签名字段（推成 X 的类型）。
-    private argWidth(term: Term): number {
-        return term.nameArity === '!/1' ? 2 : 1
-    }
-    // 按签名字段对齐实参：!X 吃掉两个字段但只推断一次（两个字段类型相同）
 
-    // 头签名 → 头参数类型（状态变量 !X / !.X / !:X 视为同一变量 X）
-    private inferHead(head: Term, outer: SignatureInst | undefined, ctx: ClauseCtx) {
-        let field = 0
-        for (const arg of head.args ?? []) {
-            const width = this.argWidth(arg)
-            const vterm = this.headVarTerm(arg)
-            if (vterm) {
-                const lv = this.varOf(vterm, ctx)
-                if (outer) {
-                    for (let i = 0; i < width; i++) {
-                        const target = outer.args[field + i]
-                        if (target !== undefined) ctx.trail.unify(lv, target)
+        // 收集子句头部的约束（包含嵌套项的类型约束）
+        this.collectTermConstraints(clause.term, ctx)
+
+        // 合并到全局变量映射（只合并变量，不合并项）
+        for (const [name, lv] of ctx.vars) {
+            if (!varMap.has(name)) {
+                varMap.set(name, lv)
+            }
+        }
+
+        // 将项的映射存储在 clause 中，供结果提取使用
+        (clause as ExtendedClause).termVars = ctx.termVars
+    }
+    
+    /**
+     * 收集 term 约束
+     */
+    private collectTermConstraints(term: Term, ctx: VarContext) {
+        switch (term.nameArity) {
+            case '=/2': // 函数定义或统一
+                if (this.isFunctionDefinition(term)) {
+                    this.collectFunctionDefinitionConstraints(term, ctx)
+                } else {
+                    this.collectUnifyConstraints(term.args[0], term.args[1], ctx)
+                }
+                break
+
+            case ':-/2': // 规则
+                this.collectTermConstraints(term.args[0], ctx) // head
+                this.collectTermConstraints(term.args[1], ctx) // body
+                break
+
+            case './2': // 限定名
+                this.collectTermConstraints(term.args[1], ctx)
+                break
+
+            case ',/2': // 合取
+            case ';/2': // 析取
+                this.collectTermConstraints(term.args[0], ctx)
+                this.collectTermConstraints(term.args[1], ctx)
+                break
+
+            case '@/2': // 项注解 Term @ Ann
+                // 为注解项创建逻辑变量并添加约束
+                this.collectTermAnnotationConstraints(term, ctx)
+                break
+
+            case '[|]/2': // 列表构造子 [Head | Tail]
+                this.collectListConstructorConstraints(term, ctx)
+                break
+
+            case '[]/0': // 空列表
+                this.collectEmptyListConstraints(term, ctx)
+                break
+
+            default:
+                // 函数/谓词调用
+                this.collectCallConstraints(term, ctx)
+        }
+    }
+    
+    /**
+     * 收集统一约束
+     */
+    private collectUnifyConstraints(lhs: Term, rhs: Term, ctx: VarContext) {
+        const lhsVar = this.getOrCreateTermVariable(lhs, ctx)
+        const rhsVar = this.getOrCreateTermVariable(rhs, ctx)
+
+        if (lhsVar && rhsVar) {
+            ctx.constraints.push({
+                kind: 'unify',
+                left: lhsVar,
+                right: rhsVar
+            })
+        }
+
+        // 递归处理子项
+        this.collectTermConstraints(lhs, ctx)
+        this.collectTermConstraints(rhs, ctx)
+    }
+    
+    /**
+     * 收集调用约束
+     */
+    private collectCallConstraints(call: Term, ctx: VarContext) {
+        // 检查是否是函数定义 f(X) = Y
+        if (this.isFunctionDefinition(call)) {
+            this.collectFunctionDefinitionConstraints(call, ctx)
+        } else {
+            // 普通调用
+            const argVars = call.args.map(arg => this.getOrCreateTermVariable(arg, ctx))
+            const candidates = this.getTypeCandidates(call.name, call.semanticArity)
+
+            if (candidates.length > 0) {
+                ctx.constraints.push({
+                    kind: 'call',
+                    term: call,
+                    candidates: candidates,
+                    argVars: argVars
+                })
+            }
+
+            // 递归处理参数以收集嵌套项的约束
+            for (const arg of call.args) {
+                this.collectTermConstraints(arg, ctx)
+            }
+        }
+    }
+    
+    /**
+     * 判断是否是函数定义
+     */
+    private isFunctionDefinition(term: Term): boolean {
+        return term.nameArity === '=/2' && 
+               term.args[0]?.syntaxType === 'atom' &&
+               term.args[0]?.nameArity !== './2' // 不是限定名
+    }
+    
+    /**
+     * 收集函数定义约束
+     */
+    private collectFunctionDefinitionConstraints(funcDef: Term, ctx: VarContext) {
+        const funcHead = funcDef.args[0]
+        const result = funcDef.args[1]
+
+        // 获取函数参数变量
+        const argVars = funcHead.args.map(arg => this.getOrCreateTermVariable(arg, ctx))
+        const resultVar = this.getOrCreateTermVariable(result, ctx)
+
+        // 获取类型候选
+        const candidates = this.getTypeCandidates(funcHead.name, funcHead.semanticArity)
+
+        if (candidates.length > 0) {
+            // 添加函数调用约束（包含结果变量）
+            ctx.constraints.push({
+                kind: 'call',
+                term: funcHead,
+                candidates: candidates,
+                argVars: argVars,
+                resultVar: resultVar
+            })
+        }
+
+        // 递归处理子项
+        for (const arg of funcHead.args) {
+            this.collectTermConstraints(arg, ctx)
+        }
+        this.collectTermConstraints(result, ctx)
+    }
+    
+    /**
+     * 获取类型候选
+     */
+    private getTypeCandidates(name: string, arity: number): TypeCandidate[] {
+        const entries: readonly SymbolEntry[] = this.index.getByName(name)
+        const candidates: TypeCandidate[] = []
+
+        for (const s of entries) {
+            if (s.arity === arity && s.signature) {
+                let kind: 'pred' | 'func' | 'constructor'
+                if (s.kind === 'pred') kind = 'pred'
+                else if (s.kind === 'func') kind = 'func'
+                else kind = 'constructor'
+
+                candidates.push({
+                    signature: s.signature,
+                    kind
+                })
+            }
+        }
+
+        // 内置运算符
+        if (BUILTIN_ARITH_OPS.has(name) && arity === 2) {
+            candidates.push({
+                signature: funcType(name, [varType('T'), varType('T')], varType('T')),
+                kind: 'func'
+            })
+        }
+
+        // 数字构造子
+        if (NUMERIC_CTORS.has(name) && arity === 0) {
+            candidates.push({
+                signature: typeType(name, []),
+                kind: 'constructor'
+            })
+        }
+
+        return candidates
+    }
+
+    /**
+     * 收集项注解约束 (Term @ Ann)
+     */
+    private collectTermAnnotationConstraints(term: Term, ctx: VarContext) {
+        const lhs = term.args[0]  // 被注解的项
+        const rhs = term.args[1]  // 注解（通常是变量）
+
+        // 为整个注解项创建逻辑变量
+        const termVar = this.getOrCreateTermVariable(term, ctx)
+
+        // 为 LHS 和 RHS 创建或获取逻辑变量
+        const lhsVar = this.getOrCreateTermVariable(lhs, ctx)
+        const rhsVar = this.getOrCreateTermVariable(rhs, ctx)
+
+        // 添加约束：整个注解项的类型与 LHS 相同
+        if (termVar && lhsVar) {
+            ctx.constraints.push({
+                kind: 'unify',
+                left: termVar,
+                right: lhsVar
+            })
+        }
+
+        // 如果 RHS 是变量，将其类型统一到注解项的类型
+        if (rhsVar && termVar) {
+            ctx.constraints.push({
+                kind: 'unify',
+                left: rhsVar,
+                right: termVar
+            })
+        }
+
+        // 递归处理子项
+        this.collectTermConstraints(lhs, ctx)
+        this.collectTermConstraints(rhs, ctx)
+    }
+
+    /**
+     * 收集列表构造子约束 [|]/2
+     */
+    private collectListConstructorConstraints(term: Term, ctx: VarContext) {
+        const head = term.args[0]  // 列表头
+        const tail = term.args[1]  // 列表尾
+
+        // 为整个列表项创建逻辑变量
+        const termVar = this.getOrCreateTermVariable(term, ctx)
+
+        // 为 head 和 tail 创建或获取逻辑变量
+        const headVar = this.getOrCreateTermVariable(head, ctx)
+        const tailVar = this.getOrCreateTermVariable(tail, ctx)
+
+        // 添加约束：head 和 tail 应该与 term 具有相同的类型（list(T)）
+        // 当 term 被统一为 list(int) 时，head 和 tail 也会被统一
+        if (termVar && headVar) {
+            ctx.constraints.push({
+                kind: 'unify',
+                left: termVar,
+                right: headVar
+            })
+        }
+
+        if (termVar && tailVar) {
+            ctx.constraints.push({
+                kind: 'unify',
+                left: termVar,
+                right: tailVar
+            })
+        }
+
+        // 递归处理子项
+        this.collectTermConstraints(head, ctx)
+        this.collectTermConstraints(tail, ctx)
+    }
+
+    /**
+     * 收集空列表约束 []/0
+     */
+    private collectEmptyListConstraints(term: Term, ctx: VarContext) {
+        const termVar = this.getOrCreateTermVariable(term, ctx)
+        if (termVar) {
+            // 空列表的类型是 list(T)，其中 T 是类型变量
+            const elemType = createLogicVar<MerType>()
+            const listType = typeType('list', [elemType])
+            ctx.constraints.push({
+                kind: 'unify',
+                left: termVar,
+                right: elemType
+            })
+        }
+    }
+
+    /**
+     * 获取或创建项的逻辑变量
+     */
+    private getOrCreateTermVariable(term: Term, ctx: VarContext): LVar | undefined {
+        // 如果是变量，返回变量对应的逻辑变量
+        if (term.syntaxType === 'variable') {
+            if (!ctx.vars.has(term.name)) {
+                const lv = createLogicVar<MerType>()
+                ctx.vars.set(term.name, lv)
+            }
+            return ctx.vars.get(term.name)
+        }
+
+        // 如果是非变量项，创建或获取该项的逻辑变量
+        if (!ctx.termVars.has(term)) {
+            const lv = createLogicVar<MerType>()
+            ctx.termVars.set(term, lv)
+        }
+        return ctx.termVars.get(term)
+    }
+    
+    // ==================== 阶段 2：约束求解 ====================
+    
+    /**
+     * 求解约束
+     */
+    private solveConstraints(constraints: Constraint[]): boolean {
+        const trail = useTrail()
+        
+        // 先应用简单的统一约束
+        for (const constraint of constraints) {
+            if (constraint.kind === 'unify') {
+                if (!trail.unify(constraint.left, constraint.right)) {
+                    return false
+                }
+            }
+        }
+        
+        // 最后应用调用约束（可能有多个候选）
+        for (const constraint of constraints) {
+            if (constraint.kind === 'call') {
+                if (!this.applyCallConstraint(constraint, trail)) {
+                    return false
+                }
+            }
+        }
+        
+        return true
+    }
+    
+    /**
+     * 应用调用约束
+     */
+    private applyCallConstraint(constraint: CallConstraint, trail: ReturnType<typeof useTrail>): boolean {
+        // 如果没有候选，跳过
+        if (constraint.candidates.length === 0) {
+            return true
+        }
+
+        // 优先级排序：constructor > func > pred
+        // 这样在有歧义时，优先选择更具体的候选
+        const priorityOrder: ('constructor' | 'func' | 'pred')[] = ['constructor', 'func', 'pred']
+        const sortedCandidates = [...constraint.candidates].sort((a, b) => {
+            const aPriority = priorityOrder.indexOf(a.kind)
+            const bPriority = priorityOrder.indexOf(b.kind)
+            return aPriority - bPriority
+        })
+
+        // 尝试所有候选（CLP choice point）
+        for (const candidate of sortedCandidates) {
+            const mark = trail.mark()
+            if (this.tryCandidate(constraint, candidate, trail)) {
+                return true
+            }
+            trail.undo(mark)
+        }
+
+        return false
+    }
+    
+    /**
+     * 尝试类型候选
+     */
+    private tryCandidate(
+        constraint: CallConstraint,
+        candidate: TypeCandidate,
+        trail: ReturnType<typeof useTrail>
+    ): boolean {
+        // 实例化签名
+        const typeVars = new Map<string, LVar>()
+        const instantiated = this.instantiateSignature(candidate.signature, typeVars)
+
+        // 获取参数类型
+        const argTypes = candidate.signature.kind === 'pred' || candidate.signature.kind === 'func'
+            ? (candidate.signature as predType | funcType).args || []
+            : candidate.signature.kind === 'constructor'
+            ? (candidate.signature as constructorType).args || []
+            : []
+
+        // 统一参数类型
+        for (let i = 0; i < constraint.argVars.length; i++) {
+            const argVar = constraint.argVars[i]
+            const argType = argTypes[i]
+
+            if (argVar && argType) {
+                if (!trail.unify(argVar, instantiated.args[i])) {
+                    return false
+                }
+            }
+        }
+
+        // 如果是函数且有结果变量，统一结果类型
+        if (constraint.resultVar && instantiated.result) {
+            if (!trail.unify(constraint.resultVar, instantiated.result)) {
+                return false
+            }
+        }
+
+        // 记录选中的候选类别（用于后续结果提取）
+        constraint.selectedCategory = candidate.kind
+
+        return true
+    }
+    
+    /**
+     * 实例化签名
+     */
+    private instantiateSignature(sig: MerType, typeVars: Map<string, LVar>): { args: LType[], result?: LType } {
+        const instantiate = (type: MerType): LType => {
+            if (type.kind === 'var') {
+                let v = typeVars.get(type.name)
+                if (!v) {
+                    v = createLogicVar<MerType>()
+                    typeVars.set(type.name, v)
+                }
+                return v
+            }
+
+            // 对于具体类型（如 int、list(T) 等），递归实例化参数
+            const out: MerType = { ...type }
+            if ('args' in type) (out as predType | funcType | constructorType | typeType).args = type.args.map(instantiate)
+            if ('result' in type && type.result) (out as funcType).result = instantiate(type.result)
+            return out as LType
+        }
+
+        const args = sig.kind === 'pred' || sig.kind === 'func'
+            ? (sig as predType | funcType).args.map(instantiate)
+            : sig.kind === 'constructor'
+            ? (sig as constructorType).args.map(instantiate)
+            : []
+
+        const result = sig.kind === 'func' && (sig as funcType).result
+            ? instantiate((sig as funcType).result)
+            : undefined
+
+        return { args, result }
+    }
+    
+    // ==================== 阶段 3：结果提取 ====================
+    
+    /**
+     * 提取结果
+     */
+    private extractResults(
+        doc: MercuryDocument,
+        varMap: Map<string, LVar>,
+        inferred: Map<Term, InferredInfo>
+    ) {
+        for (const clause of doc.parseResult.value.args) {
+            this.extractClauseResults(clause as Clause, varMap, inferred)
+        }
+
+        // 提取调用约束中选中的类别
+        const constraints = (doc as ExtendedMercuryDocument).constraints
+        if (constraints) {
+            for (const constraint of constraints) {
+                if (constraint.kind === 'call') {
+                    const callConstraint = constraint as CallConstraint
+                    const category = callConstraint.selectedCategory
+                    if (category) {
+                        const existing = inferred.get(callConstraint.term)
+                        if (existing) {
+                            existing.category = category
+                        } else {
+                            inferred.set(callConstraint.term, { type: varType('?0'), category })
+                        }
                     }
                 }
             }
-            field += width
         }
     }
-
-    /** 从全局符号表取该 head 的声明签名（定义条目不带签名） */
-    private signatureOf(head: Term): MerType | undefined {
-        const entries: readonly SymbolEntry[] = this.index.getByName(head.name)
-        for (const s of entries) {
-            if ((s.kind === 'pred' || s.kind === 'func')
-                && s.arity === head.semanticArity && s.signature) {
-                const sig = s.signature
-                if (sig.kind === head.semanticType) return sig
+    
+    /**
+     * 提取子句结果
+     */
+    private extractClauseResults(
+        clause: Clause,
+        varMap: Map<string, LVar>,
+        inferred: Map<Term, InferredInfo>
+    ) {
+        // 提取变量的类型
+        for (const [varName, varTerms] of clause.varMap.entriesGroupedByKey()) {
+            const lv = varMap.get(varName)
+            if (lv) {
+                const resolved = resolve<MerType>(lv, () => varType('?0'))
+                for (const term of varTerms) {
+                    inferred.set(term, { type: resolved })
+                }
             }
         }
-        return undefined
-    }
 
-    /** 声明签名是只读模板，实例化成可合一的逻辑项；类型变量按名字共享 */
-    private instantiateSignature(head: Term, sig: MerType, ctx: ClauseCtx): SignatureInst {
-        return {
-            sig: { name: head.name, arity: head.semanticArity, type: sig },
-            args: (sig.kind === 'pred' || sig.kind === 'func' ? sig.args : [])
-                .map(a => this.instantiate(a, ctx)),
-            result: sig.kind === 'func' && sig.result ? this.instantiate(sig.result, ctx) : undefined,
-        }
-    }
-
-    private instantiate(type: MerType, ctx: ClauseCtx): LType {
-        if (type.kind === 'var') {
-            let v = ctx.typeVars.get(type.name)
-            if (!v) {
-                v = createLogicVar<MerType>()
-                ctx.typeVars.set(type.name, v)
+        // 提取非变量项的类型
+        const termVars = (clause as ExtendedClause).termVars
+        if (termVars) {
+            for (const [term, lv] of termVars) {
+                const resolved = resolve<MerType>(lv, () => varType('?0'))
+                inferred.set(term, { type: resolved })
             }
-            if (type.bind) ctx.trail.unify(v, this.instantiate(type.bind, ctx))
-            return v
         }
-        const out: any = { ...type }
-        if ('args' in type) out.args = type.args.map(a => this.instantiate(a, ctx))
-        if ('result' in type && type.result) out.result = this.instantiate(type.result, ctx)
-        return out as LType
+
+        // 后处理：为嵌套项推导类型
+        this.propagateNestedTypes(clause, inferred)
     }
 
-    /** 同名变量共享一个逻辑变量；每个出现位置都登记，便于写回推断结果 */
-    private varOf(term: Term, ctx: ClauseCtx): LVar {
-        let v = ctx.clauseVars.get(term.name)
-        if (!v) {
-            v = createLogicVar<MerType>()
-            ctx.clauseVars.set(term.name, v)
-        }
-        ctx.termVars.set(term, v)
-        return v
-    }
+    /**
+     * 为嵌套项推导类型
+     */
+    private propagateNestedTypes(clause: Clause, inferred: Map<Term, InferredInfo>) {
+        for (const term of this.getAllTerms(clause.term)) {
+            const info = inferred.get(term)
+            if (!info) continue
 
-    /** 剥掉 ::/>> 注解与 !X / !.X / !:X 状态变量包装，取真正的参数变量 */
-    private headVarTerm(arg: Term): Term | undefined {
-        let t = arg
-        while (t.args?.length && ['::/2', '>>/2', '!/1', '!./1', '!:/1'].includes(t.nameArity)) {
-            t = t.args[0]
-        }
-        return isVariable(t) ? t : undefined
-    }
-    /** 限定调用 m:p(...) 取右项 */
-    private unwrapQualifiedInfer(term: Term): Term {
-        return term.nameArity === './2' ? term.args[1] : term
-    }
-    // 目标遍历（goal 位置：调用 p(args) / 统一 X = rhs）
-    private inferGoal(term: Term) {
-        switch (term.nameArity) {
-            case '=/2':
-            case '\\=/2':
-                this.inferUnify(term.args[0], term.args[1])
-                break
-            case './2':
-                this.inferGoal(this.unwrapQualifiedInfer(term))
-                break
-            case ',/2':
-            case ';/2':
-            case '&/2':
-            case '->/2':
-            case 'else/2':
-            case 'if/3':
-            case 'if/1':
-            case 'then/2':
-            case 'or_else/2':
-            case ':-/2':
-                // if-then-else 解析树为 else(if(then(C,T)), E)：if/1、then/2 必须按 goal
-                // 递归，否则 then 分支会落进 default 被当数据 functor 推断，
-                // 分支内 Y = X 的 Y 合一不到 X 的 head 类型而显示 unknown
-                this.inferGoal(term.args[0])
-                if (term.args[1]) this.inferGoal(term.args[1])
-                break
-            case 'some/2':
-            case 'all/2':
-            case 'not/1':
-            case '\\+/1':
-                this.inferGoal(term.args[1] ?? term.args[0])
-                break
-            case 'require_det/1':
-            case 'require_semidet/1':
-            case 'require_multi/1':
-            case 'require_nondet/1':
-            case 'require_cc_multi/1':
-            case 'require_cc_nondet/1':
-            case 'require_erroneous/1':
-            case 'require_failure/1':
-            case 'promise_pure/1':
-            case 'promise_semipure/1':
-            case 'promise_impure/1':
-            case 'event/1':
-                this.inferGoal(term.args[0])
-                break
-            case 'require_complete_switch/2':
-            case 'require_switch_arms_det/2':
-            case 'require_switch_arms_semidet/2':
-            case 'require_switch_arms_multi/2':
-            case 'require_switch_arms_nondet/2':
-            case 'require_switch_arms_cc_multi/2':
-            case 'require_switch_arms_cc_nondet/2':
-            case 'require_switch_arms_erroneous/2':
-            case 'require_switch_arms_failure/2':
-            case 'disable_warnings/2':
-            case 'disable_warning/2':
-            case 'trace/2':
-            case 'promise_equivalent_solutions/2':
-            case 'promise_equivalent_solution_sets/2':
-                this.inferGoal(term.args[1])
-                break
-            case 'true/0':
-            case 'fail/0':
-                break
-            default:
-                // 调用目标 p(args)（func 在 goal 位置极少见）
-                this.inferCall(term)
+            this.propagateTypeToSubterms(term, info.type, inferred)
         }
     }
-    // 调用：按签名对齐实参类型
-    private inferCall(term: Term) {
 
+    /**
+     * 获取子句中的所有项
+     */
+    private getAllTerms(term: Term): Term[] {
+        const terms: Term[] = [term]
+        for (const arg of term.args) {
+            terms.push(...this.getAllTerms(arg))
+        }
+        return terms
     }
-    // 统一目标：rhs 类型需与 lhs 一致；lhs 若已有具体类型（来自头签名）则约束 rhs。
-    // 类型是活引用，unify 后读取时自然可见，无需刷新快照。
-    private inferUnify(lhs: Term, rhs: Term) {
 
+    /**
+     * 将类型传播到子项
+     */
+    private propagateTypeToSubterms(term: Term, type: MerType, inferred: Map<Term, InferredInfo>) {
+        // 如果是 list(T) 类型，且 term 是列表构造子 [|]/2
+        if (type.kind === 'type' && type.name === 'list' && type.args.length > 0) {
+            const elemType = type.args[0]
+
+            if (term.nameArity === '[|]/2') {
+                // 列表构造子 [Head | Tail]
+                const head = term.args[0]
+                const tail = term.args[1]
+
+                // 为 head 设置元素类型（int），而不是列表类型
+                // 总是设置，因为 head 的类型是元素类型，不是列表类型
+                inferred.set(head, { type: elemType })
+                // 为 tail 设置列表类型
+                inferred.set(tail, { type: type })
+
+                // 递归处理子项
+                this.propagateTypeToSubterms(head, elemType, inferred)
+                this.propagateTypeToSubterms(tail, type, inferred)
+            } else if (term.nameArity === '@/2') {
+                // 项注解 Term @ Ann
+                const lhs = term.args[0]
+                const rhs = term.args[1]
+
+                // 为 lhs 和 rhs 设置类型
+                if (!inferred.has(lhs)) {
+                    inferred.set(lhs, { type: type })
+                }
+                if (!inferred.has(rhs)) {
+                    inferred.set(rhs, { type: type })
+                }
+
+                // 递归处理子项
+                this.propagateTypeToSubterms(lhs, type, inferred)
+                this.propagateTypeToSubterms(rhs, type, inferred)
+            }
+        } else if (term.nameArity === '@/2') {
+            // 项注解 Term @ Ann（即使不是 list 类型）
+            const lhs = term.args[0]
+            const rhs = term.args[1]
+
+            if (!inferred.has(lhs)) {
+                inferred.set(lhs, { type: type })
+            }
+            if (!inferred.has(rhs)) {
+                inferred.set(rhs, { type: type })
+            }
+
+            this.propagateTypeToSubterms(lhs, type, inferred)
+            this.propagateTypeToSubterms(rhs, type, inferred)
+        } else {
+            // 对于其他项，递归处理所有子项
+            for (const arg of term.args) {
+                // 如果子项没有推断类型，尝试从父类型推导
+                if (!inferred.has(arg)) {
+                    // 这里可以添加更多逻辑来处理复合类型的子项
+                    // 目前先不处理，让它保持未推断状态
+                }
+                // 递归处理
+                this.propagateTypeToSubterms(arg, type, inferred)
+            }
+        }
     }
+    
+    /**
+     * 设置未知类型
+     */
+    private setUnknownTypes(doc: MercuryDocument, inferred: Map<Term, InferredInfo>) {
+        for (const clause of doc.parseResult.value.args) {
+            for (const [varName, varTerms] of (clause as Clause).varMap.entriesGroupedByKey()) {
+                for (const term of varTerms) {
+                    inferred.set(term, { type: varType('?0') })
+                }
+            }
+        }
+    }
+}
 
+// ==================== 类型声明 ====================
 
+interface CallConstraint {
+    kind: 'call'
+    term: Term
+    candidates: TypeCandidate[]
+    argVars: (LVar | undefined)[]
+    resultVar?: LVar
+    selectedCategory?: 'pred' | 'func' | 'constructor'
+}
 
+// 扩展 MercuryDocument 接口以存储约束
+interface ExtendedMercuryDocument extends MercuryDocument {
+    constraints?: Constraint[]
+}
+
+// 扩展 Clause 接口以存储项变量
+interface ExtendedClause extends Clause {
+    termVars?: Map<Term, LVar>
 }
