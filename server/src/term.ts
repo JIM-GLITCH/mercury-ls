@@ -61,6 +61,11 @@ export interface Term {
     startToken: Token
     /**which token has the largest position */
     endToken: Token
+    /** 复合项（functor/operator 应用）的函数符/操作符名，拆成独立的 atom term。
+     *  用于区分两层语义：`p` 这个名字的类型是 `int -> int`，而应用 `p(1)` 的类型是 `int`。 */
+    callee?: Term
+    /** 反向指针：本 atom 是哪一个复合项的 callee */
+    calleeOf?: Term
     /**
      *  this term's name
      */
@@ -98,6 +103,8 @@ export interface Term {
 export class TermImpl implements Term {
     fieldAccess?: FieldAccessInfo
     qualifiedName?: string
+    callee?: Term
+    calleeOf?: Term
     semanticType?: SemanticType
     semanticArity: number
     nameArity: string
@@ -141,6 +148,18 @@ export class TermImpl implements Term {
 export function atom(token: Token, name?: string) {
     return new TermImpl("atom", token, undefined, undefined, undefined, name)
 }
+
+/**
+ * 把复合项的函数符/操作符名拆成一个独立的 atom term（callee），
+ * 用于区分「名字 p 的类型 int->int」与「应用 p(1) 的类型 int」。
+ * callee 的 token 沿用名字 token，并反向记下它属于哪个复合项。
+ */
+function attachCallee(node: TermImpl, token: Token, name: string) {
+    const callee = new TermImpl("atom", token, undefined, undefined, undefined, name)
+    callee.calleeOf = node
+    callee.container = node
+    node.callee = callee
+}
 export function variable(token: Token) {
     let term = new TermImpl("variable", token)
     term.semanticType = "variable"
@@ -177,6 +196,7 @@ export function binPrefixCompound(token: Token, children: Term[]) {
         children[children.length - 1].endToken
     )
     fixArity(node)
+    attachCallee(node, token, token.value)
     return node
 
 }
@@ -190,6 +210,7 @@ export function prefixCompound(token: Token, children: Term[]) {
         children[children.length - 1].endToken
     )
     fixArity(node)
+    attachCallee(node, token, token.value)
     return node
 
 }
@@ -203,6 +224,7 @@ export function functorCompound(token: Token, children: Term[], name?: string) {
         name
     )
     fixArity(node)
+    attachCallee(node, token, name ?? token.value)
     return node
 
 }
@@ -217,15 +239,17 @@ export function applyCompound(token: Token, children: Term[]) {
     fixArity(node)
     return node
 }
-export function backquotedapplyCompound(token: Token, children: Term[]) {
+export function backquotedapplyCompound(token: Token, children: Term[], name?: string) {
     let node = new TermImpl(
         "atom",
         token,
         children,
         children[0].startToken,
-        children[1].endToken
+        children[1].endToken,
+        name
     )
     fixArity(node)
+    if (name) attachCallee(node, token, name)
     return node
 }
 
@@ -239,6 +263,7 @@ export function infixCompound(token: Token, children: Term[], name?: string) {
         name
     )
     fixArity(node)
+    attachCallee(node, token, name ?? token.value)
     return node
 }
 /**
@@ -249,7 +274,6 @@ export class Clause extends TermImpl {
     term: Term
     end: Token
     varMap: MultiMap<string, Term> = new MultiMap()
-    callee?: Term
     called = new Array<Term>()
     constructor(term: Term, end: Token, varmap: MultiMap<string, Term>) {
         super("$clause", end, [term], term.startToken, end);
@@ -376,11 +400,17 @@ export function search(term: Term | undefined, position: Position): Term | undef
         }
         case "$clause":
         case "atom": {
+            // 名字区域优先返回 callee（函数符/操作符名），区分 p 与 p(1) 的类型
+            // 仅对真正的复合项（atom）生效；Clause.callee 是另一条语义（子句头），不在此处理
+            if (term.syntaxType === 'atom' && term.callee) {
+                const res = search(term.callee, position)
+                if (res) return res
+            }
             let token_range = tokenRange(term.token)
             if (positionInRange(position, token_range)) {
                 return term
             }
-            for (const arg of term.args) {
+            for (const arg of term.args ?? []) {
                 let res = search(arg, position)
                 if (res) return res
             }

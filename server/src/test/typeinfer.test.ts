@@ -450,4 +450,51 @@ describe('typeinfer', () => {
         expect(typeOf(doc, head.args[0])).toBe('int')
         expect(categoryOf(doc, head)).toBe('pred')
     })
+
+    it('name 拆成 callee 后两层类型分离：p :: func(int)=int，p(1) :: int', async () => {
+        const doc = await infer(`
+            :- func p(int) = int.
+            :- pred q(int).
+            q(p(1)).
+            `, 'callee_split')
+        const { head } = headOf(doc, 2)   // q(p(1))
+        const call = head.args[0]          // p(1)
+        // 应用项 p(1) 的类型是结果类型 int
+        expect(typeOf(doc, call)).toBe('int')
+        // 名字 callee 的类型是函数签名本身 int -> int
+        const callee = call.callee!
+        expect(callee).toBeDefined()
+        expect(typeOf(doc, callee)).toBe('func(int) = int')
+        expect(categoryOf(doc, callee)).toBe('func')
+    })
+
+    it('构造子的 callee 与应用项同样分离：ctor 自身类型 ctor(int)，ctor(1) :: mytype', async () => {
+        const doc = await infer(`
+            :- type mytype ---> ctor(int).
+            :- pred q(mytype).
+            q(ctor(1)).
+            `, 'callee_ctor')
+        const { head } = headOf(doc, 2)   // q(ctor(1))
+        const call = head.args[0]          // ctor(1)
+        expect(typeOf(doc, call)).toBe('mytype')
+        const callee = call.callee!
+        expect(callee).toBeDefined()
+        // 构造子符号 ctor 自身的类型（int -> mytype）渲染为 ctor(int)，与应用项 ctor(1) 的 mytype 区分开
+        expect(typeOf(doc, callee)).toBe('ctor(int)')
+        expect(categoryOf(doc, callee)).toBe('constructor')
+    })
+
+    it('infix 应用项把名字拆成独立 callee：1+2 :: int，callee 名字为 +', async () => {
+        const doc = await infer(`
+            :- pred q(int).
+            q(1 + 2).
+            `, 'callee_infix')
+        const { head } = headOf(doc, 1)   // q(1 + 2)
+        const call = head.args[0]          // 1 + 2
+        expect(typeOf(doc, call)).toBe('int')
+        const callee = call.callee!
+        expect(callee).toBeDefined()
+        // 内建 + 不一定进全局索引，故只验证名字被拆出、应用项类型正确
+        expect(callee.name).toBe('+')
+    })
 })

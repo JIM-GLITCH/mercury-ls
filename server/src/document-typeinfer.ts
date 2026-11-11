@@ -160,7 +160,11 @@ export class TypeInferer {
                 const arity = semanticArityOf(term)
                 const entry = entries.find(e => e.arity === arity && e.signature)
                     ?? entries.find(e => e.arity === arity)
-                if (entry) resolved.set(term, [entry])
+                if (entry) {
+                    resolved.set(term, [entry])
+                    // 名字 callee 与限定应用项解析到同一个符号
+                    if (term.callee && !resolved.has(term.callee)) resolved.set(term.callee, [entry])
+                }
             }
             for (const arg of term.args ?? []) walk(arg, clause)
         }
@@ -252,6 +256,7 @@ export class TypeInferer {
     private inferPredDef(term: Term, context: VarContext) {
         // 为谓词头创建类型变量
         const argVars = term.args.map(arg => this.inferTerm(arg, context))
+        if (term.callee) this.getOrCreateTypeVar(term.callee, context)
         const headVar = this.freshTypeVar()
         context.termType.set(term, headVar)
 
@@ -280,6 +285,7 @@ export class TypeInferer {
     private inferFuncRuleHead(term: Term, context: VarContext) {
         this.getOrCreateTypeVar(term, context)
         const [func, funcResult] = term.args
+        if (func.callee) this.getOrCreateTypeVar(func.callee, context)
 
         // 头部的参数/结果是数据项，按 inferTerm 走才能与 clause 内同名变量共享逻辑变量
         const argVars = func.args.map(arg => this.inferTerm(arg, context))
@@ -425,6 +431,7 @@ export class TypeInferer {
     /** 推断谓词引用 */
     private inferPredRef(term: Term, context: VarContext) {
         const argVars = term.args.map(arg => this.inferTerm(arg, context))
+        if (term.callee) this.getOrCreateTypeVar(term.callee, context)
         const headVar = this.freshTypeVar()
         context.termType.set(term, headVar)
 
@@ -526,6 +533,7 @@ export class TypeInferer {
     /** 推断数据 functor（构造子/函数） */
     private inferDataFunctor(term: Term, context: VarContext) {
         const argVars = term.args.map(arg => this.inferTerm(arg, context))
+        if (term.callee) this.getOrCreateTypeVar(term.callee, context)
         const typeVar = context.termType.get(term)!
 
         // 查找候选签名
@@ -623,7 +631,15 @@ export class TypeInferer {
                         const e = candidate.entry
                         const def = this.index.get(e.name, e.module).find(d =>
                             d.doc === e.doc && d.kind === e.kind && d.arity === e.arity && !d.signature)
-                        resolved.set(constraint.term, def && def !== e ? [def, e] : [e])
+                        const entries = def && def !== e ? [def, e] : [e]
+                        resolved.set(constraint.term, entries)
+                        // 名字 callee 与应用项解析到同一个符号，便于 hover / 跳转 / 引用
+                        if (constraint.term.callee && !resolved.has(constraint.term.callee)) {
+                            resolved.set(constraint.term.callee, entries)
+                        }
+                    }
+                    if (constraint.term.callee) {
+                        categories.set(constraint.term.callee, candidate.kind)
                     }
                     break
                 }
@@ -662,6 +678,7 @@ export class TypeInferer {
         const { signature, kind } = candidate
         const { argVars, resultVar } = constraint
         const termVar = context.termType.get(constraint.term)
+        const calleeVar = constraint.term.callee ? context.termType.get(constraint.term.callee) : undefined
         const inst = this.makeLogical(signature)
 
         if (kind === 'pred' && signature.kind === 'pred') {
@@ -670,11 +687,15 @@ export class TypeInferer {
             for (let i = 0; i < argVars.length; i++) {
                 if (!unify(argVars[i], inst.args[i])) return false
             }
+            // callee（名字 `p`）的类型就是该谓词签名本身
+            if (calleeVar && !unify(calleeVar, inst)) return false
             return true
         } else if (kind === 'func' && signature.kind === 'func') {
             // 函数：合一参数类型；func rule 的结果项与返回类型合一。
-            // 数据位置的调用项类型留给外层上下文（如 pred 形参）决定，避免声明模板
-            // 里未实例化/写法歧义的返回类型覆盖掉上下文已经推出的类型。
+            // 应用项（如 p(1)）的类型通常由外层上下文（如 pred 形参、`=/2` 结果）决定；
+            // 只有带模块限定、签名唯一确定时才把应用项锚定到返回类型，避免签名模板里
+            // 的返回类型表示（funcType 节点）与上下文对同一类型的另一种表示（= 节点）
+            // 失配而误报冲突。名字 callee（如 p）的类型才锚定到函数签名本身（int -> int）。
             if (inst.args.length !== argVars.length) return false
             for (let i = 0; i < argVars.length; i++) {
                 if (!unify(argVars[i], inst.args[i])) return false
@@ -685,6 +706,8 @@ export class TypeInferer {
             // 参数类型把类型不匹配的候选剪掉。未限定的调用仍由外层上下文决定。
             if (termVar && constraint.term.qualified && inst.result
                 && !unify(termVar, inst.result)) return false
+            // callee（名字 `p`）的类型就是该函数签名本身
+            if (calleeVar && !unify(calleeVar, inst)) return false
             return true
         } else if (kind === 'constructor' && signature.kind === 'constructor') {
             // 构造子：合一参数类型，结果类型与项的类型变量合一
@@ -693,6 +716,8 @@ export class TypeInferer {
                 if (!unify(argVars[i], inst.args[i])) return false
             }
             if (termVar && inst.result && !unify(termVar, inst.result)) return false
+            // callee（名字 `ctor`）的类型就是该构造子签名本身
+            if (calleeVar && !unify(calleeVar, inst)) return false
             return true
         }
 
