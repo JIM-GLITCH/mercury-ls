@@ -77,7 +77,6 @@ export type MercuryServices = {
     index: GlobalIndex
     /** 阶段 3 的类型推导 + 名称解析 */
     typeInferer: TypeInferer
-    linker: Linker
     validator: DocumentValidator
     builder: DefaultDocumentBuilder
     workspaceManager: DeafultWoekspaceManager
@@ -116,7 +115,6 @@ const mercuryServicesModule: Module<MercuryServices> = {
     documents: services => new DefaultMercuryDocuments(services),
     index: () => new GlobalIndex(),
     typeInferer: services => new TypeInferer(services),
-    linker: services => new DefaultLinker(services),
     validator: services => new DefaultDocumentValidator(services),
     builder: services => new DefaultDocumentBuilder(services),
     workspaceManager: () => new DeafultWoekspaceManager(),

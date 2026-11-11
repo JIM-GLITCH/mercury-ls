@@ -9,20 +9,20 @@ import type { MercuryServices } from './services'
 export type DocumentBuildListener = (built: MercuryDocument[], cancelToken: CancellationToken) => void | Promise<void>
 export type DocumentUpdateListener = (changed: URI[], deleted: URI[]) => void
 
-export class DefaultDocumentBuilder{
+export class DefaultDocumentBuilder {
 
-    constructor(protected readonly services: MercuryServices) {}
+    constructor(protected readonly services: MercuryServices) { }
 
-    buildPhaseListeners:MultiMap<DocumentState,DocumentBuildListener>= new MultiMap()
-    async build(documents:MercuryDocument[],cancelToken:CancellationToken){
-        await this.buildDocuments(documents,cancelToken);
+    buildPhaseListeners: MultiMap<DocumentState, DocumentBuildListener> = new MultiMap()
+    async build(documents: MercuryDocument[], cancelToken: CancellationToken) {
+        await this.buildDocuments(documents, cancelToken);
     }
     async buildDocuments(documents: MercuryDocument[], cancelToken: CancellationToken) {
         // 0. Parse content
         //  parsing is done initially for each document, but
         //  re-parsing after changes reported by the client might have been canceled by subsequent changes, so re-parse now
         for (const doc of documents) {
-            if(doc.state <DocumentState.Parsed){
+            if (doc.state < DocumentState.Parsed) {
                 this.services.documentFactory.update(doc);
                 doc.state = DocumentState.Parsed
                 await interruptAndCheck((cancelToken))
@@ -43,30 +43,24 @@ export class DefaultDocumentBuilder{
             doc.state = DocumentState.Inferred
             await interruptAndCheck(cancelToken)
         }
-        this.services.client.setStatus('$(sync~spin)linking')
-        // 4. linking
-        for (const doc of documents) {
-            await this.services.linker.link(doc,cancelToken);
-            doc.state = DocumentState.Linked
-            await interruptAndCheck((cancelToken))
-        }
-        // 5. validate
+
+        // 4. validate
         this.services.client.setStatus('$(sync~spin)validating')
         for (const doc of documents) {
-            await this.validate(doc,cancelToken);
+            await this.validate(doc, cancelToken);
             doc.state = DocumentState.Validated
-            this.services.client.sendDiagnostics({uri:doc.uri.toString(),diagnostics:doc.diagnostics??[]})
+            this.services.client.sendDiagnostics({ uri: doc.uri.toString(), diagnostics: doc.diagnostics ?? [] })
             await interruptAndCheck((cancelToken))
         }
         this.services.client.setStatus('Mercury')
     }
-    async update(changed: URI[], deleted: URI[], cancelToken:CancellationToken): Promise<void> {
+    async update(changed: URI[], deleted: URI[], cancelToken: CancellationToken): Promise<void> {
         let deletedDocuments = []
         for (const deletedUri of deleted) {
             // Note : this deletedDocument should be the last reference to detedDocument
             // to stay away from memory leak
             let deletedDocument = this.services.documents.deleteDocument(deletedUri);
-            if(deletedDocument){
+            if (deletedDocument) {
                 this.services.index.delete(deletedDocument);
                 deletedDocuments.push(deletedDocument)
             }
@@ -76,32 +70,32 @@ export class DefaultDocumentBuilder{
         }
         await interruptAndCheck(cancelToken);
         this.services.client.setStatus('$(sync~spin)parsing')
-        let changedDocuments = changed.map(uri=>this.services.documents.getOrCreateDocument(uri))
-        let affectedDocuments = this.collectDocuments(changedDocuments,deletedDocuments)
-        await this.buildDocuments(affectedDocuments,cancelToken)
+        let changedDocuments = changed.map(uri => this.services.documents.getOrCreateDocument(uri))
+        let affectedDocuments = this.collectDocuments(changedDocuments, deletedDocuments)
+        await this.buildDocuments(affectedDocuments, cancelToken)
     }
-    collectDocuments(changedDocuments: MercuryDocument[], deletedDocuments:MercuryDocument[]) {
-        let docSet = stream(changedDocuments,deletedDocuments)
-        .map(doc=>doc.importedByDocs)
-        .flat()
-        .concat(changedDocuments)
-        .concat(this.services.documents.all.filter(doc =>doc.state<DocumentState.Validated ))
-        .map(doc =>{
-            doc.state = Math.min(doc.state,DocumentState.Indexed)
-            return doc
-        })
-        .toSet()
+    collectDocuments(changedDocuments: MercuryDocument[], deletedDocuments: MercuryDocument[]) {
+        let docSet = stream(changedDocuments, deletedDocuments)
+            .map(doc => doc.importedByDocs)
+            .flat()
+            .concat(changedDocuments)
+            .concat(this.services.documents.all.filter(doc => doc.state < DocumentState.Validated))
+            .map(doc => {
+                doc.state = Math.min(doc.state, DocumentState.Indexed)
+                return doc
+            })
+            .toSet()
 
         return Array.from(docSet)
     }
 
-    async validate(document:MercuryDocument,cancelToken:CancellationToken){
-        let diagnostics = await this.services.validator.validateDocument(document,cancelToken);
+    async validate(document: MercuryDocument, cancelToken: CancellationToken) {
+        let diagnostics = await this.services.validator.validateDocument(document, cancelToken);
         document.diagnostics = diagnostics;
     }
 }
 
 
-function equalURI(a?: URI|string, b?: URI|string): boolean {
-    return a?.toString() ===  b?.toString()
+function equalURI(a?: URI | string, b?: URI | string): boolean {
+    return a?.toString() === b?.toString()
 }
