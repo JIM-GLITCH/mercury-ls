@@ -76,10 +76,15 @@ export interface MercuryDocument {
     diagnostics?: Diagnostic[]
     /** Type inference results: term → inferred type/category */
     inferred?: Map<Term, InferredInfo>
-    /** Name resolution results: term → symbol entries */
+    /** Name resolution results: term → symbol entries（阶段 3 由 TypeInferer 填充） */
     resolved?: Map<Term, SymbolEntry[]>
     /** Signature resolution results: term → func/pred signature */
     signatures?: Map<Term, FuncInfo>
+    /** 阶段 3 顺带记录的模块声明，供 provider O(1) 读取 */
+    moduleTerm?: Term
+    moduleName?: string
+    /** `import_module` / `use_module` / `include_module` 的模块项 */
+    importModules?: Term[]
 }
 export interface MercuryDocumentFactory {
     /**

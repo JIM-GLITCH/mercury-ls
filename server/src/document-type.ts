@@ -10,11 +10,11 @@ export type MerType =
     | funcType
     | typeType;
 
-type varType = { kind: 'var'; name: string; bind?: MerType }
-type constructorType = { kind: 'constructor'; name: string, args: MerType[]; result: MerType }
-type predType = { kind: 'pred'; name: string, args: MerType[] }
-type funcType = { kind: 'func'; name: string, args: MerType[]; result?: MerType }
-type typeType = { kind: "type", name: string; args: MerType[] }
+export type varType = { kind: 'var'; name: string; bind?: MerType }
+export type constructorType = { kind: 'constructor'; name: string, args: MerType[]; result: MerType }
+export type predType = { kind: 'pred'; name: string, args: MerType[] }
+export type funcType = { kind: 'func'; name: string, args: MerType[]; result?: MerType }
+export type typeType = { kind: "type", name: string; args: MerType[] }
 
 export function varType(name: string, bind?: MerType): varType {
     return { kind: 'var', name, bind } 

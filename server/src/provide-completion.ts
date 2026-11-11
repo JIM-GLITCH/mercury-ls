@@ -4,7 +4,6 @@ import {
 } from 'vscode-languageserver'
 import { TextDocument } from 'vscode-languageserver-textdocument'
 import { URI } from 'vscode-uri'
-import { moduleQualifiedName } from './document-index'
 import { merTypeToString } from './document-type'
 import type { MercuryServices } from './services'
 import type { Term } from './term'
@@ -66,13 +65,15 @@ function completionKind(term: Term): CompletionItemKind {
     }
 }
 
-/** 用已收集的 func/pred 签名给出补全项的 detail */
+/** 用全局符号表里的 func/pred 签名给出补全项的 detail */
 function signatureOf(services: MercuryServices, name: string, arity: number): string | undefined {
-    const fi = services.index.lookupFuncAnywhere(name, arity)
-    if (!fi) return undefined
-    const args = fi.argTypes.map(merTypeToString).join(', ')
-    return fi.resultType
-        ? `type ${name}(${args}) = ${merTypeToString(fi.resultType)}`
+    const sig = services.index.get(name)
+        .find(e => e.arity === arity && e.signature
+            && (e.signature.kind === 'func' || e.signature.kind === 'pred'))?.signature
+    if (!sig || (sig.kind !== 'func' && sig.kind !== 'pred')) return undefined
+    const args = sig.args.map(merTypeToString).join(', ')
+    return sig.kind === 'func' && sig.result
+        ? `type ${name}(${args}) = ${merTypeToString(sig.result)}`
         : `type ${name}(${args})`
 }
 
@@ -81,10 +82,8 @@ function submoduleNames(services: MercuryServices, moduleName: string): string[]
     const prefix = moduleName + '.'
     const names = new Set<string>()
     for (const doc of services.documents.all) {
-        const mod = services.index.get(doc)?.module
-        if (!mod) continue
-        const full = moduleQualifiedName(mod)
-        if (!full.startsWith(prefix)) continue
+        const full = doc.moduleName
+        if (!full || !full.startsWith(prefix)) continue
         const next = full.slice(prefix.length).split('.')[0]
         if (next) names.add(next)
     }
@@ -117,15 +116,18 @@ export async function CompletionProvider(
     if (!q) return []
 
     // 索引结果只存在 GlobalIndex 里：文档刚打开、还没走 build 时现场补一次索引。
-    if (indexed && !services.index.get(indexed)) {
+    if (indexed && !services.index.byName.values().some(e => e.doc === indexed)) {
         await services.index.update(indexed, NOOP_CANCEL, { infer: false })
     }
-    const exported = services.index.getExportedTermsByModule(q.moduleName)
-    // 模块名匹配时，用本文件的 exports 兜底
-    if (exported.length === 0) {
-        const own = indexed ? services.index.get(indexed) : undefined
-        if (own?.module && moduleQualifiedName(own.module) === q.moduleName) {
-            for (const t of own.exports.values()) exported.push(t)
+    const exported: Term[] = services.index.getByModule(q.moduleName)
+        .filter(e => e.exported).map(e => e.term)
+    // 模块名匹配时，用本文件的导出项兜底（文档没写 `:- module` 时 byModule 查不到）
+    if (exported.length === 0 && indexed) {
+        const ownName = indexed.moduleName
+        if (!ownName || ownName === q.moduleName) {
+            for (const e of services.index.byName.values()) {
+                if (e.doc === indexed && e.exported) exported.push(e.term)
+            }
         }
     }
     const submodules = submoduleNames(services, q.moduleName)

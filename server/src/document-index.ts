@@ -1355,6 +1355,12 @@ export class GlobalIndex {
         if (term.nameArity === '::/2' || term.nameArity === '>>/2') {
             return this.termToSignature(term.args[0])
         }
+        // 模块限定类型 `M.Type(Args)` 解析为 `./2(M, Type(Args))`：
+        // 签名里只保留类型本身，否则 `list.list(float)` 会变成名为 `.` 的类型，
+        // 无法与构造子的结果类型 `list(T)` 合一。
+        if (term.nameArity === './2') {
+            return this.termToSignature(term.args[1])
+        }
         return typeType(term.name, (term.args ?? []).map(a => this.termToSignature(a)))
     }
     private recordFuncInfo(func: Term, ret: Term | undefined, determinism?: string) {

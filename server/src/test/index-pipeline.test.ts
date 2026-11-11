@@ -3,6 +3,7 @@ import { URI } from 'vscode-uri'
 import { createMercuryServices, type MercuryServices } from '../services'
 import { CancellationToken } from 'vscode-languageserver'
 import { constructorType, MerType, typeType, varType } from '../document-type'
+import { TypeInferer } from '../document-typeinfer'
 
 let services: MercuryServices
 beforeEach(() => {

@@ -2,20 +2,20 @@ import { Hover, HoverParams, MarkupContent } from 'vscode-languageserver'
 import { semanticArityOf, semanticNameArityOf } from './utils'
 import { search, termRange } from './term'
 import { URI } from 'vscode-uri'
-import { merTypeToString, keyOf } from './document-type'
+import { merTypeToString } from './document-type'
 import type { MercuryServices } from './services'
 
-export async function HoverProvider(services: MercuryServices, params:HoverParams) {
+export async function HoverProvider(services: MercuryServices, params: HoverParams): Promise<Hover | undefined> {
     let pos = params.position;
     let uri = params.textDocument.uri;
     let doc = services.documents.getOrCreateDocument(URI.parse(uri));
-    let  term  = search(doc.parseResult.value,pos)
-    if(!term)
-        return 
+    if (!doc) return undefined
+    let term = search(doc.parseResult.value, pos)
+    if (!term) return undefined
     const displayName = term.qualifiedName ?? term.name
     let header: string
-    if(term.semanticType){
-        switch (term.semanticType){
+    if (term.semanticType) {
+        switch (term.semanticType) {
             case 'func':
             case 'pred':
             case 'type':
@@ -27,18 +27,18 @@ export async function HoverProvider(services: MercuryServices, params:HoverParam
             case "pragma":
             case "operator":
                 header = `(${term.semanticType}) ${displayName}/${semanticArityOf(term)}`
-                break ;
+                break;
             case 'module':
             case "variable":
             case "mutable":
             case "determinism":
                 header = `(${term.semanticType}) ${displayName}`
-                break ;
+                break;
             default:
                 header = `(${term.semanticType}) ${displayName}`
         }
     }
-    else{
+    else {
         switch (term.syntaxType) {
             case 'string':
             case 'variable':
@@ -46,76 +46,54 @@ export async function HoverProvider(services: MercuryServices, params:HoverParam
             case 'float':
             case 'implementation_defined':
                 header = term.name;
-                break ;
+                break;
             case 'atom':
                 header = semanticNameArityOf(term);
-                break ;
-            default :
+                break;
+            default:
                 header = term.name;
                 break;
         }
     }
 
-    // 类型展示：func/pred 按行显示「类型签名 + 每个 mode 声明一行」；
-    // 其余项显示推断类型（`type ...`）；module（限定名前缀）不显示类型行
+    // 类型展示直接读阶段 3 落盘的解析结果：term → SymbolEntry.signature
     let typeStr: string | undefined
     if (term.semanticType !== 'module') {
-        if (term.semanticType === 'func' || term.semanticType === 'pred') {
-            const fi = services.index.get(doc)?.signatures.get(term)
-            if (fi) {
-                const args = fi.argTypes.map(merTypeToString).join(', ')
-                const lines = [term.semanticType === 'func'
-                    ? `type ${fi.name}(${args}) = ${fi.resultType ? merTypeToString(fi.resultType) : '?'}`
-                    : `type ${fi.name}(${args})`]
-                const modeLines = services.index.get(doc)?.modeSigs.get(keyOf(term.name, term.semanticArity)) ?? []
-                if (modeLines.length > 0) {
-                    for (const ml of modeLines) {
-                        lines.push(`mode ${ml}`)
-                    }
-                } else if (fi.argModeRefs) {
-                    // 跨模块签名无 modeSigs 展示串：从结构化 argModeRefs 渲染一行
-                    //（未注解参数在 record 时已默认填充 in/out）
-                    const refName = (r: { kind: string; name: string }) => r.name
-                    const argModes = fi.argModeRefs.map(refName).join(', ')
-                    lines.push(term.semanticType === 'func'
-                        ? `mode ${fi.name}(${argModes}) = (${fi.resultModeRef ? refName(fi.resultModeRef) : 'out'})`
-                        : `mode ${fi.name}(${argModes})`)
-                }
-                typeStr = lines.join('\n')
+        const resolved = doc.resolved?.get(term)?.[0]
+        const signature = resolved?.signature
+            ?? services.index.get(term.name).find(e => e.signature && e.arity === semanticArityOf(term))?.signature
+        if (signature && (signature.kind === 'func' || signature.kind === 'pred' || signature.kind === 'constructor')) {
+            const args = signature.args.map(merTypeToString).join(', ')
+            const head = args ? `${term.name}(${args})` : term.name
+            const modes = signature.args.map(() => 'in').join(', ')
+            if (signature.kind === 'constructor') {
+                typeStr = `type ${head} = ${merTypeToString(signature.result)}`
+            } else if (signature.kind === 'func') {
+                typeStr = `type ${head} = ${signature.result ? merTypeToString(signature.result) : '?'}\n`
+                    + `mode ${term.name}(${modes}) = (out)`
+            } else {
+                typeStr = `type ${head}\nmode ${term.name}(${modes})`
             }
-        }
-        // constructor：type 行显示构造子签名（Mercury 里构造子即函数：参数 = 结果类型）
-        else if (term.semanticType === 'constructor') {
-            for (const ti of services.index.get(doc)?.types.values() ?? []) {
-                const ci = ti.constructors.find(c => c.ctor === term.name && c.arity === term.arity)
-                if (ci) {
-                    const args = ci.argTypes.map(merTypeToString).join(', ')
-                    const head = args ? `${ci.ctor}(${args})` : ci.ctor
-                    typeStr = `type ${head} = ${merTypeToString(ci.resultType)}`
-                    break
-                }
-            }
+        } else if (signature) {
+            typeStr = `type ${merTypeToString(signature)}`
         }
         if (!typeStr) {
-            const inferred = services.index.get(doc)?.inferred.get(term)
-            if (inferred?.type) {
-                const lines = [`type ${merTypeToString(inferred.type)}`]
-                typeStr = lines.join('\n')
-            }
+            const inferred = doc.inferred?.get(term)
+            if (inferred?.type) typeStr = `type ${merTypeToString(inferred.type)}`
         }
     }
 
     const code = [header, typeStr].filter(s => s !== undefined).join('\n')
 
     return {
-        contents:{
-            kind:"markdown",
-            value:[
+        contents: {
+            kind: "markdown",
+            value: [
                 '```mercury',
                 code,
                 '```'
             ].join('\n')
         } as MarkupContent,
-        range:termRange(term)
+        range: termRange(term)
     } as Hover
 }

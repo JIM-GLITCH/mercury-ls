@@ -47,13 +47,38 @@ function categoryOf(doc: MercuryDocument, term: Term): string {
 }
 
 describe('typeinfer', () => {
-    it('should infer type', async () => {
+    it('should infer type with list definition', async () => {
+        // 首先添加 list 定义文件到全局索引
+        const listDoc = services.documentFactory.fromString(`
+            :- module list.
+            :- interface.
+            :- type list(T) ---> [] ; [T | list(T)].
+            :- type poke ---> card(color,int).
+            :- type color ---> red1|red2 | black1 |balck2
+            :- implementation.
+        `, URI.parse('file:///list.m'))
+        services.documents.addDocument(listDoc)
+        await services.index.update(listDoc, CancellationToken.None)
+
+        // 然后添加测试文件
         const doc = await infer(`
-            :- pred p(int).
-            p(X) :- Y = mk(1), Y = X.
+            :- import_module list.
+            :- pred p(poke).
+            p(card(X,Y)).
             `, 'typeinfer')
-        const { head } = headOf(doc, 1)
-        expect(typeOf(doc, head.args[0])).toBe('int')
+        // Clause 0: import_module
+        // Clause 1: pred declaration
+        // Clause 2: rule p([X]) :- X = 1.
+        const { head } = headOf(doc, 2)
+
+        // 检查 p 的签名
+        const pSignature = services.index.get('p')[0]?.signature
+        console.log('p signature:', JSON.stringify(pSignature, null, 2))
+
+        console.log('head.args[0] type:', typeOf(doc, head.args[0]))
+        console.log('head.args[0].args[0] type:', typeOf(doc, head.args[0].args[0]))
+        expect(typeOf(doc, head.args[0])).toBe('poke')
+        expect(typeOf(doc, head.args[0].args[0])).toBe('color')
     })
 
     it('推导 pred fact 头参数变量', async () => {
