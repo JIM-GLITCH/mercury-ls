@@ -121,15 +121,6 @@ export async function CompletionProvider(
     }
     const exported: Term[] = services.index.getByModule(q.moduleName)
         .filter(e => e.exported).map(e => e.term)
-    // 模块名匹配时，用本文件的导出项兜底（文档没写 `:- module` 时 byModule 查不到）
-    if (exported.length === 0 && indexed) {
-        const ownName = indexed.moduleName
-        if (!ownName || ownName === q.moduleName) {
-            for (const e of services.index.byName.values()) {
-                if (e.doc === indexed && e.exported) exported.push(e.term)
-            }
-        }
-    }
     const submodules = submoduleNames(services, q.moduleName)
     if (exported.length === 0 && submodules.length === 0) return []
 

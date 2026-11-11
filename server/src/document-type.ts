@@ -11,10 +11,11 @@ export type MerType =
     | typeType;
 
 export type varType = { kind: 'var'; name: string; bind?: MerType }
-export type constructorType = { kind: 'constructor'; name: string, args: MerType[]; result: MerType }
-export type predType = { kind: 'pred'; name: string, args: MerType[] }
-export type funcType = { kind: 'func'; name: string, args: MerType[]; result?: MerType }
-export type typeType = { kind: "type", name: string; args: MerType[] }
+/** module?: 限定类型名（如 `dir.stream`）的模块前缀；仅作展示/导航元数据，不参与类型合一 */
+export type constructorType = { kind: 'constructor'; name: string, args: MerType[]; result: MerType; module?: string }
+export type predType = { kind: 'pred'; name: string, args: MerType[]; module?: string }
+export type funcType = { kind: 'func'; name: string, args: MerType[]; result?: MerType; module?: string }
+export type typeType = { kind: "type", name: string; args: MerType[]; module?: string }
 
 export function varType(name: string, bind?: MerType): varType {
     return { kind: 'var', name, bind } 

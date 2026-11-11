@@ -59,9 +59,8 @@ export async function HoverProvider(services: MercuryServices, params: HoverPara
     // 类型展示直接读阶段 3 落盘的解析结果：term → SymbolEntry.signature
     let typeStr: string | undefined
     if (term.semanticType !== 'module') {
-        const resolved = doc.resolved?.get(term)?.[0]
-        const signature = resolved?.signature
-            ?? services.index.get(term.name).find(e => e.signature && e.arity === semanticArityOf(term))?.signature
+        // 只认阶段 3 的解析结果；没有就是没解析出来，不再按名字猜
+        const signature = doc.resolved?.get(term)?.find(e => e.signature)?.signature
         if (signature && (signature.kind === 'func' || signature.kind === 'pred' || signature.kind === 'constructor')) {
             const args = signature.args.map(merTypeToString).join(', ')
             const head = args ? `${term.name}(${args})` : term.name

@@ -1,6 +1,6 @@
 import { DeclarationParams, Location } from 'vscode-languageserver'
 import { stream } from './stream'
-import { moduleQualifiedName, semanticArityOf } from './utils'
+import { moduleQualifiedName } from './utils'
 import type { MercuryServices } from './services'
 import type { SymbolEntry } from './document-index'
 import { findAtTextDocumentPositionTerm, findModuleDoc, uriTerm, uriTermToLocation } from './provide-definition'
@@ -17,15 +17,14 @@ export async function DeclarationProvider(services: MercuryServices, params: Dec
         return doc?.moduleTerm ? [uriTermToLocation(uriTerm.create(doc.uri, doc.moduleTerm))] : []
     }
 
-    // 阶段 3 已把引用解析到声明项；若当前是子句头定义，则按名字在全局符号表里取带签名的声明
-    const resolved = document.resolved?.get(term)?.[0]
-    let candidates: readonly SymbolEntry[] = resolved?.signature
-        ? [resolved]
-        : services.index.get(term.name).filter(e => !!e.signature && e.arity === semanticArityOf(term))
-
+    // 阶段 3 已把引用解析到的定义/声明一起落盘，取其中带签名的一项
+    const entry = document.resolved?.get(term)?.find(e => e.signature)
+    const candidates: readonly SymbolEntry[] = entry ? [entry] : []
     if (term.qualified) {
         const name = moduleQualifiedName(term.qualified)
-        candidates = candidates.filter(e => e.module === name || e.doc.moduleName === name)
+        return candidates
+            .filter(e => e.module === name || e.doc.moduleName === name)
+            .map(e => uriTermToLocation(uriTerm.create(e.doc.uri, e.term)))
     }
     return stream(candidates)
         .map(e => uriTerm.create(e.doc.uri, e.term))

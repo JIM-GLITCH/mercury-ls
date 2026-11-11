@@ -13,12 +13,12 @@ import {
     InferredInfo, MerType, varType, typeType, constructorType,
 } from './document-type'
 import {
-    createLogicVar, resolve, useTrail,
+    createLogicVar, resolve, useTrail, freeze, putAttr, getAttr,
     type LogicVar, type Logical,
 } from './logical-var'
 import type { GlobalIndex, SymbolEntry } from './document-index'
 import { interruptAndCheck } from './promise-util'
-import { moduleQualifiedName } from './utils'
+import { moduleQualifiedName, semanticArityOf } from './utils'
 import type { MercuryServices } from './services'
 
 // 声明里的签名是纯 MerType 模板（只读）；每次使用点实例化成可合一的逻辑项
@@ -37,6 +37,8 @@ interface InstantiatedSignature {
 /** 约束类型 */
 type Constraint =
     | { kind: 'unify'; left: LVar; right: LType }
+    /** 字面量的重载类型可选项：求解时挑第一个与上下文合一成功的 */
+    | { kind: 'literal'; left: LVar; alternatives: MerType[] }
     | { kind: 'call'; term: Term; candidates: TypeCandidate[]; argVars: (LVar | undefined)[]; resultVar?: LVar }
 
 /** 类型候选；entry 指向全局符号表里被选中的定义/声明，供名称解析落盘 */
@@ -73,6 +75,12 @@ const NUMERIC_CTORS = new Set([
     'int8', 'int16', 'int32', 'int64',
     'uint8', 'uint16', 'uint32', 'uint64',
 ])
+
+/** 整数字面量是重载的：`1` 在 float 上下文里就是 float，不能硬钉成 int */
+const INTEGER_LITERAL_TYPES: MerType[] = [...NUMERIC_CTORS].map(name => typeType(name, []))
+
+/** 挂在逻辑变量属性上的 key：记录字面量的类型可选项，供 label 阶段综合求解 */
+const LITERAL_ALTS: symbol = Symbol('literal-alts')
 
 /** Mercury 内建 list 构造子签名；未加载 list.m 时也能解构 [] / [H|T] */
 function builtinListConstructor(name: string, arity: number): MerType | undefined {
@@ -144,6 +152,16 @@ export class TypeInferer {
             seen.add(term)
             if (term !== clause && !term.clause) term.clause = clause
             if (term.semanticType) references.push(term)
+            // `int.(A + B)` 这类带限定名的引用：声明里的表达式不参与类型推断，
+            // 但限定模块已经足够定位符号，直接落盘，避免 provider 按名字抓错模块
+            if (!resolved.has(term) && term.qualified) {
+                const module = moduleQualifiedName(term.qualified)
+                const entries = this.index.get(term.name, module)
+                const arity = semanticArityOf(term)
+                const entry = entries.find(e => e.arity === arity && e.signature)
+                    ?? entries.find(e => e.arity === arity)
+                if (entry) resolved.set(term, [entry])
+            }
             for (const arg of term.args ?? []) walk(arg, clause)
         }
         for (const clause of doc.parseResult.value.args as Clause[]) {
@@ -172,9 +190,13 @@ export class TypeInferer {
 
         let topTerm = clause.term
         switch (topTerm.nameArity) {
-            case ":-/1":
-                // declaration : ':-'(Decl) - 声明不需要类型推断
+            case ":-/1": {
+                // 普通声明不需要类型推断；但 `:- promise all [...] (Goal).` 里
+                // 的 Goal 是真实表达式，其中的引用要靠约束求解消歧
+                const decl = topTerm.args[0]
+                if (decl?.nameArity === 'promise/1') this.inferRuleBody(decl.args[0], context)
                 break
+            }
             case ":-/2":
                 // rule : ':-'(RuleHead,RuleBody)
                 this.inferRuleHead(topTerm.args[0], context)
@@ -234,7 +256,7 @@ export class TypeInferer {
         context.termType.set(term, headVar)
 
         // 查找谓词的签名（如果有）
-        const candidates = this.getTypeCandidates(term.name, term.semanticArity ?? term.arity, ['pred'])
+        const candidates = this.getTypeCandidates(term.name, term.semanticArity ?? term.arity, ['pred'], this.moduleOf(term))
         if (candidates.length > 0) {
             // 为每个候选生成 call 约束
             context.constraints.push({
@@ -266,7 +288,7 @@ export class TypeInferer {
         context.constraints.push({ kind: 'unify', left: funcVar, right: resultVar })
 
         // 无声明（只有定义、没有 :- func 声明）时保留自由类型变量，不报错
-        const candidates = this.getTypeCandidates(func.name, func.semanticArity ?? func.arity, ['func'])
+        const candidates = this.getTypeCandidates(func.name, func.semanticArity ?? func.arity, ['func'], this.moduleOf(func))
         context.constraints.push({
             kind: 'call',
             term: func,
@@ -407,7 +429,7 @@ export class TypeInferer {
         context.termType.set(term, headVar)
 
         // 查找候选签名（pred/func/constructor 都可能）
-        const candidates = this.getTypeCandidates(term.name, term.semanticArity ?? term.arity, ['pred', 'func', 'constructor'])
+        const candidates = this.getTypeCandidates(term.name, term.semanticArity ?? term.arity, ['pred', 'func', 'constructor'], this.moduleOf(term))
         if (candidates.length > 0) {
             context.constraints.push({
                 kind: 'call',
@@ -429,16 +451,17 @@ export class TypeInferer {
 
         // 根据语法类型推断
         switch (term.syntaxType) {
-            case 'integer':
-                // 整数类型 - 直接创建已知类型的逻辑变量
+            case 'integer': {
+                // `1` 是重载字面量：先挂类型可选项，等上下文确定后再挑一个
                 const intVar = createLogicVar<MerType>()
                 context.termType.set(term, intVar)
                 context.constraints.push({
-                    kind: 'unify',
+                    kind: 'literal',
                     left: intVar,
-                    right: typeType('int', []) as any,
+                    alternatives: INTEGER_LITERAL_TYPES,
                 })
                 return intVar
+            }
             case 'float':
                 const floatVar = createLogicVar<MerType>()
                 context.termType.set(term, floatVar)
@@ -466,6 +489,10 @@ export class TypeInferer {
                     const [varPart, valuePart] = term.args.map(arg => this.inferTerm(arg, context))
                     context.constraints.push({ kind: 'unify', left: atomVar, right: varPart })
                     context.constraints.push({ kind: 'unify', left: atomVar, right: valuePart })
+                } else if (nameArity(term, './2')) {
+                    // `M.Expr` 只是限定前缀，类型就是 Expr 的类型；左侧模块名不参与推导
+                    const right = this.inferTerm(term.args[1], context)
+                    context.constraints.push({ kind: 'unify', left: atomVar, right })
                 } else {
                     this.inferDataFunctor(term, context)
                 }
@@ -502,7 +529,7 @@ export class TypeInferer {
         const typeVar = context.termType.get(term)!
 
         // 查找候选签名
-        const candidates = this.getTypeCandidates(term.name, term.arity, ['constructor', 'func'])
+        const candidates = this.getTypeCandidates(term.name, term.arity, ['constructor', 'func'], this.moduleOf(term))
         if (candidates.length > 0) {
             context.constraints.push({
                 kind: 'call',
@@ -526,9 +553,14 @@ export class TypeInferer {
     }
 
     /** 从 GlobalIndex 获取类型候选 */
-    private getTypeCandidates(name: string, arity: number, kinds: TypeCandidate['kind'][]): TypeCandidate[] {
+    /** 限定名引用只在指定模块里找候选，避免同名符号（如 int.+ 与 float.+）串味 */
+    private moduleOf(term: Term): string | undefined {
+        return term.qualified ? moduleQualifiedName(term.qualified) : undefined
+    }
+
+    private getTypeCandidates(name: string, arity: number, kinds: TypeCandidate['kind'][], module?: string): TypeCandidate[] {
         const candidates: TypeCandidate[] = []
-        for (const symbol of this.index.get(name)) {
+        for (const symbol of this.index.get(name, module)) {
             if (kinds.includes(symbol.kind as TypeCandidate['kind']) && symbol.arity === arity && symbol.signature) {
                 candidates.push({
                     signature: symbol.signature,
@@ -538,7 +570,7 @@ export class TypeInferer {
             }
         }
         // 索引里有 list.m 时用真实定义，否则退回内建 list 构造子
-        if (candidates.length === 0 && kinds.includes('constructor')) {
+        if (candidates.length === 0 && !module && kinds.includes('constructor')) {
             const signature = builtinListConstructor(name, arity)
             if (signature) candidates.push({ signature, kind: 'constructor' })
         }
@@ -553,22 +585,60 @@ export class TypeInferer {
     ) {
         const solver = useTrail()
         const categories = new Map<Term, TypeCandidate['kind']>()
+        const calls: Extract<Constraint, { kind: 'call' }>[] = []
+        const literals: Extract<Constraint, { kind: 'literal' }>[] = []
 
+        // === 阶段 1：把约束登记到逻辑变量的属性上（attributed variables） ===
+        // 经典 CLP 范式是「先收集约束、最后统一求解」，而不是一边收集一边手写搜索去
+        // 回溯。unify 直接施加——标准合一本身即约束传播；字面量把可选项记进变量属性
+        // 并注册 bind 时校验；call 候选则留到 label 阶段再选。
         for (const constraint of context.constraints) {
-            if (constraint.kind === 'unify') {
+            if (constraint.kind === 'literal') {
+                literals.push(constraint)
+                const alts = constraint.alternatives.map(alt => this.makeLogical(alt))
+                // 可选项记到变量属性上，供 label 阶段综合求解时读取
+                putAttr(constraint.left, LITERAL_ALTS, alts, solver.trail)
+                // 变量一旦被绑定到具体类型，校验它是否属于可选项之一（失败随 trail 回滚）
+                freeze(constraint.left, () => {
+                    const value = constraint.left.deref()
+                    return value !== undefined && alts.some(alt => solver.unify(value, alt))
+                }, solver.trail)
+            } else if (constraint.kind === 'call') {
+                calls.push(constraint)
+            } else {
                 solver.unify(constraint.left, constraint.right)
-                continue
             }
+        }
+
+        // === 阶段 2：label —— 给仍含选择的变量定值，无需搜索回溯 ===
+        // 2a. 调用项：参数约束已在阶段 1 的传播下收窄，此时选唯一兼容的候选即可
+        for (const constraint of calls) {
             for (const candidate of constraint.candidates) {
                 const mark = solver.mark()
                 if (this.tryUnifyCall(constraint, candidate, solver.unify, context)) {
                     categories.set(constraint.term, candidate.kind)
-                    // 引用项 → 选中的全局符号；本文件已登记的声明/定义项保持指向自己
+                    // 引用项 → 选中的全局符号；同模块若有子句头定义，放在最前面，
+                    // 让 go-to-definition / declaration / hover 各自 O(1) 取所需条目
                     if (candidate.entry && !resolved.has(constraint.term)) {
-                        resolved.set(constraint.term, [candidate.entry])
+                        const e = candidate.entry
+                        const def = this.index.get(e.name, e.module).find(d =>
+                            d.doc === e.doc && d.kind === e.kind && d.arity === e.arity && !d.signature)
+                        resolved.set(constraint.term, def && def !== e ? [def, e] : [e])
                     }
                     break
                 }
+                solver.undo(mark)
+            }
+        }
+        // 2b. 字面量：未被上下文绑定的，从属性记录的可选项里选第一个与约束相容的类型；
+        //     仍无约束则落默认 int（INTEGER_LITERAL_TYPES 首项）
+        for (const constraint of literals) {
+            if (constraint.left.bound) continue
+            const alts = (getAttr(constraint.left, LITERAL_ALTS) as LType[] | undefined)
+                ?? constraint.alternatives.map(alt => this.makeLogical(alt))
+            for (const alt of alts) {
+                const mark = solver.mark()
+                if (solver.unify(constraint.left, alt)) break
                 solver.undo(mark)
             }
         }
@@ -610,6 +680,11 @@ export class TypeInferer {
                 if (!unify(argVars[i], inst.args[i])) return false
             }
             if (resultVar && inst.result && !unify(resultVar, inst.result)) return false
+            // 带模块限定的调用已经唯一确定签名，返回类型是已知事实，锚定到调用项；
+            // 这样外层未限定的同名候选（如 `int.(A+B) + C` 的外层 `+`）才能靠
+            // 参数类型把类型不匹配的候选剪掉。未限定的调用仍由外层上下文决定。
+            if (termVar && constraint.term.qualified && inst.result
+                && !unify(termVar, inst.result)) return false
             return true
         } else if (kind === 'constructor' && signature.kind === 'constructor') {
             // 构造子：合一参数类型，结果类型与项的类型变量合一
@@ -642,6 +717,9 @@ export class TypeInferer {
                 }
                 const out: Record<string, unknown> = {}
                 for (const [key, value] of Object.entries(node)) {
+                    // module 只是展示/导航元数据；通用 unify 按对象键逐一比较，
+                    // 让可选键参与合一会让 `p(list.list(float))` 与构造子结果 `list(T)` 失配
+                    if (key === 'module') continue
                     out[key] = convert(value)
                 }
                 return out

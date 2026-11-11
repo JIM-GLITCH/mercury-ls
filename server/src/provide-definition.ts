@@ -49,10 +49,8 @@ function matchesKind(kind: string | undefined, entry: SymbolEntry): boolean {
 }
 
 /** term → 符号条目：优先读阶段 3 落盘的 doc.resolved，其次按 term 身份找 */
-function resolvedEntry(services: MercuryServices, document: MercuryDocument, term: Term): SymbolEntry | undefined {
-    const kind = symbolKind(document, term)
+function resolvedEntry(document: MercuryDocument, term: Term): SymbolEntry | undefined {
     return document.resolved?.get(term)?.[0]
-        ?? services.index.get(term.name).find(e => e.term === term && matchesKind(kind, e))
 }
 
 /** 按模块限定名找模块所在文档 */
@@ -62,8 +60,7 @@ export function findModuleDoc(services: MercuryServices, term: Term): MercuryDoc
     return services.documents.all.find(doc => {
         const moduleName = doc.moduleName
         return !!moduleName && (moduleName === name || moduleName === short || moduleName.split('.').pop() === short)
-    }) ?? services.documents.all.find(doc =>
-        doc.uri.path.split('/').pop()?.replace(/\.m$/, '') === short)
+    })
 }
 
 /**
@@ -135,17 +132,10 @@ export function findDefTerms(services: MercuryServices, params: uriTerm): Stream
             return doc && moduleTerm ? stream([uriTerm.create(doc.uri, moduleTerm)]) : stream([])
         }
         default: {
-            const kind = symbolKind(document, term)
-            const entry = resolvedEntry(services, document, term)
-            // 名字 + 元数 + kind 三者都匹配才算目标定义
-            const pool = services.index.get(term.name)
-                .filter(e => sameArity(e.term, term) && matchesKind(kind, e))
-            const inScope = entry ? pool.filter(e => e.doc === entry.doc) : pool
-            // 子句头定义优先于声明；没有解析结果时退回全局候选
-            const target = inScope.find(e => !e.signature && (e.kind === 'func' || e.kind === 'pred'))
-                ?? inScope[0]
-                ?? pool[0]
-            return target ? stream([uriTerm.create(target.doc.uri, target.term)]) : stream([])
+            // 解析结果由阶段 3 落盘；第一个条目就是定义（声明兜底的活也已在那里做完）
+            const entry = resolvedEntry(document, term)
+            if (!entry || !matchesKind(symbolKind(document, term), entry)) return stream([])
+            return stream([uriTerm.create(entry.doc.uri, entry.term)])
         }
     }
 }

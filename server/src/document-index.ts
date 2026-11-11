@@ -719,18 +719,18 @@ export class GlobalIndex {
             }
             return
         }
-        // 只有在不是特殊运算符的情况下才标记为 type
-        label(term, "type")
+        // 只有在不是特殊运算符的情况下才标记为 type；限定名标在右半边真正类型上
         const right = this.visitQualifiedTerm(term)
-  
+        label(right, "type")
+
         // 参数化类型的参数也是类型引用位置（类型变量除外）
         for (const arg of right.args ?? []) {
             if (!isVariable(arg)) this.visitTypeRef(arg)
         }
     }
     visitInstRef(term: Term) {
-        label(term, "inst")
         const right = this.visitQualifiedTerm(term)
+        label(right, "inst")
         // 内置 inst（ground/any/free/...）标 inst 但不进 instReference
         if (builtinInsts.has(right.name)) return
 
@@ -740,8 +740,8 @@ export class GlobalIndex {
         }
     }
     visitModeRef(term: Term) {
-        label(term, "mode")
         const right = this.visitQualifiedTerm(term)
+        label(right, "mode")
         // 内置模式（in/out/di/uo/ui/muo）标 mode 但不进 modeReference
         if (builtinModes.has(right.name)) return
 
@@ -930,21 +930,25 @@ export class GlobalIndex {
             this.visitTypeConstrutor(term.args[1])
             return
         }
+        // 构造子名也可以带模块限定（如 `dir.stream`），同样先剥 `./2`
+        const right = this.visitQualifiedTerm(term)
         // C1/C2 是 data constructor，不是 type；单独标 constructor 以便与类型名区分
-        label(term, "constructor")
-        const args = (term.args ?? []).map(a => this.termToSignature(a))
+        label(right, "constructor")
+        const args = (right.args ?? []).map(a => this.termToSignature(a))
         // 构造子的结果类型统一是所属类型应用其参数
-        const result = this.currentTypeSignature ?? typeType(term.name, [])
-        this.addSymbol(term, 'constructor', constructorType(term.name, args, result))
+        const result = this.currentTypeSignature ?? typeType(right.name, [])
+        const signature = constructorType(right.name, args, result)
+        if (right.qualified) signature.module = moduleQualifiedName(right.qualified)
+        this.addSymbol(right, 'constructor', signature)
 
         // interface 段的具体类型，其构造子也是模块导出符号
         // （如 pair 的 `-`/2：与 int 的减法函数 `-`/2 同名，linker 消解时两者都
         // 出现在候选里，类别不唯一则保持无类别，避免把 `K - V` 误标成 func）
-        this.tryAddExport(term)
+        this.tryAddExport(right)
         // 收集构造子签名（参数类型 + 结果类型 = 所属类型应用其参数）
-        
+
         // 构造子参数是类型引用位置（类型变量除外）
-        for (const arg of term.args ?? []) {
+        for (const arg of right.args ?? []) {
             if (!isVariable(arg)) this.visitTypeRef(arg)
         }
     }
@@ -964,12 +968,15 @@ export class GlobalIndex {
         }
     }
     visitTypeName(term: Term) {
-        label(term, "type")
-        const signature = typeType(term.name, (term.args ?? []).map(a => this.termToSignature(a)))
+        // `:- type m.t ---> ...`：先剥掉 `./2` 限定前缀，否则会把 `.` 当成类型名登记
+        const right = this.visitQualifiedTerm(term)
+        label(right, "type")
+        const signature = typeType(right.name, (right.args ?? []).map(a => this.termToSignature(a)))
+        if (right.qualified) signature.module = moduleQualifiedName(right.qualified)
         this.currentTypeSignature = signature
-        this.addSymbol(term, 'type', signature)
+        this.addSymbol(right, 'type', signature)
 
-        this.tryAddExport(term)
+        this.tryAddExport(right)
 
     }
 
@@ -1356,10 +1363,12 @@ export class GlobalIndex {
             return this.termToSignature(term.args[0])
         }
         // 模块限定类型 `M.Type(Args)` 解析为 `./2(M, Type(Args))`：
-        // 签名里只保留类型本身，否则 `list.list(float)` 会变成名为 `.` 的类型，
-        // 无法与构造子的结果类型 `list(T)` 合一。
+        // 名字取右半边，模块前缀记在 MerType.module，供 hover / 跳转使用。
+        // 若把前缀塞进 name（或整个 `./2` 当构造子），签名会变成名为 `.` 的伪类型。
         if (term.nameArity === './2') {
-            return this.termToSignature(term.args[1])
+            const right = this.termToSignature(term.args[1])
+            if (right.kind === 'var') return right
+            return { ...right, module: moduleQualifiedName(term.args[0]) }
         }
         return typeType(term.name, (term.args ?? []).map(a => this.termToSignature(a)))
     }

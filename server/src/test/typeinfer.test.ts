@@ -406,4 +406,48 @@ describe('typeinfer', () => {
         const zTerm = clause.varMap.get('Z')?.[0]
         expect(typeOf(doc, zTerm!)).toBe('int')
     })
+
+    it('整数字面量 1 在 float 上下文里是 float', async () => {
+        const doc = await infer(`
+            :- pred p(float).
+            p(X) :- X = 1.
+            `, 'literal_float')
+        const clause = doc.parseResult.value.args[1] as Clause
+        expect(typeOf(doc, clause.term.args[1].args[1])).toBe('float')
+    })
+
+    it('整数字面量 1 在 uint 上下文里是 uint', async () => {
+        const doc = await infer(`
+            :- pred p(uint).
+            p(X) :- X = 1.
+            `, 'literal_uint')
+        const clause = doc.parseResult.value.args[1] as Clause
+        expect(typeOf(doc, clause.term.args[1].args[1])).toBe('uint')
+    })
+
+    it('1 不会把 list(float) 的元素硬钉成 int', async () => {
+        const doc = await infer(`
+            :- pred p(list(float)).
+            p([X]) :- X = 1.
+            `, 'literal_list_float')
+        const { head } = headOf(doc, 1)
+        expect(typeOf(doc, head.args[0])).toBe('list(float)')
+        expect(typeOf(doc, head.args[0].args[0])).toBe('float')
+    })
+
+    it('无上下文时整数字面量 1 默认 int', async () => {
+        const doc = await infer('q(1).', 'literal_default')
+        expect(typeOf(doc, headOf(doc, 0).head.args[0])).toBe('int')
+    })
+
+    it('整数字面量 1 会排除类型不匹配的重载候选', async () => {
+        const doc = await infer(`
+            :- pred p(string).
+            :- pred p(int).
+            p(1).
+            `, 'literal_candidate')
+        const { head } = headOf(doc, 2)
+        expect(typeOf(doc, head.args[0])).toBe('int')
+        expect(categoryOf(doc, head)).toBe('pred')
+    })
 })
