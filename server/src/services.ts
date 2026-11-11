@@ -14,7 +14,6 @@ import {
 import { GlobalIndex } from './document-index'
 import { TypeInferer } from './document-typeinfer'
 import { DefaultDocumentValidator, DocumentValidator } from './document-validator'
-import { DefaultLinker, Linker } from './document-linker'
 import { DefaultDocumentBuilder } from './document-builder'
 import { DeafultWoekspaceManager } from './workspace-manager'
 import {

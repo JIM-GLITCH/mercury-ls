@@ -20,14 +20,12 @@ export class DefaultDocumentValidator implements DocumentValidator {
 
     async validateDocument(document: MercuryDocument, cancelToken:CancellationToken): Promise<Diagnostic[]> {
         let parseErrors = document.parseResult.errors;
-        let visitErrors = this.services.index.get(document)?.errors ?? []
         let linkeErrors = document.linkResult?.errors ?? []
         // await interruptAndCheck(cancelToken);
 
-        let diagnostics = stream(parseErrors,visitErrors,linkeErrors).toArray()
 
         // await interruptAndCheck(cancelToken);
 
-        return diagnostics;
+        return [];
     }
 }

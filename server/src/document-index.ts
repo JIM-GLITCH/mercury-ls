@@ -858,13 +858,6 @@ export class GlobalIndex {
             case "mutable/1":
                 this.visitMutableDecl(term)
                 break
-            case "infixl/1":
-            case "infixr/1":
-            case "infix/1":
-            case "prefix/1":
-            case "postfix/1":
-                this.visitOperatorDecl(term)
-                break
             default:
                 break
         }
@@ -1119,14 +1112,7 @@ export class GlobalIndex {
         if (this.visitNameArityRef(term)) return
         // 其它结构参数（属性列表等）不索引
     }
-    visitOperatorDecl(decl: Term) {
-        // :- infixl(Prio, Op).  Op（decl.args[1]）是被定义的运算符名
-        let opTerm = decl.args[1]
-        if (opTerm) {
-            label(opTerm, "operator")
 
-        }
-    }
     visitTypeclassDecl(term: Term) {
         // body 形如 where/2(Head, Methods)、<=/2(Inner, Supers) 或 where/2(<=/2(...), Methods)
         // 先定位 where 节点以索引方法，再剥离 where/2、<=/2 得到类名项（diet_element/1）

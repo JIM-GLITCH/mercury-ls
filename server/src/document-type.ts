@@ -1,5 +1,6 @@
 import { Term } from './term'
 import type { MerModeRef } from './document-mode'
+import { Logical } from './logical-var';
 
 // 轻量类型表示（对应编译器 mer_type），仅用于 LSP 级消歧，不含 kind / 类型类约束
 export type MerType =
@@ -8,6 +9,7 @@ export type MerType =
     | predType
     | funcType
     | typeType;
+
 type varType = { kind: 'var'; name: string; bind?: MerType }
 type constructorType = { kind: 'constructor'; name: string, args: MerType[]; result: MerType }
 type predType = { kind: 'pred'; name: string, args: MerType[] }
@@ -18,18 +20,30 @@ export function varType(name: string, bind?: MerType): varType {
     return { kind: 'var', name, bind } 
 }
 
-export function constructorType(name: string, args: MerType[], result: MerType): constructorType {
+export function constructorType(name: string, args: MerType[], result: MerType): constructorType
+export function constructorType(name: string, args: Logical<MerType>[], result: Logical<MerType>): Logical<constructorType>
+export function constructorType(name: string, args: MerType[] | Logical<MerType>[], result: MerType | Logical<MerType>): constructorType | Logical<constructorType> {
     return { kind: 'constructor', name, args, result }
 }
-export function predType(name: string, args: MerType[]): predType {
+
+export function predType(name: string, args: MerType[]): predType
+export function predType(name: string, args: Logical<MerType>[]): Logical<predType>
+export function predType(name: string, args: MerType[] | Logical<MerType>[]): predType | Logical<predType> {
     return { kind: 'pred', name, args }
 }
-export function funcType(name: string, args: MerType[], result?: MerType): funcType {
+
+export function funcType(name: string, args: MerType[], result?: MerType): funcType
+export function funcType(name: string, args: Logical<MerType>[], result?: Logical<MerType>): Logical<funcType>
+export function funcType(name: string, args: MerType[] | Logical<MerType>[], result?: MerType | Logical<MerType>): funcType | Logical<funcType> {
     return { kind: 'func', name, args, result }
 }
-export function typeType(name: string, args: MerType[]): typeType {
+
+export function typeType(name: string, args: MerType[]): typeType
+export function typeType(name: string, args: Logical<MerType>[]): Logical<typeType>
+export function typeType(name: string, args: MerType[] | Logical<MerType>[]): typeType | Logical<typeType> {
     return { kind: 'type', name, args }
 }
+
 
 
 // 一条过程 mode（对应编译器一个 procedure）：:- mode P(Modes) [is Det]. 或 :: 注解推出的默认过程
