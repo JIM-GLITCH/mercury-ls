@@ -101,6 +101,9 @@ function collectReferences(
             if (!visibleRef(refTerm, termModule, doc)) continue
             const resolved = doc.resolved?.get(refTerm)?.[0]
             if (resolved?.term === refTerm && !includeDeclaration) continue
+            // callee 的容器若是声明头（带 semanticType），它本身就是声明，不应在
+            // includeDeclaration=false 时当作引用列出（应用项的容器 semanticType 为空，不受影响）
+            if (!includeDeclaration && refTerm.calleeOf?.semanticType) continue
             pushRef(refs, seen, doc, refTerm)
         }
     }
@@ -140,6 +143,7 @@ function collectFieldRefs(
             if (!visibleRef(refTerm, termModule, doc)) continue
             const resolved = doc.resolved?.get(refTerm)?.[0]
             if (resolved?.term === refTerm && !includeDeclaration) continue
+            if (!includeDeclaration && refTerm.calleeOf?.semanticType) continue
             pushRef(refs, seen, doc, refTerm)
         }
     }

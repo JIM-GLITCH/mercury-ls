@@ -66,8 +66,12 @@ export async function HoverProvider(services: MercuryServices, params: HoverPara
     let typeStr: string | undefined
     if (foundTerm.semanticType !== 'module') {
         const inferred = doc.inferred?.get(foundTerm)
-        if (inferred?.type) {
-            typeStr = `type ${merTypeToString(inferred.type)}`
+        const inferredType = inferred?.type
+        // 命中符号名/声明头时，推断类型是 pred(...)/func(...) 高阶包装，
+        // 与下方签名重复（且前者是实例化版本、后者是通用签名），故跳过避免重复显示。
+        const inferredRedundant = inferredType?.kind === 'func' || inferredType?.kind === 'pred'
+        if (inferredType && !inferredRedundant) {
+            typeStr = `type ${merTypeToString(inferredType)}`
         }
         // 只认阶段 3 的解析结果；没有就是没解析出来，不再按名字猜
         const signature = doc.resolved?.get(displayTerm)?.find(e => e.signature)?.signature

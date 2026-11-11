@@ -1,8 +1,12 @@
 import { beforeEach, describe, it, expect } from 'vitest'
 import { URI } from 'vscode-uri'
-import { CancellationToken } from 'vscode-languageserver'
+import { CancellationToken, type DefinitionParams, type ReferenceParams } from 'vscode-languageserver'
 import { createMercuryServices, type MercuryServices } from '../services'
 import { merTypeToString } from '../document-type'
+import { semanticArityOf } from '../utils'
+import { DefinitionProvider, ImplementationProvider } from '../provide-definition'
+import { DeclarationProvider } from '../provide-declaration'
+import { ReferenceProvider } from '../provide-reference'
 import type { MercuryDocument } from '../document-manager'
 import type { Clause, Term } from '../term'
 
@@ -496,5 +500,82 @@ describe('typeinfer', () => {
         expect(callee).toBeDefined()
         // 内建 + 不一定进全局索引，故只验证名字被拆出、应用项类型正确
         expect(callee.name).toBe('+')
+    })
+
+    it('callee 与应用项解析到同一符号：定义跳转与引用一致', async () => {
+        const doc = await infer(`:- func p(int) = int.
+:- pred q(int).
+q(p(1)).
+`, 'callee_defref')
+        const { head } = headOf(doc, 2)   // q(p(1))
+        const call = head.args[0]          // p(1)
+        const callee = call.callee!
+        // 名字 callee 与应用项都落盘到同一个符号
+        expect(doc.resolved?.has(call)).toBe(true)
+        expect(doc.resolved?.has(callee)).toBe(true)
+        // callee 的语义元数跟随容器应用项，避免被按元数(0 vs 1)拆成两个符号
+        expect(semanticArityOf(callee)).toBe(semanticArityOf(call))
+        expect(doc.resolved?.get(callee)).toEqual(doc.resolved?.get(call))
+
+        const uri = doc.uri.toString()
+        // 用名字 callee 的 token 位置（直接来自 AST，避免硬编码行列）
+        const pos = { line: callee.token.line - 1, character: callee.token.col - 1 }
+        const defs = await DefinitionProvider(services, {
+            textDocument: { uri }, position: pos,
+        } as DefinitionParams)
+        expect(defs.length).toBeGreaterThan(0)
+        // 跳到 :- func p(int) = int. 的声明（第 0 行）
+        expect(defs[0].range.start.line).toBe(0)
+
+        const refs = await ReferenceProvider(services, {
+            textDocument: { uri }, position: pos, context: { includeDeclaration: true },
+        } as ReferenceParams)
+        const lines = refs.map(r => r.range.start.line).sort((a, b) => a - b)
+        expect(lines).toContain(0)   // 声明
+        expect(lines).toContain(2)   // 用法 q(p(1))
+    })
+
+    it('definition 含 declaration+definition；implementation 去 definition；declaration 去 declaration', async () => {
+        const doc = await infer(`:- func p(int) = int.
+p(X) = X + 1.
+:- pred q(int).
+q(p(1)).
+`, 'def_impl_decl')
+        const { head } = headOf(doc, 3)   // q(p(1))
+        const call = head.args[0]          // p(1)
+        const callee = call.callee!
+        const uri = doc.uri.toString()
+        const pos = { line: callee.token.line - 1, character: callee.token.col - 1 }
+
+        // 转到定义：同时给出 declaration(第 0 行) 与 definition(第 1 行)
+        const defs = await DefinitionProvider(services, {
+            textDocument: { uri }, position: pos,
+        } as DefinitionParams)
+        const defLines = defs.map(d => d.range.start.line).sort((a, b) => a - b)
+        expect(defLines).toContain(0)   // :- func p(int) = int. 声明
+        expect(defLines).toContain(1)   // p(X) = X + 1. 定义体
+
+        // 转到实现：只去 definition(第 1 行)
+        const impls = await ImplementationProvider(services, {
+            textDocument: { uri }, position: pos,
+        } as DefinitionParams)
+        expect(impls.length).toBe(1)
+        expect(impls[0].range.start.line).toBe(1)
+
+        // 转到声明：只去 declaration(第 0 行)
+        const decls = await DeclarationProvider(services, {
+            textDocument: { uri }, position: pos,
+        } as any)
+        expect(decls.length).toBe(1)
+        expect(decls[0].range.start.line).toBe(0)
+    })
+
+    it('merTypeToString 对递归类型不栈溢出（环处输出 ...）', () => {
+        // 模拟 list(T) 经合一变为 list(list(...)) 的递归结构
+        const cyclic: any = { kind: 'type', name: 'list', args: [] }
+        cyclic.args = [cyclic]
+        const s = merTypeToString(cyclic)
+        expect(s).toContain('...')
+        expect(s).not.toBe('')
     })
 })

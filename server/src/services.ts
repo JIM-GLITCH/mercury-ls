@@ -17,7 +17,7 @@ import { DefaultDocumentValidator, DocumentValidator } from './document-validato
 import { DefaultDocumentBuilder } from './document-builder'
 import { DeafultWoekspaceManager } from './workspace-manager'
 import {
-    DefinitionProvider, TypeDefinitionProvider,
+    DefinitionProvider, ImplementationProvider, TypeDefinitionProvider,
     findAtTextDocumentPositionTerm, findDefTerms, uriTermToLocation,
 } from './provide-definition'
 import { DeclarationProvider } from './provide-declaration'
@@ -53,6 +53,7 @@ export type MercuryProviders = {
     definition: Bound<typeof DefinitionProvider>
     typeDefinition: Bound<typeof TypeDefinitionProvider>
     declaration: Bound<typeof DeclarationProvider>
+    implementation: Bound<typeof ImplementationProvider>
     references: Bound<typeof ReferenceProvider>
     hover: Bound<typeof HoverProvider>
     documentSymbol: Bound<typeof DocumentSymbolProvider>
@@ -92,6 +93,7 @@ function createMercuryProviders(services: MercuryServices): MercuryProviders {
         definition: params => DefinitionProvider(services, params),
         typeDefinition: params => TypeDefinitionProvider(services, params),
         declaration: params => DeclarationProvider(services, params),
+        implementation: params => ImplementationProvider(services, params),
         references: params => ReferenceProvider(services, params),
         hover: params => HoverProvider(services, params),
         documentSymbol: (params, token) => DocumentSymbolProvider(services, params, token),

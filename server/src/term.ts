@@ -158,6 +158,9 @@ function attachCallee(node: TermImpl, token: Token, name: string) {
     const callee = new TermImpl("atom", token, undefined, undefined, undefined, name)
     callee.calleeOf = node
     callee.container = node
+    // 让名字按「容器应用项」的语义元数参与按名+元数匹配的跳转/引用，
+    // 否则 callee 元数为 0 会与应用项(元数 1)被当成两个符号。hover 仍用 callee 自身类型区分两层。
+    callee.semanticArity = node.semanticArity ?? node.arity
     node.callee = callee
 }
 export function variable(token: Token) {

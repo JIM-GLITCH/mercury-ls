@@ -324,9 +324,8 @@ connection.onHover(cancelableRequest(services.providers.hover));
 connection.onDefinition(cancelableRequest(services.providers.definition));
 connection.onTypeDefinition(cancelableRequest(services.providers.typeDefinition));
 connection.onReferences(cancelableRequest(services.providers.references));
-connection.onImplementation(cancelableRequest(services.providers.definition));
+connection.onImplementation(cancelableRequest(services.providers.implementation));
 connection.onDeclaration(cancelableRequest(services.providers.declaration));
-connection.onImplementation(cancelableRequest(services.providers.definition));
 connection.onRequest(SemanticTokensRequest.type, params => {
     const uri = URI.parse(params.textDocument.uri);
     const document = services.documents.getOrCreateDocument(uri);

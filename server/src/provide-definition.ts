@@ -132,10 +132,14 @@ export function findDefTerms(services: MercuryServices, params: uriTerm): Stream
             return doc && moduleTerm ? stream([uriTerm.create(doc.uri, moduleTerm)]) : stream([])
         }
         default: {
-            // 解析结果由阶段 3 落盘；第一个条目就是定义（声明兜底的活也已在那里做完）
-            const entry = resolvedEntry(document, term)
-            if (!entry || !matchesKind(symbolKind(document, term), entry)) return stream([])
-            return stream([uriTerm.create(entry.doc.uri, entry.term)])
+            // 解析结果由阶段 3 落盘：entries = [definition(子句头), declaration(声明)]。
+            // 转到定义同时给出 declaration 与 definition，让两者都能直达。
+            const entries = document.resolved?.get(term)
+            if (!entries || entries.length === 0) return stream([])
+            const kind = symbolKind(document, term)
+            return stream(entries)
+                .filter(e => matchesKind(kind, e))
+                .map(e => uriTerm.create(e.doc.uri, e.term))
         }
     }
 }
@@ -152,5 +156,36 @@ export async function findAtTextDocumentPositionTerm(services: MercuryServices, 
     if (term) return {
         uri,
         term
+    }
+}
+
+/**
+ * implementation 只指向“定义体”（子句头），不含 declaration。
+ * 阶段 3 落盘的 entries = [definition(子句头，无 signature), declaration(声明，有 signature)]，
+ * 取第一个非 signature 的条目；若当前文档没有子句头定义（如仅 imported），回退到声明。
+ */
+function resolvedImplEntry(document: MercuryDocument, term: Term): SymbolEntry | undefined {
+    const entries = document.resolved?.get(term)
+    if (!entries) return undefined
+    return entries.find(e => !e.signature) ?? entries[0]
+}
+
+export async function ImplementationProvider(
+    services: MercuryServices, params: TextDocumentPositionParams,
+): Promise<Location[]> {
+    const termAndUri = await findAtTextDocumentPositionTerm(services, params)
+    if (!termAndUri) return []
+    const { term, uri } = termAndUri
+    const document = services.documents.getOrCreateDocument(uri)!
+    switch (term.semanticType) {
+        case 'variable':
+        case 'module':
+            // 变量/模块无 implementation 概念，退回普通定义跳转
+            return findDefTerms(services, termAndUri).map(uriTermToLocation).toArray()
+        default: {
+            const entry = resolvedImplEntry(document, term)
+            if (!entry || !matchesKind(symbolKind(document, term), entry)) return []
+            return [uriTermToLocation(uriTerm.create(entry.doc.uri, entry.term))]
+        }
     }
 }

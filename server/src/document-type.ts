@@ -139,18 +139,30 @@ export function termToMerType(term: Term): MerType {
 // 推断引擎为未受约束位置生成的内部类型变量（freshVar 的 ?0/?1/...）意味着「未推断出类型」，
 // 显示为 unknown；源码里声明的类型变量（如 pair(K,V) 的 K/V、func f(T)=T 的 T）保持原名。
 export function merTypeToString(t: MerType): string {
+    const seen = new Set<MerType>()
     const render = (ty: MerType): string => {
+        // 递归类型（如 list(T) 经合一变为 list(list(...))，或 X = node(X, Y)）
+        // 会在对象引用层面成环，按引用记录已访问节点，遇环输出 '...' 防止栈溢出
+        if (seen.has(ty)) return '...'
+        seen.add(ty)
+        let s: string
         switch (ty.kind) {
             case 'var':
-                return /^\?\d+$/.test(ty.name) ? 'unknown' : ty.name
+                s = /^\?\d+$/.test(ty.name) ? 'unknown' : ty.name
+                break
             case 'type':
             case 'constructor':
-                return ty.args.length === 0 ? ty.name : `${ty.name}(${ty.args.map(render).join(', ')})`
+                s = ty.args.length === 0 ? ty.name : `${ty.name}(${ty.args.map(render).join(', ')})`
+                break
             case 'pred':
-                return `pred(${ty.args.map(render).join(', ')})`
+                s = `pred(${ty.args.map(render).join(', ')})`
+                break
             case 'func':
-                return `func(${ty.args.map(render).join(', ')}) = ${ty.result ? render(ty.result) : '?'}`
+                s = `func(${ty.args.map(render).join(', ')}) = ${ty.result ? render(ty.result) : '?'}`
+                break
         }
+        seen.delete(ty)
+        return s
     }
     return render(t)
 }

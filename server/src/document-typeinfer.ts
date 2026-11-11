@@ -126,8 +126,19 @@ export class TypeInferer {
     private prepareDocument(doc: MercuryDocument): Map<Term, SymbolEntry[]> {
         const resolved = new Map<Term, SymbolEntry[]>()
         doc.resolved = resolved
+        // 同符号（module+name+arity+kind）的定义项与声明项聚合为一组，让它们互相指向；
+        // 与约束求解（body 调用）的结果一致：跳转/引用同时给出 declaration 与 definition，
+        // 而非只命中单个 entry（修复 clause head 名字 callee 完全无解析的问题）。
+        const groups = new Map<string, SymbolEntry[]>()
         for (const entry of this.index.byName.values()) {
-            if (entry.doc === doc) resolved.set(entry.term, [entry])
+            if (entry.doc !== doc) continue
+            const key = `${entry.module ?? ''}::${entry.name}/${entry.arity}:${entry.kind}`
+            const arr = groups.get(key) ?? []
+            arr.push(entry)
+            groups.set(key, arr)
+        }
+        for (const entries of groups.values()) {
+            for (const entry of entries) resolved.set(entry.term, entries)
         }
 
         const imports: Term[] = []
@@ -165,6 +176,20 @@ export class TypeInferer {
                     // 名字 callee 与限定应用项解析到同一个符号
                     if (term.callee && !resolved.has(term.callee)) resolved.set(term.callee, [entry])
                 }
+            }
+            // 类型/构造子引用（出现在声明、类型表达式等处，非本文件定义项）：
+            // 按名字+类别查全局符号表解析到定义，让「跳转到定义」可用。
+            // body 调用由约束求解解析，类型引用没有约束，这里单独补。
+            if (!resolved.has(term) && (term.semanticType === 'type' || term.semanticType === 'constructor')) {
+                const cand = this.index.get(term.name).filter(e => e.kind === term.semanticType)
+                const entry = cand.find(e => semanticArityOf(e.term) === semanticArityOf(term)) ?? cand[0]
+                if (entry) resolved.set(term, [entry])
+            }
+            // 已解析的应用项：把名字 callee（函数符/操作符名）也解析到同组符号，
+            // 让 clause head（如 `foo(X) :- ...` 里的 `foo`）能直接跳转定义/声明。
+            // body 调用由约束求解以同样方式解析 callee，这里补齐 head/声明头这一侧。
+            if (term.callee && !resolved.has(term.callee) && resolved.has(term)) {
+                resolved.set(term.callee, resolved.get(term)!)
             }
             for (const arg of term.args ?? []) walk(arg, clause)
         }
@@ -633,11 +658,12 @@ export class TypeInferer {
                             d.doc === e.doc && d.kind === e.kind && d.arity === e.arity && !d.signature)
                         const entries = def && def !== e ? [def, e] : [e]
                         resolved.set(constraint.term, entries)
-                        // 名字 callee 与应用项解析到同一个符号，便于 hover / 跳转 / 引用
+                        // 名字 callee 与应用项解析到同一个符号，便于直接跳转/引用到 callee 本身
                         if (constraint.term.callee && !resolved.has(constraint.term.callee)) {
                             resolved.set(constraint.term.callee, entries)
                         }
                     }
+                    // 名字 callee 与应用项共享「类别」（func/constructor/pred），供 hover 区分显示
                     if (constraint.term.callee) {
                         categories.set(constraint.term.callee, candidate.kind)
                     }
