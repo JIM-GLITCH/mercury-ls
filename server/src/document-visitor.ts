@@ -857,9 +857,10 @@ export class Visitor {
         }
     }
     visitTypeDeclType(term: Term) {
-        label(term, "type")
-        this.addDefinition(term)
-        this.tryAddExport(term)
+        const right = this.visitQualifiedTerm(term)
+        label(right, "type")
+        this.addDefinition(right)
+        this.tryAddExport(right)
     }
     // 开始收集一个类型定义，返回 TypeInfo（构造子通过 currentType 追加）
     private beginTypeInfo(typeHead: Term): TypeInfo {
@@ -927,9 +928,10 @@ export class Visitor {
         }
     }
     visitTypeName(term: Term) {
-        label(term, "type")
-        this.addDefinition(term)
-        this.tryAddExport(term)
+        const right = this.visitQualifiedTerm(term)
+        label(right, "type")
+        this.addDefinition(right)
+        this.tryAddExport(right)
 
     }
 
