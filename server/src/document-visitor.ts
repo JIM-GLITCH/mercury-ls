@@ -25,27 +25,27 @@ const builtinInsts = new Set([
     "mostly_unique_any", "not_reached", "bound_unique",
 ])
 export type VisitResult = {
-    module?:Term
-    errors:Diagnostic[]
-    definition: MultiMap<string,Term>,
-    reference:MultiMap<string,Term>,
-    typeReference:MultiMap<string,Term>,
-    instReference:MultiMap<string,Term>,
-    modeReference:MultiMap<string,Term>,
-    declaration:MultiMap<string,Term>,
-    exports:MultiMap<string,Term>
-    imports:Term[]
+    module?: Term
+    errors: Diagnostic[]
+    definition: MultiMap<string, Term>,
+    reference: MultiMap<string, Term>,
+    typeReference: MultiMap<string, Term>,
+    instReference: MultiMap<string, Term>,
+    modeReference: MultiMap<string, Term>,
+    declaration: MultiMap<string, Term>,
+    exports: MultiMap<string, Term>
+    imports: Term[]
     // 类型推断基础数据（阶段 0+1 收集，尚未用于 link 消歧）
-    types:Map<string, TypeInfo>          // 类型构造子 → 类型定义（含构造子列表）
-    funcs:Map<string, FuncInfo>          // 函数签名（name/arity → 参数+返回类型）
-    preds:Map<string, FuncInfo>          // 谓词签名（name/arity → 参数类型）
+    types: Map<string, TypeInfo>          // 类型构造子 → 类型定义（含构造子列表）
+    funcs: Map<string, FuncInfo>          // 函数签名（name/arity → 参数+返回类型）
+    preds: Map<string, FuncInfo>          // 谓词签名（name/arity → 参数类型）
     // name/arity → mode 声明展示串（每个声明一行，如 add(in, in) = (out)；未注解用默认 in/out）
-    modeSigs:Map<string, string[]>
+    modeSigs: Map<string, string[]>
     // Phase A：:- inst / :- mode 声明的结构化表示（mode 分析用）
-    instDefs:Map<string, InstDef>
-    modeDefs:Map<string, ModeDef>
+    instDefs: Map<string, InstDef>
+    modeDefs: Map<string, ModeDef>
     // 阶段 2 推断结果：项 → 推断类型/类别（供 linker 精确消歧 functor/func）
-    inferred:Map<Term, InferredInfo>
+    inferred: Map<Term, InferredInfo>
 }
 // determinism 项 → 字符串（det/semidet/cc_multi... 均为原子；缺省 undefined）
 function detOf(term: Term | undefined): string | undefined {
@@ -60,9 +60,9 @@ export class Visitor {
         this.moduleManager = services?.moduleManager ?? new ModuleManager()
         this.exportManager = services?.exportManager ?? new ExportManager()
     }
-    module?:Term
-    imports=[] as Term[]
-    section?:string  
+    module?: Term
+    imports = [] as Term[]
+    section?: string
     currentClause!: Clause
     errors: Diagnostic[] = []
     definition = new MultiMap<string, Term>()
@@ -71,7 +71,7 @@ export class Visitor {
     instReference = new MultiMap<string, Term>()
     modeReference = new MultiMap<string, Term>()
     declaration = new MultiMap<string, Term>()
-    exports= new MultiMap<string, Term>()
+    exports = new MultiMap<string, Term>()
     types = new Map<string, TypeInfo>()
     funcs = new Map<string, FuncInfo>()
     preds = new Map<string, FuncInfo>()
@@ -95,23 +95,23 @@ export class Visitor {
             this.visitClause(clause)
         }
         doc.visitResult = {
-            module:this.module,
-            errors:this.errors,
-            definition:this.definition,
-            reference:this.reference,
-            typeReference:this.typeReference,
-            instReference:this.instReference,
-            modeReference:this.modeReference,
-            declaration:this.declaration,
-            exports:this.exports,
-            imports:this.imports,
-            types:this.types,
-            funcs:this.funcs,
-            preds:this.preds,
-            modeSigs:this.modeSigs,
-            instDefs:this.instDefs,
-            modeDefs:this.modeDefs,
-            inferred:this.inferred
+            module: this.module,
+            errors: this.errors,
+            definition: this.definition,
+            reference: this.reference,
+            typeReference: this.typeReference,
+            instReference: this.instReference,
+            modeReference: this.modeReference,
+            declaration: this.declaration,
+            exports: this.exports,
+            imports: this.imports,
+            types: this.types,
+            funcs: this.funcs,
+            preds: this.preds,
+            modeSigs: this.modeSigs,
+            instDefs: this.instDefs,
+            modeDefs: this.modeDefs,
+            inferred: this.inferred
         }
     }
     visitClause(clause: Clause) {
@@ -213,13 +213,13 @@ export class Visitor {
                 this.visitDataTerm(term.args[0])
                 break
             }
-            case "=^/2":{
+            case "=^/2": {
                 this.visitDataTerm(term.args[0]);
                 this.visitFieldList(term.args[1], 'select');
                 break;
             }
             case ":=/2": {
-                if(nameArity(term.args[0],"^/1")){
+                if (nameArity(term.args[0], "^/1")) {
                     this.visitFieldList(term.args[0].args[0], 'update')
                 } else {
                     this.visitDataTerm(term.args[0])
@@ -238,16 +238,16 @@ export class Visitor {
         }
     }
     visitDataTerm(term: Term) {
-        if(isVariable(term)){
+        if (isVariable(term)) {
             this.visitVariable(term);
-        } else if(isSpecialDataTerm(term)){
+        } else if (isSpecialDataTerm(term)) {
             this.visitSpecialDataTerm(term)
         } else {
             this.visitDataFunctor(term);
         }
     }
     visitDataFunctor(term: Term) {
-        switch(term.syntaxType){
+        switch (term.syntaxType) {
             case 'integer':
                 this.visitInteger(term)
                 break;
@@ -302,10 +302,10 @@ export class Visitor {
         return true
     }
     visitFloat(term: Term) {
-        label(term,"float")
+        label(term, "float")
     }
     visitInteger(term: Term) {
-        label(term,"integer")
+        label(term, "integer")
     }
     visitSpecialDataTerm(term: Term) {
         switch (term.semanticType as SpecialDataTerm) {
@@ -417,19 +417,19 @@ export class Visitor {
         label(term, "lambda")
     }
     visitApply(term: Term) {
-        label(term,"apply");
-        
+        label(term, "apply");
+
     }
     visitRecord(term: Term) {
-        if(nameArity(term,"^/2")){
+        if (nameArity(term, "^/2")) {
             this.visitDataTerm(term.args[0])
             this.visitFieldList(term.args[1])
-        }else{
+        } else {
             this.visitDataTerm(term)
         }
     }
     visitString(term: Term) {
-        label(term,"string")
+        label(term, "string")
     }
 
     DcgFixArity(term: Term) {
@@ -445,7 +445,7 @@ export class Visitor {
         }
     }
     visitPredDef(term: Term) {
-        label(term,"pred")
+        label(term, "pred")
         this.addDefinition(term)
         this.currentClause.callee = term
     }
@@ -497,7 +497,7 @@ export class Visitor {
                 this.visitRuleBody(term.args[0])
                 break
             }
-            case "then/2":{
+            case "then/2": {
                 this.visitRuleBody(term.args[0])
                 this.visitRuleBody(term.args[1])
                 break
@@ -580,7 +580,7 @@ export class Visitor {
         }
     }
     visitPredRef(term: Term) {
-        label(term,"pred")
+        label(term, "pred")
         this.addReference(term)
         // 目标参数位置的项也可能是 func 调用/构造子/闭包（如 map(p/2, Xs)、f(g(X))），
         // 同样索引进 reference 参与 link（变量除外）
@@ -620,7 +620,7 @@ export class Visitor {
     }
     visitFuncDef(func: Term) {
         const head = this.visitQualifiedTerm(func)
-        label(head,"func")
+        label(head, "func")
         this.addDefinition(func)
     }
     visitFuncReturn(funcReturn: Term) {
@@ -656,8 +656,9 @@ export class Visitor {
             return
         }
         // 只有在不是特殊运算符的情况下才标记为 type
-        label(term, "type")
+
         const right = this.visitQualifiedTerm(term)
+        label(right, "type")
         this.typeReference.add(right.name, right)
         // 参数化类型的参数也是类型引用位置（类型变量除外）
         for (const arg of right.args ?? []) {
@@ -850,10 +851,10 @@ export class Visitor {
             else this.visitTypeName(inner)
             this.addTypeInfo(this.beginTypeInfo(inner))
         }
-        else{
+        else {
             // Abstract types
             this.visitTypeDeclType(term)
-            this.addTypeInfo(this.beginTypeInfo(term))
+
         }
     }
     visitTypeDeclType(term: Term) {
@@ -861,6 +862,7 @@ export class Visitor {
         label(right, "type")
         this.addDefinition(right)
         this.tryAddExport(right)
+        this.addTypeInfo(this.beginTypeInfo(term))
     }
     // 开始收集一个类型定义，返回 TypeInfo（构造子通过 currentType 追加）
     private beginTypeInfo(typeHead: Term): TypeInfo {
@@ -959,16 +961,16 @@ export class Visitor {
         }
     }
     visitImplementationDecl(decl: Term) {
-       this.section == "implementation"
+        this.section == "implementation"
     }
     visitInterfaceDecl(decl: Term) {
         this.section = "interface"
     }
     visitModuleDecl(term: Term) {
         let module = this.visitModule(term)
-        if(!this.module){
-            this.module= module
-        } 
+        if (!this.module) {
+            this.module = module
+        }
     }
     visitEndModuleDecl(term: Term) {
         let module = this.visitModule(term)
@@ -988,10 +990,10 @@ export class Visitor {
             label(module, "module")
             this.addReference(left)
             return right
-        } 
+        }
         return term
     }
-    visitQualifiedModule(term:Term){
+    visitQualifiedModule(term: Term) {
         if (nameArity(term, "./2")) {
             let [left, right] = term.args
             right.qualified = left
@@ -999,7 +1001,7 @@ export class Visitor {
             label(module, "module")
             this.addReference(left)
             return right
-        } 
+        }
         if (term.arity !== 0) {
             this.addError("module term's arity should be zero", term)
         }
@@ -1141,7 +1143,7 @@ export class Visitor {
         }
     }
     visitModeDecl(term: Term) {
-        if(nameArity(term,"==/2")){
+        if (nameArity(term, "==/2")) {
             this.recordModeDef(term.args[0], term.args[1])
             this.visitModeName(term.args[0])
             // `mode M == InstA >> InstB`：两侧都是 inst 引用位置（§5.2/5.3）；
@@ -1154,13 +1156,13 @@ export class Visitor {
                     }
                 }
             }
-        } else if (nameArity(term,"is/2")){
+        } else if (nameArity(term, "is/2")) {
             const head = this.visitQualifiedTerm(term.args[0]) ?? term.args[0]
             this.visitFuncOrPredModeDecl(head, detOf(term.args[1]))
         } else {
             const head = this.visitQualifiedTerm(term) ?? term
             if (head.semanticArity > 0 && !isVariable(head) &&
-                   (this.preds.has(keyOf(head.name, head.semanticArity)) ||
+                (this.preds.has(keyOf(head.name, head.semanticArity)) ||
                     this.funcs.has(keyOf(head.name, head.semanticArity)))) {
                 // `:- mode P(Modes).`（无确定性后缀）的 pred/func-mode 声明；
                 // 与抽象 mode 声明（:- mode M.，通常 arity 0 或非 pred/func 名）区分
@@ -1172,14 +1174,14 @@ export class Visitor {
         }
     }
     visitModeName(term: Term) {
-        label(term,"mode")
+        label(term, "mode")
         this.addDefinition(term)
         this.tryAddExport(term)
     }
     visitFuncOrPredModeDecl(term: Term, determinism?: string) {
-        if(nameArity(term,"=/2")){
+        if (nameArity(term, "=/2")) {
             this.visitFuncMode(term, determinism)
-        }else{
+        } else {
             this.visitPredMode(term, determinism)
         }
     }
@@ -1221,7 +1223,7 @@ export class Visitor {
         const det = determinism ? ` is ${determinism}` : ''
         this.pushModeSigReplacingDefault(
             key, `${head.name}(${head.args.map(a => this.modeArgToString(a)).join(', ')})` +
-                 ` = (${this.modeArgToString(term.args[1])})${det}`)
+        ` = (${this.modeArgToString(term.args[1])})${det}`)
     }
     // mode 声明参数 → 展示串（in / array_ui / in(node)）
     private modeArgToString(t: Term): string {
@@ -1230,14 +1232,14 @@ export class Visitor {
         return `${t.name}(${t.args.map(a => this.modeArgToString(a)).join(', ')})`
     }
     visitMode(term: Term) {
-        label(term,"mode")
+        label(term, "mode")
     }
     visitInstDecl(term: Term) {
-        if(nameArity(term,"==/2")){
+        if (nameArity(term, "==/2")) {
             this.recordInstDef(term.args[0], instTermToMerInst(term.args[1]))
             this.visitInstOrForBlock(term.args[0])
             this.visitInstOrBound(term.args[1])
-        }else if(nameArity(term,"--->/2")){
+        } else if (nameArity(term, "--->/2")) {
             this.recordInstDef(term.args[0], { kind: 'bound', functors: instFunctorAlts(term.args[1]) })
             this.visitInstOrForBlock(term.args[0])
             this.visitInsts(term.args[1])
@@ -1257,15 +1259,15 @@ export class Visitor {
         }
     }
     visitInstOrBound(term: Term) {
-        if(nameArity(term,"bound/2")){
+        if (nameArity(term, "bound/2")) {
             // bound(f(...) ; g(...)) 内的 inst 构造子是使用而非定义
             // TODO: 递归标注 bound 内的 inst 引用
-        }else{
+        } else {
             this.visitInst(term)
         }
     }
     visitInstOrForBlock(term: Term) {
-        if(nameArity(term,"for/2")){
+        if (nameArity(term, "for/2")) {
             this.visitInstName(term.args[0])
             // `inst I for Type/Arity`：Type 是类型引用位置（Type/Arity 解析为 //2(Type, Arity)）
             const typeSpec = term.args[1]
@@ -1277,17 +1279,17 @@ export class Visitor {
                 }
                 this.visitTypeRef(typeSpec.args[0])
             }
-        }else{
+        } else {
             this.visitInstName(term)
         }
     }
     visitInstName(term: Term) {
-        label(term,"inst")
+        label(term, "inst")
         this.addDefinition(term)
         this.tryAddExport(term)
     }
     visitInst(term: Term) {
-        label(term,"inst")
+        label(term, "inst")
     }
     visitFuncDecl(term: Term, determinism?: string) {
         if (nameArity(term, "is/2")) {
@@ -1481,10 +1483,10 @@ export class Visitor {
         this.definition.add(term.name, term)
         this.addCallee(term)
     }
-    
+
     addExport(term: Term) {
         term.qualified = this.module
-        this.exports.add(term.name ,term)
+        this.exports.add(term.name, term)
     }
     addImport(module: Term) {
         this.imports.push(module)
@@ -1496,7 +1498,7 @@ export class Visitor {
             DiagnosticSeverity.Error,
             undefined,
             'visitor'
-            ))
+        ))
     }
     addCalled(term: Term) {
         term.clause = this.currentClause
@@ -1506,8 +1508,8 @@ export class Visitor {
         term.clause = this.currentClause
         this.currentClause.callee = term
     }
-    tryAddExport(term:Term){
-        if(this.section == "interface"){
+    tryAddExport(term: Term) {
+        if (this.section == "interface") {
             this.addExport(term);
         }
     }
@@ -1905,7 +1907,7 @@ export class Visitor {
         // 对齐参数类型
         const argTypes = chosenCI ? chosenCI.argTypes.map(a => applySubst(a, this.subst))
             : chosenFunc ? chosenFunc.argTypes.map(a => applySubst(a, this.subst))
-            : term.args.map(() => ({ kind: 'var', name: this.freshVar() } as MerType))
+                : term.args.map(() => ({ kind: 'var', name: this.freshVar() } as MerType))
         for (let i = 0; i < term.args.length; i++) {
             this.inferTerm(term.args[i], argTypes[i])
         }
@@ -2047,82 +2049,81 @@ export function label(term: Term, semanticType: SemanticType) {
 function isVariable(term: Term) {
     return term.syntaxType === "variable"
 }
-function isSpecialDataTerm(term: Term):boolean {
+function isSpecialDataTerm(term: Term): boolean {
     return (isConditionalExpr(term)
         || isRecordSyntexExpr(term)
         || isUnificationExpr(term)
         || isLambdaExpr(term)
         || isHigerOrderFuncApplication(term)
-        || isExplicitTypeQualification(term))??false
+        || isExplicitTypeQualification(term)) ?? false
 }
 
 function isConditionalExpr(term: Term) {
-    if (["else/2",";/2","->/2","if/3"].includes(term.nameArity)){
-        label(term,"conditional")
+    if (["else/2", ";/2", "->/2", "if/3"].includes(term.nameArity)) {
+        label(term, "conditional")
         return true;
     }
 }
 
 function isRecordSyntexExpr(term: Term) {
-    if( ["^/2",":=/2","=^/2"].includes(term.nameArity)){
-        label(term,"record")
+    if (["^/2", ":=/2", "=^/2"].includes(term.nameArity)) {
+        label(term, "record")
         return true
     }
 }
 
 function isUnificationExpr(term: Term) {
-    if(term.nameArity === "@/2"){
-        label(term,"unification")
+    if (term.nameArity === "@/2") {
+        label(term, "unification")
         return true
     }
 }
 function isHigerOrderFuncApplication(term: Term) {
-    if (term.name === "apply" && term.arity>0){
-        label(term,"apply")
+    if (term.name === "apply" && term.arity > 0) {
+        label(term, "apply")
         return true
     }
 }
 
-function isExplicitTypeQualification(term: Term){
-    if([":/2","with_type/2"].includes(term.nameArity)){
+function isExplicitTypeQualification(term: Term) {
+    if ([":/2", "with_type/2"].includes(term.nameArity)) {
         label(term, "explicitType")
         return true
     }
 }
 
 function isLambdaExpr(term: Term) {
-    if( [":-/2","-->/2"].includes(term.nameArity)){
-        label (term,"lambda")
+    if ([":-/2", "-->/2"].includes(term.nameArity)) {
+        label(term, "lambda")
         return true
     }
 }
 
 export type SemanticType =
-    "func"|
-    "pred"|
-    "type"|
-    "constructor"|
-    "fieldname"|
-    "inst"|
-    "mode"|
-    "module"|
-    "variable"|
-    "float"|
-    "integer"|
-    "string"|
-    "typeclass"|
-    "instance"|
-    "pragma"|
-    "mutable"|
-    "determinism"|
-    "operator"|
-    "implementationDefined"|
+    "func" |
+    "pred" |
+    "type" |
+    "constructor" |
+    "fieldname" |
+    "inst" |
+    "mode" |
+    "module" |
+    "variable" |
+    "float" |
+    "integer" |
+    "string" |
+    "typeclass" |
+    "instance" |
+    "pragma" |
+    "mutable" |
+    "determinism" |
+    "operator" |
+    "implementationDefined" |
     SpecialDataTerm
-export type SpecialDataTerm = 
-    'conditional'|
-    "record"|
-    "apply"|
-    "lambda"|
-    "unification"|
+export type SpecialDataTerm =
+    'conditional' |
+    "record" |
+    "apply" |
+    "lambda" |
+    "unification" |
     "explicitType"
-    

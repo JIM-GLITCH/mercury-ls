@@ -133,8 +133,15 @@ export function termToMerType(term: Term): MerType {
     if (name === 'pred' || name === 'predicate') {
         return { kind: 'ho', pf: 'pred', args: term.args.map(termToMerType) }
     }
+    function dequalified(term:Term){
+        if(term.nameArity === "./2"){
+            return term.args[1]
+        }
+        return term
+    }
+    const right = dequalified(term)
     // 普通类型构造子（含 builtin int/float/string/char 与用户类型、->/2 函数类型）
-    return { kind: 'ctor', ctor: { name, arity }, args: term.args.map(termToMerType) }
+    return { kind: 'ctor', ctor: { name:right.name, arity:right.arity }, args: right.args.map(termToMerType) }
 }
 
 // MerType → 可读字符串（用于 hover 展示变量/项的类型）。
