@@ -1,53 +1,47 @@
-import { CancellationToken, DocumentSymbol, DocumentSymbolParams, SymbolKind } from 'vscode-languageserver'
+import { CancellationToken, DocumentSymbol, DocumentSymbolParams, SymbolInformation, SymbolKind } from 'vscode-languageserver'
 import { semanticNameArityOf, sleep } from './utils'
 import { termRange, StartEndTokenToRange, Term } from './term'
+import { stream } from './stream'
 import { URI } from 'vscode-uri'
 import type { MercuryServices } from './services'
-import type { SemanticType } from './document-index'
+import { SemanticType } from './document-visitor'
 import { checkCancel } from './promise-util'
 import { MultiMap } from './multimap'
-
-export async function DocumentSymbolProvider(services: MercuryServices, params: DocumentSymbolParams, cancelToken: CancellationToken) {
-    const uri = URI.parse(params.textDocument.uri)
-    let document = services.documents.getOrCreateDocument(uri)
-    // doc.resolved 由阶段 3 落盘，等它就绪即可，无需再构造索引视图
-    while (!document?.resolved) {
+type a=1;
+export async function DocumentSymbolProvider(services: MercuryServices, params: DocumentSymbolParams,cancelToken:CancellationToken) {
+    let uri  = params.textDocument.uri;
+    let document =services.documents.getOrCreateDocument(URI.parse(uri))
+    let symbols :DocumentSymbol[]=[];
+    while(!document.visitResult){
         await sleep(10)
         await checkCancel(cancelToken)
-        document = services.documents.getOrCreateDocument(uri)
     }
-    const symbols: DocumentSymbol[] = []
-
-    const module = document.moduleTerm
-    if (module) {
-        const range = termRange(module)
+    let visitResult = document.visitResult
+    let module = visitResult.module;
+    if(module){
+        let range = termRange(module);
         symbols.push({
             name: module.name,
             kind: SymbolKind.Module,
-            range,
-            selectionRange: range,
+            range: termRange(module),
+            selectionRange: range
         })
     }
-
-    // doc.resolved 里键 == entry.term 的就是本文件登记过的定义/声明项
-    const definitions: Term[] = []
-    for (const [term, entries] of document.resolved!) {
-        if (entries[0]?.term === term) definitions.push(term)
-    }
-    const map = new MultiMap<string, Term>(
-        definitions.map(x => [semanticNameArityOf(x), x] as [string, Term]))
-    for (const [displayName, funcTerms] of map.entriesGroupedByKey()) {
-        let subFuncs: DocumentSymbol[] = []
-        for (const funcTerm of funcTerms) {
-            let children: DocumentSymbol[] = []
-            for (const [varName, varTerms] of funcTerm.clause?.varMap.entriesGroupedByKey() ?? []) {
-                let varRange = termRange(varTerms[0])
+    let definition = document.visitResult.definition;
+    let KeyValuePairs = definition.values().map(x=>[semanticNameArityOf(x),x] as [string ,Term]);
+    let map  = new MultiMap(KeyValuePairs)
+    for (const [displayName,funcTerms] of map.entriesGroupedByKey()) {
+        let subFuncs:DocumentSymbol[]=[] 
+        for (const funcTerm of funcTerms ) {
+            let children:DocumentSymbol[]=[] 
+            for (const [varName,varTerms] of funcTerm.clause?.varMap.entriesGroupedByKey()??[]) {
+                let varRange  = termRange(varTerms[0]);
                 children.push({
                     name: varName,
                     kind: SymbolKind.Variable,
                     range: varRange,
-                    selectionRange: varRange,
-                })
+                    selectionRange: varRange
+                })	
             }
             let range = termRange(funcTerm.clause!)
             subFuncs.push({
@@ -55,27 +49,27 @@ export async function DocumentSymbolProvider(services: MercuryServices, params: 
                 kind: typeToKind(funcTerm.semanticType),
                 selectionRange: funcTerm.range,
                 children,
-                range,
-            })
+                range
+            }) 
         }
-        if (subFuncs.length == 1) {
+        if(subFuncs.length==1){
             symbols.push(subFuncs[0])
-        } else {
-            let funcTerm = funcTerms[0]
-            let range = StartEndTokenToRange(funcTerms[0].clause!.startToken, funcTerms[funcTerms.length - 1].clause!.endToken)
+        }
+        else{
+            let funcTerm = funcTerms[0];
+            let range= StartEndTokenToRange(funcTerms[0].clause!.startToken,funcTerms[funcTerms.length-1].clause!.endToken);
             symbols.push({
                 name: displayName,
-                kind: typeToKind(funcTerm.semanticType),
+                kind:typeToKind(funcTerm.semanticType),
                 range,
                 selectionRange: termRange(funcTerm),
-                children: subFuncs,
-            })
+                children:subFuncs,
+            })            
         }
     }
-    return symbols
-}
-
-function typeToKind(type: SemanticType | undefined): SymbolKind {
+    return symbols;
+} 
+function typeToKind(type:SemanticType|undefined):SymbolKind{
     switch (type) {
         case 'string':
             return SymbolKind.String

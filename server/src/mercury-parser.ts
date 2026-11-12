@@ -476,17 +476,15 @@ export namespace Parser {
                 let r2 = read(opinfo.rpriority, termKind, r1.p, ps)
                 let backquoted_term = r1.term
                 if (semanticNameArityOf(backquoted_term) == "./2") {
-                    const opName = backquoted_term.args[1].name
                     backquoted_term.args[1] = backquotedapplyCompound(
                         backquoted_term.args[1].token,
-                        [lterm, r2.term],
-                        opName
+                        [lterm, r2.term]
                     )
                     backquoted_term.startToken = backquoted_term.args[1].startToken
                     backquoted_term.endToken = backquoted_term.args[1].endToken
                     return bottom_up(MaxPriority, termKind, opinfo.priority, backquoted_term, r2.p, ps)
                 }
-                backquoted_term = backquotedapplyCompound(backquoted_term.token, [lterm, r2.term], backquoted_term.name)
+                backquoted_term = backquotedapplyCompound(backquoted_term.token, [lterm, r2.term])
                 return bottom_up(MaxPriority, termKind, opinfo.priority, backquoted_term, r2.p, ps)
             }
             //  name token

@@ -11,13 +11,13 @@ import {
     DefaultMercuryDocumentFactory, DefaultMercuryDocuments,
     MercuryDocumentFactory, MercuryDocuments,
 } from './document-manager'
-import { GlobalIndex } from './document-index'
-import { TypeInferer } from './document-typeinfer'
+import { ExportManager, ModuleManager } from './document-moduleManager'
 import { DefaultDocumentValidator, DocumentValidator } from './document-validator'
+import { DefaultLinker, Linker } from './document-linker'
 import { DefaultDocumentBuilder } from './document-builder'
 import { DeafultWoekspaceManager } from './workspace-manager'
 import {
-    DefinitionProvider, ImplementationProvider, TypeDefinitionProvider,
+    DefinitionProvider, TypeDefinitionProvider,
     findAtTextDocumentPositionTerm, findDefTerms, uriTermToLocation,
 } from './provide-definition'
 import { DeclarationProvider } from './provide-declaration'
@@ -53,7 +53,6 @@ export type MercuryProviders = {
     definition: Bound<typeof DefinitionProvider>
     typeDefinition: Bound<typeof TypeDefinitionProvider>
     declaration: Bound<typeof DeclarationProvider>
-    implementation: Bound<typeof ImplementationProvider>
     references: Bound<typeof ReferenceProvider>
     hover: Bound<typeof HoverProvider>
     documentSymbol: Bound<typeof DocumentSymbolProvider>
@@ -73,10 +72,9 @@ export type MercuryServices = {
     textDocuments: TextDocuments<TextDocument>
     documentFactory: MercuryDocumentFactory
     documents: MercuryDocuments
-    /** 阶段 2 的全局符号表：定义 / import / 导出标记（也是模块/导出符号的唯一入口） */
-    index: GlobalIndex
-    /** 阶段 3 的类型推导 + 名称解析 */
-    typeInferer: TypeInferer
+    moduleManager: ModuleManager
+    exportManager: ExportManager
+    linker: Linker
     validator: DocumentValidator
     builder: DefaultDocumentBuilder
     workspaceManager: DeafultWoekspaceManager
@@ -93,7 +91,6 @@ function createMercuryProviders(services: MercuryServices): MercuryProviders {
         definition: params => DefinitionProvider(services, params),
         typeDefinition: params => TypeDefinitionProvider(services, params),
         declaration: params => DeclarationProvider(services, params),
-        implementation: params => ImplementationProvider(services, params),
         references: params => ReferenceProvider(services, params),
         hover: params => HoverProvider(services, params),
         documentSymbol: (params, token) => DocumentSymbolProvider(services, params, token),
@@ -114,9 +111,10 @@ const mercuryServicesModule: Module<MercuryServices> = {
     textDocuments: () => new TextDocuments(TextDocument),
     documentFactory: services => new DefaultMercuryDocumentFactory(services),
     documents: services => new DefaultMercuryDocuments(services),
-    index: () => new GlobalIndex(),
-    typeInferer: services => new TypeInferer(services),
-    validator: services => new DefaultDocumentValidator(services),
+    moduleManager: () => new ModuleManager(),
+    exportManager: () => new ExportManager(),
+    linker: services => new DefaultLinker(services),
+    validator: () => new DefaultDocumentValidator(),
     builder: services => new DefaultDocumentBuilder(services),
     workspaceManager: () => new DeafultWoekspaceManager(),
     client: () => noopLspClient,

@@ -4,6 +4,7 @@ import {
 } from 'vscode-languageserver'
 import { TextDocument } from 'vscode-languageserver-textdocument'
 import { URI } from 'vscode-uri'
+import { moduleQualifiedName } from './document-moduleManager'
 import { merTypeToString } from './document-type'
 import type { MercuryServices } from './services'
 import type { Term } from './term'
@@ -65,15 +66,13 @@ function completionKind(term: Term): CompletionItemKind {
     }
 }
 
-/** 用全局符号表里的 func/pred 签名给出补全项的 detail */
+/** 用已收集的 func/pred 签名给出补全项的 detail */
 function signatureOf(services: MercuryServices, name: string, arity: number): string | undefined {
-    const sig = services.index.get(name)
-        .find(e => e.arity === arity && e.signature
-            && (e.signature.kind === 'func' || e.signature.kind === 'pred'))?.signature
-    if (!sig || (sig.kind !== 'func' && sig.kind !== 'pred')) return undefined
-    const args = sig.args.map(merTypeToString).join(', ')
-    return sig.kind === 'func' && sig.result
-        ? `type ${name}(${args}) = ${merTypeToString(sig.result)}`
+    const fi = services.exportManager.lookupFunc(name, arity)
+    if (!fi) return undefined
+    const args = fi.argTypes.map(merTypeToString).join(', ')
+    return fi.resultType
+        ? `type ${name}(${args}) = ${merTypeToString(fi.resultType)}`
         : `type ${name}(${args})`
 }
 
@@ -82,18 +81,15 @@ function submoduleNames(services: MercuryServices, moduleName: string): string[]
     const prefix = moduleName + '.'
     const names = new Set<string>()
     for (const doc of services.documents.all) {
-        const full = doc.moduleName
-        if (!full || !full.startsWith(prefix)) continue
+        const mod = doc.visitResult?.module
+        if (!mod) continue
+        const full = moduleQualifiedName(mod)
+        if (!full.startsWith(prefix)) continue
         const next = full.slice(prefix.length).split('.')[0]
         if (next) names.add(next)
     }
     return [...names]
 }
-
-const NOOP_CANCEL = {
-    isCancellationRequested: false,
-    onCancellationRequested: () => undefined,
-} as any
 
 /**
  * 敲下 `.`（或手动触发 completion）时，把 `.` 前方的 token 当作模块名，
@@ -115,12 +111,14 @@ export async function CompletionProvider(
     const q = qualifierBeforeDot(textDocument, params.position)
     if (!q) return []
 
-    // 索引结果只存在 GlobalIndex 里：文档刚打开、还没走 build 时现场补一次索引。
-    if (indexed && !services.index.byName.values().some(e => e.doc === indexed)) {
-        await services.index.update(indexed, NOOP_CANCEL, { infer: false })
+    const exported = services.exportManager.getByModule(q.moduleName)
+    // 全局索引尚未收录当前文档时（例如刚打开尚未 build），用本文件的 exports 兜底
+    if (exported.length === 0) {
+        const own = indexed?.visitResult
+        if (own?.module && moduleQualifiedName(own.module) === q.moduleName) {
+            for (const t of own.exports.values()) exported.push(t)
+        }
     }
-    const exported: Term[] = services.index.getByModule(q.moduleName)
-        .filter(e => e.exported).map(e => e.term)
     const submodules = submoduleNames(services, q.moduleName)
     if (exported.length === 0 && submodules.length === 0) return []
 

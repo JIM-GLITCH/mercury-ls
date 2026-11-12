@@ -80,8 +80,7 @@
 	"publisher": "lilr",
 	"scripts": {
 		"vscode:prepublish": "npm run compile",
-		"compile": " node esbuild.js",
-		"check:static": "tsc -p server --noEmit",
+		"compile": "node esbuild.js",
 		"watch": "tsc -b -w",
 		"lint": "eslint ./client/src ./server/src --ext .ts,.tsx",
 		"postinstall": "cd client && npm install && cd ../server && npm install && cd ..",

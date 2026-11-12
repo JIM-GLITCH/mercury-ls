@@ -4,11 +4,9 @@ import { ParseResult, Parser } from './mercury-parser'
 import { Clause, Term } from './term'
 import { readFileSync } from 'fs'
 import { Stream, stream } from './stream'
+import { VisitResult } from './document-visitor'
 import { Diagnostic, Position } from 'vscode-languageserver'
 import type { MercuryServices } from './services'
-import type { InferredInfo } from './document-type'
-import type { SymbolEntry } from './document-index'
-import type { FuncInfo } from './document-type'
 
 export enum DocumentState {
     /**
@@ -22,8 +20,7 @@ export enum DocumentState {
      * at this stage as a preprocessing step.
      */
     Parsed,
-    /** AST 已被遍历并登记进全局符号表；后续阶段可直接做类型推导与链接。 */
-    Indexed,
+    Visited,
     // /**
     //  * The `IndexManager` service has processed AST nodes of this document. This means the
     //  * exported symbols are available in the global scope and can be resolved from other documents.
@@ -37,12 +34,11 @@ export enum DocumentState {
     //  * the target is not in scope.
     //  */
     // ComputedScopes ,
-    Inferred,
     // /**
     //  * The `Linker` service has processed this document. All outgoing references have been
     //  * resolved or marked as erroneous.
     //  */
-    Linked,
+    Linked ,
     // /**
     //  * The `IndexManager` service has processed AST node references of this document. This is
     //  * necessary to determine which documents are affected by a change in one of the workspace
@@ -53,13 +49,12 @@ export enum DocumentState {
      * The `DocumentValidator` service has processed this document. The language server listens
      * to the results of this phase and sends diagnostics to the client.
      */
-    Validated,
-
+    Validated 
 }
-export interface MercuryDocument {
+export interface MercuryDocument{
 
     importedByDocs: MercuryDocument[]
-
+    
     /** The Uniform Resource Identifier (URI) of the document */
     readonly uri: URI;
     /** The text document used to convert between offsets and positions */
@@ -68,23 +63,13 @@ export interface MercuryDocument {
     state: DocumentState;
     /** The parse result holds the Abstract Syntax Tree (AST) and potentially also parser / lexer errors */
     parseResult: ParseResult;
-    linkResult?: { errors: Diagnostic[] }
+    visitResult?: VisitResult
+    linkResult?: {errors:Diagnostic[]}
     /** Result of the scope precomputation phase */
     /** An array of all cross-references found in the AST while linking */
     references: Term[];
     /** Result of the validation phase */
     diagnostics?: Diagnostic[]
-    /** Type inference results: term → inferred type/category */
-    inferred?: Map<Term, InferredInfo>
-    /** Name resolution results: term → symbol entries（阶段 3 由 TypeInferer 填充） */
-    resolved?: Map<Term, SymbolEntry[]>
-    /** Signature resolution results: term → func/pred signature */
-    signatures?: Map<Term, FuncInfo>
-    /** 阶段 3 顺带记录的模块声明，供 provider O(1) 读取 */
-    moduleTerm?: Term
-    moduleName?: string
-    /** `import_module` / `use_module` / `include_module` 的模块项 */
-    importModules?: Term[]
 }
 export interface MercuryDocumentFactory {
     /**
@@ -100,12 +85,12 @@ export interface MercuryDocumentFactory {
     /**
      * Create an Mercury document from a model that has been constructed in memory.
      */
-    fromModel(model: MercuryDocument, uri: URI): MercuryDocument;
+    fromModel(model:MercuryDocument , uri: URI): MercuryDocument;
     /**
      * Create a Mercury document for the given URI. The document shall be fetched from the {@link TextDocuments}
      * service if present, and loaded via the configured {@link FileSystemProvider} otherwise.
      */
-    create(uri: URI): MercuryDocument
+    create(uri: URI):MercuryDocument
 
     /**
      * Update the given document after changes in the corresponding textual representation.
@@ -117,60 +102,60 @@ export interface MercuryDocumentFactory {
     update(document: MercuryDocument): MercuryDocument
 }
 
-export class DefaultMercuryDocumentFactory implements MercuryDocumentFactory {
-    constructor(protected readonly services: MercuryServices) { }
+export class DefaultMercuryDocumentFactory implements MercuryDocumentFactory{
+    constructor(protected readonly services: MercuryServices) {}
 
     fromTextDocument(textDocument: TextDocument, uri?: URI | undefined): MercuryDocument {
-        return this.create(uri ?? URI.parse(textDocument.uri), textDocument)
+        return this.create(uri??URI.parse(textDocument.uri),textDocument)
     }
 
     fromString(text: string, uri: URI): MercuryDocument {
-        return this.create(uri, text)
+        return this.create(uri,text)
     }
 
     fromModel(model: MercuryDocument, uri: URI): MercuryDocument {
-        return this.create(uri, { $model: model })
+        return this.create(uri,{$model:model})
     }
-    create(uri: URI, content?: string | TextDocument | { $model: any }) {
+    create(uri:URI,content?:string|TextDocument|{$model:any}){
         // if no document is given, check the textDocuments service first, it maintains documents being opened in an editor
         content ??= this.services.textDocuments.get(uri.toString());
         // if still no document is found try to load it from the file system
         content ??= this.getContentFromFileSystem(uri);
-
-        if (typeof content === "string") {
-            let parseResult = this.parse(uri, content)
-            return this.createMercuryDocument(parseResult, uri, undefined, content)
-        } else if ('$model' in content) {
-            let parseResult = { value: content.$model, errors: [] }
-            return this.createMercuryDocument(parseResult, uri);
-        } else {
-            let parseResult = this.parse(uri, content.getText());
-            return this.createMercuryDocument(parseResult, uri, content)
+        
+        if(typeof content === "string"){
+            let parseResult = this.parse(uri,content)
+            return this.createMercuryDocument(parseResult,uri,undefined,content)
+        }else if('$model' in content){
+            let parseResult = {value:content.$model,errors:[]}
+            return this.createMercuryDocument(parseResult,uri);
+        }else{
+            let parseResult = this.parse(uri,content.getText());
+            return this.createMercuryDocument(parseResult,uri,content)
         }
     }
-
-    protected createMercuryDocument(parseResult: any, uri: URI, textDocument?: TextDocument, text?: string) {
-        let document: MercuryDocument;
-        if (textDocument) {
+    
+    protected createMercuryDocument(parseResult:any,uri:URI,textDocument?:TextDocument,text?:string){
+        let document :MercuryDocument;
+        if(textDocument){
             document = {
                 parseResult,
                 uri,
-                state: DocumentState.Parsed,
-                references: [],
+                state:DocumentState.Parsed,
+                references:[],
                 textDocument,
-                importedByDocs: []
+                importedByDocs:[]
             }
-        } else {
-            let textDocumentGetter = this.createTextDocumentGetter(uri, text);
+        } else{
+            let textDocumentGetter = this.createTextDocumentGetter(uri,text);
             document = {
                 parseResult,
                 uri,
-                state: DocumentState.Parsed,
-                references: [],
-                get textDocument() {
+                state:DocumentState.Parsed,
+                references:[],
+                get textDocument(){
                     return textDocumentGetter();
                 },
-                importedByDocs: []
+                importedByDocs:[]
             }
         }
         parseResult.value.$document = document;
@@ -178,42 +163,42 @@ export class DefaultMercuryDocumentFactory implements MercuryDocumentFactory {
     }
     update(document: MercuryDocument): MercuryDocument {
         let textDocument = this.services.textDocuments.get(document.uri.toString())
-        let text = textDocument ? textDocument.getText() : this.getContentFromFileSystem(document.uri)
-
-        if (textDocument) {
+        let text = textDocument?textDocument.getText(): this.getContentFromFileSystem(document.uri)
+        
+        if(textDocument){
             Object.defineProperty(
-                document, 'textDocument', {
-                value: textDocument
-            }
+                document,'textDocument',{
+                    value:textDocument
+                }
             )
-        } else {
-            let textDocumentGetter = this.createTextDocumentGetter(document.uri, text);
+        } else{
+            let textDocumentGetter = this.createTextDocumentGetter(document.uri,text);
             Object.defineProperty(
-                document, 'textDocument', {
-                get: textDocumentGetter
-            }
+                document,'textDocument',{
+                    get :textDocumentGetter
+                }
             )
         }
 
-        document.parseResult = this.parse(document.uri, text);
+        document.parseResult = this.parse(document.uri,text);
         document.parseResult.value.document = document;
         return document
     }
-    protected createTextDocumentGetter(uri: URI, text?: string) {
-        let textDoc: TextDocument | undefined = undefined;
-        return () => {
+    protected createTextDocumentGetter(uri:URI,text?:string){
+        let textDoc:TextDocument|undefined = undefined;
+        return ()=>{
             return textDoc ??= TextDocument.create(
                 uri.toString(),
                 "mercury",
                 0,
-                text ?? ""
-            )
+                text??""
+                )
         }
     }
-    protected getContentFromFileSystem(uri: URI) {
-        return readFileSync(uri.fsPath, "utf-8")
+    protected getContentFromFileSystem(uri: URI){
+        return readFileSync(uri.fsPath,"utf-8")
     }
-    protected parse(uri: URI, text: string): ParseResult {
+    protected parse(uri:URI,text:string):ParseResult{
         return Parser.parse(text)
     }
 
@@ -268,13 +253,13 @@ export interface MercuryDocuments {
     deleteDocument(uri: URI): MercuryDocument | undefined;
 }
 
-export class DefaultMercuryDocuments implements MercuryDocuments {
-    protected readonly documentMap: Map<string, MercuryDocument> = new Map()
-    constructor(protected readonly services: MercuryServices) { }
-    get size() {
+export class DefaultMercuryDocuments implements MercuryDocuments{
+    protected readonly documentMap:Map<string,MercuryDocument>= new Map()
+    constructor(protected readonly services: MercuryServices) {}
+    get size(){
         return this.documentMap.size
     }
-    get all(): Stream<MercuryDocument> {
+    get all(): Stream<MercuryDocument>{
         return stream(this.documentMap.values())
     }
     addDocument(document: MercuryDocument): void {
@@ -301,9 +286,10 @@ export class DefaultMercuryDocuments implements MercuryDocuments {
     invalidateDocument(uri: URI): MercuryDocument | undefined {
         let uriString = uri.toString()
         let MercuryDoc = this.documentMap.get(uriString);
-        if (MercuryDoc) {
+        if(MercuryDoc){
             MercuryDoc.state = DocumentState.Changed
             MercuryDoc.references = []
+            MercuryDoc.visitResult = undefined
             MercuryDoc.linkResult = undefined
             MercuryDoc.diagnostics = []
         }
@@ -318,5 +304,5 @@ export class DefaultMercuryDocuments implements MercuryDocuments {
         }
         return MercuryDoc;
     }
-
+    
 }
