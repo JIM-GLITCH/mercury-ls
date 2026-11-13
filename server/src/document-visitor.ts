@@ -1697,8 +1697,8 @@ export class Visitor {
                 } else {
                     hoArgs = Array.from({ length: n }, () => ({ kind: 'var', name: this.freshVar() } as MerType))
                     const freshHo: MerType = { kind: 'ho', pf: 'pred', args: hoArgs }
-                    if (calleeType) unify(calleeType, freshHo, this.subst)
-                    else { const v: MerType = { kind: 'var', name: this.freshVar() }; this.varTypes.set(calleeKey, v); unify(v, freshHo, this.subst) }
+                    if (calleeType) this.tryUnify(calleeType, freshHo)
+                    else { const v: MerType = { kind: 'var', name: this.freshVar() }; this.varTypes.set(calleeKey, v); this.tryUnify(v, freshHo) }
                 }
                 let ti = 0
                 for (let i = 0; i < callArgs.length; i++) {
@@ -1713,6 +1713,15 @@ export class Visitor {
         }
         this.inferSignatureArgs(term.args, sig)
     }
+    // 试探性合一：在 subst 副本上运行，成功才提交；失败不留半成品绑定。
+    // unify 本身就地修改 subst，中途失败会留下已绑定的变量，污染后续推断
+    //（如 inferFunctor 逐个试探构造子候选时，失败的候选不应留下绑定）。
+    private tryUnify(a: MerType, b: MerType): boolean {
+        const trial = new Map(this.subst)
+        if (!unify(a, b, trial)) return false
+        this.subst = trial
+        return true
+    }
     // 统一目标：rhs 类型需与 lhs 一致；lhs 若已有具体类型（来自头签名）则约束 rhs。
     // 首次出现在绑定位置的变量记子句级 mode out（head 形参已在 inferHead 标记，不会被覆盖）
     private inferUnify(lhs: Term, rhs: Term) {
@@ -1720,7 +1729,7 @@ export class Visitor {
         this.markVarMode(rhs, 'out')
         const lt = this.inferTerm(lhs)
         const rt = this.inferTerm(rhs, lt)
-        unify(lt, rt, this.subst)
+        this.tryUnify(lt, rt)
         // unify 后刷新两侧的推断条目：先推断一侧可能已写入未合一的 stale 类型
         // （如 `Y = X` 中 Y 先被记为自由变量，合一后才有 X 的具体类型）
         this.refreshVarTypes(lhs)
@@ -1755,7 +1764,7 @@ export class Visitor {
             const key = this.varKey(term)
             let t = this.varTypes.get(key)
             if (!t) { t = { kind: 'var', name: this.freshVar() }; this.varTypes.set(key, t) }
-            if (expected) unify(t, expected, this.subst)
+            if (expected) this.tryUnify(t, expected)
             const resolved = applySubst(t, this.subst)
             this.pushVarType(term, resolved)
             return resolved
@@ -1874,10 +1883,12 @@ export class Visitor {
         } else if (expCtor) {
             // 类型上下文明确：取首个能合一的构造子；否则若 func 结果类型能合一则取 func
             // （跨模块 func 仅在类型上下文明确时参与，避免把无类型上下文的重载项误标）
-            const matches = constrs.filter(ci => unify(ci.resultType, expected!, this.subst))
-            if (matches.length >= 1) {
-                chosenCI = matches[0]
-            } else if (localFunc ?? crossFunc) {
+            // 逐候选试探合一：失败候选不得留下 subst 绑定（tryUnify 失败自动回滚），
+            // 且只有命中的构造子提交其 resultType 合一结果
+            for (const ci of constrs) {
+                if (this.tryUnify(ci.resultType, expected!)) { chosenCI = ci; break }
+            }
+            if (!chosenCI && (localFunc ?? crossFunc)) {
                 chosenFunc = localFunc ?? crossFunc
             }
         } else {
@@ -1947,11 +1958,16 @@ export class Visitor {
         })
         const resultType: MerType = { kind: 'var', name: this.freshVar() }
         if (expected && expected.kind === 'ho') {
+            // 期望的高阶签名对闭包头/结果的约束要么整体成立、要么整体放弃：
+            // 逐个 unify 会在中途失败时留下部分绑定（如第 2 个参数不匹配但第 1 个已绑定）
             const ea = expected.args
+            const trial = new Map(this.subst)
+            let ok = true
             for (let i = 0; i < argTypes.length && i < ea.length; i++) {
-                unify(argTypes[i], ea[i], this.subst)
+                if (!unify(argTypes[i], ea[i], trial)) ok = false
             }
-            if (expected.result) unify(resultType, expected.result, this.subst)
+            if (expected.result && !unify(resultType, expected.result, trial)) ok = false
+            if (ok) this.subst = trial
         }
         const hoType: MerType = { kind: 'ho', pf, args: argTypes, result: pf === 'func' ? resultType : undefined }
         if (resultTerm) this.inferTerm(resultTerm, resultType)
