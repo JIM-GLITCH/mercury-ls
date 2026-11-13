@@ -92,6 +92,19 @@ export function keyOf(name: string, arity: number): string {
 
 // 把类型表达式 Term 转换为 MerType。Term 是解析出的类型 AST：
 // 变量 → var；builtin/用户类型 → ctor；高阶 pred/func → ho；列表/元组 → ctor
+// 类型名项拆解：./2 是左结合链（a.b.c = '.''('.'(a,b),c)），最内层元素
+// 是类型头（原子或 error(T) 应用项），前面的都是限定符——既可是模块名
+// （msi.stream_info 引用 msi 模块的 stream_info），也可是类型名的命名空间
+// （io.error）。两侧统一取最内层名字：全局类型索引本来就按非限定名登记，
+// 拼前缀会让 msi.stream_info 与声明的 stream_info 对不上
+export function typeHeadParts(term: Term): { name: string; arity: number; args: Term[] } {
+    let head = term
+    // 左结合链：沿 args[0] 一直走到最内层，args[1] 是该层名字——
+    // 等价于逐层取右边：a.b.c 的最内层 head 是 c
+    while (head.nameArity === './2') head = head.args[1]
+    return { name: head.name, arity: head.arity, args: head.args }
+}
+
 export function termToMerType(term: Term): MerType {
     // 变量（类型变量大写）
     if (term.syntaxType === 'variable') {
@@ -134,15 +147,10 @@ export function termToMerType(term: Term): MerType {
     if (name === 'pred' || name === 'predicate') {
         return { kind: 'ho', pf: 'pred', args: term.args.map(termToMerType) }
     }
-    function dequalified(term:Term){
-        if(term.nameArity === "./2"){
-            return term.args[1]
-        }
-        return term
-    }
-    const right = dequalified(term)
-    // 普通类型构造子（含 builtin int/float/string/char 与用户类型、->/2 函数类型）
-    return { kind: 'ctor', ctor: { name:right.name, arity:right.arity }, args: right.args.map(termToMerType) }
+    // 限定类型名 Module.Type / a.b.c：typeHeadParts 还原点分名（io.error），
+    // 与类型声明处登记的 ctor 名一致；未限定时行为与原来相同
+    const parts = typeHeadParts(term)
+    return { kind: 'ctor', ctor: { name: parts.name, arity: parts.arity }, args: parts.args.map(termToMerType) }
 }
 
 // MerType → 可读字符串（用于 hover 展示变量/项的类型）。

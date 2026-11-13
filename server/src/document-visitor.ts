@@ -9,7 +9,7 @@ import { ExportManager, ModuleManager, moduleQualifiedName } from './document-mo
 import type { MercuryServices } from './services'
 import {
     applySubst, ConsInfo, FuncInfo, InferredInfo, MerType, TypeCtor, TypeInfo,
-    keyOf, keyOfTypeCtor, modeOfArg, argModesOf, termToMerType, unify,
+    keyOf, keyOfTypeCtor, modeOfArg, argModesOf, termToMerType, typeHeadParts, unify,
 } from './document-type'
 import {
     instTermToMerInst, instFunctorAlts, modeTermToRef, instDefHead,
@@ -891,8 +891,11 @@ export class Visitor {
     }
     // 开始收集一个类型定义，返回 TypeInfo（构造子通过 currentType 追加）
     private beginTypeInfo(typeHead: Term): TypeInfo {
-        const tc: TypeCtor = { name: typeHead.name, arity: typeHead.arity }
-        const info: TypeInfo = { ctor: tc, params: typeHead.args.map(termToMerType), constructors: [] }
+        // 类型名可能是限定名（io.error 的 ./2 链）：typeHeadParts 还原点分名
+        // 与参数项，否则 ctor 会记成 '. '/2、参数错把限定符当类型参数
+        const parts = typeHeadParts(typeHead)
+        const tc: TypeCtor = { name: parts.name, arity: parts.arity }
+        const info: TypeInfo = { ctor: tc, params: parts.args.map(termToMerType), constructors: [] }
         this.currentType = info
         return info
     }
