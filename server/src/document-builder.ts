@@ -66,8 +66,12 @@ export class DefaultDocumentBuilder{
         this.services.client.setStatus('$(sync~spin)analyzing')
         for (const doc of visitOrder) {
             if(doc.state <DocumentState.Visited){
+                // 推断按需：priority（刚打开/编辑）或此前已推断过的文档做子句级
+                // 类型推断；其余只做索引（inferred 为空，linker/hover 有兜底），
+                // 全库 analyzing 耗时随之只剩 parse+index
+                const infer = priority?.has(doc) ?? (doc.visitResult?.inferred?.size ?? 0) > 0
                 let visitor = new Visitor(this.services);
-                await visitor.visit(doc,cancelToken);
+                await visitor.visit(doc,cancelToken,infer);
                 let visitResult = doc.visitResult!
                 if(visitResult.module){
                     this.services.moduleManager.set(visitResult.module,doc);

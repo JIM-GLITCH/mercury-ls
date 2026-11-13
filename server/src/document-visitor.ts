@@ -94,17 +94,24 @@ export class Visitor {
     // 变量子句级 mode 近似（head 形参声明 mode / 绑定变量 out / 调用 in 实参；类型推断步骤填充，供 hover 显示）
     private varMode = new Map<string, string>()
     private varCounter = 0
-    // freeze 式延迟约束：消歧失败（信息不足）的 functor 项登记 goal，
-    // 每次 tryUnify 提交绑定后 drain 重试——类型/实参类型一旦有新进展就重跑
-    // 消歧（等价于 Mercury freeze/2：变量绑定时唤醒挂起目标）。goal 返回
-    // true 表示已解决/放弃（移除），false 继续等下一次绑定
-    private frozen: { goal: () => boolean }[] = []
+    // freeze 式延迟约束：消歧失败（信息不足）的 functor 项登记 goal + watch
+    // 列表（结果类型变量 + 直接变量实参的类型变量），每次 tryUnify 提交后
+    // drain——只对 watch 解析结果发生变化的 goal 做评分/重试（等价于 Mercury
+    // freeze/2 的「变量绑定时唤醒」，但按名解析变化检测，兼容 subst 别名链）。
+    // goal 返回 true 表示已解决/放弃（移除），false 继续等下一次变化
+    private frozen: { term: Term; watches: { t: MerType; last: string }[]; goal: () => boolean }[] = []
+    // 同一 Term 只挂一次冻结（trialSig 试解会重复遍历实参，无去重会无限堆积）
+    private frozenTerms = new Set<Term>()
     private drainingFrozen = false
     // trialSig 试解期间克隆了 subst/varTypes，tryUnify 的提交不代表真实进展，
     // 期间不触发 drain（否则 goal 会在克隆状态上误判/误写）
     private inTrialDepth = 0
-    async visit(doc: MercuryDocument, cancelToken: CancellationToken) {
+    // 推断开关：批量索引阶段可关闭子句级类型推断（inferred 仅供打开中文档的
+    // hover/definition/linker 消歧消费，未打开文档跳过可显著降低全库 analyzing 耗时）
+    private inferEnabled = true
+    async visit(doc: MercuryDocument, cancelToken: CancellationToken, infer = true) {
         this.errors = []
+        this.inferEnabled = infer
         let rootNode = doc.parseResult.value
         for (const clause of rootNode.args) {
             await interruptAndCheck(cancelToken)
@@ -160,7 +167,7 @@ export class Visitor {
                 break
         }
         // 阶段 2：子句级类型推断（声明/签名已在同模块前序收集；不抛错、不影响索引）
-        this.inferClause(clause)
+        if (this.inferEnabled) this.inferClause(clause)
     }
 
     visitDcgHead(term: Term) {
@@ -1568,6 +1575,7 @@ export class Visitor {
         this.varMode = new Map()
         this.varCounter = 0
         this.frozen = []
+        this.frozenTerms = new Set()
         try {
             if (top.nameArity === ':-/2') {
                 this.inferHead(top.args[0])
@@ -1764,9 +1772,25 @@ export class Visitor {
     //（如 inferFunctor 逐个试探构造子候选时，失败的候选不应留下绑定）。
     // probe=true 表示「试探性合一」（构造子/闭包候选消歧），失败属正常不计入
     // unifyFailed；提交性合一（inferUnify、变量 expected）失败计入，供 trialSig 判定。
+    // 无参同义词展开（io→state 这类）：存储端的类型可能是未展开形式（变量早前
+    // 绑的是 io），而签名形参侧经 resolveSynonym 展开成 state——不对称会让
+    // unify(io, state) 误失败、整条签名试解被拒。只展开 body 无类型变量的
+    // 同义词：带参数的（assoc_list）展开要 freshen 类型变量、破坏共享，
+    // 那类仍由调用方显式 resolveSynonym 处理
+    private resolveGroundSynonym(t: MerType): MerType {
+        let cur = t
+        for (let i = 0; i < 8; i++) {
+            if (cur.kind !== 'ctor') return cur
+            const ti = this.types.get(keyOfTypeCtor(cur.ctor))
+                ?? this.exportManager.lookupType(keyOfTypeCtor(cur.ctor))
+            if (!ti?.body || ti.params.length > 0 || this.countTypeVars(ti.body) > 0) return cur
+            cur = ti.body
+        }
+        return cur
+    }
     private tryUnify(a: MerType, b: MerType, probe = false): boolean {
         const trial = new Map(this.subst)
-        if (!unify(a, b, trial)) {
+        if (!unify(this.resolveGroundSynonym(a), this.resolveGroundSynonym(b), trial)) {
             if (!probe) this.unifyFailed++
             return false
         }
@@ -1776,28 +1800,41 @@ export class Visitor {
         if (this.inTrialDepth === 0) this.drainFrozen()
         return true
     }
-    // drain frozen 队列：goal 返回 true 移除，false 保留等下次绑定。
-    // 循环到无进展为止（一个 goal 的重试可能绑定新变量、级联唤醒其它 goal）；
-    // goal 内部抛错视为放弃该项，防止坏约束卡死队列
+    // watch 解析键：变量跟随别名链取终端名（?N→?S→ctor 时依次变化，
+    // 每次变化都能被检测到）；ctor 按名字+元数
+    private watchKey(t: MerType): string {
+        const r = applySubst(t, this.subst)
+        if (r.kind === 'var') return `v:${r.name}`
+        if (r.kind === 'ctor') return `c:${r.ctor.name}/${r.ctor.arity}`
+        return 'ho'
+    }
+    // drain frozen 队列：只对 watch 解析键发生变化的 goal 调用 goal()；
+    // goal 返回 true 移除，false 保留。循环到无变化为止（一个 goal 的重试
+    // 可能绑定新变量、级联唤醒其它 goal）；goal 内部抛错视为放弃该项
     private drainFrozen() {
         if (this.drainingFrozen) return
         this.drainingFrozen = true
         try {
             for (;;) {
-                let progressed = false
+                let ran = false
                 for (let i = this.frozen.length - 1; i >= 0; i--) {
+                    const f = this.frozen[i]
+                    let changed = false
+                    for (const w of f.watches) {
+                        const k = this.watchKey(w.t)
+                        if (k !== w.last) { w.last = k; changed = true }
+                    }
+                    if (!changed) continue
+                    ran = true
                     let done: boolean
                     try {
-                        done = this.frozen[i].goal()
+                        done = f.goal()
                     } catch {
                         done = true
                     }
-                    if (done) {
-                        this.frozen.splice(i, 1)
-                        progressed = true
-                    }
+                    if (done) { this.frozen.splice(i, 1); this.frozenTerms.delete(f.term) }
                 }
-                if (!progressed || this.frozen.length === 0) break
+                if (!ran || this.frozen.length === 0) break
             }
         } finally {
             this.drainingFrozen = false
@@ -1946,11 +1983,11 @@ export class Visitor {
             }
         }
         for (const ti of this.types.values()) collectConstrs(ti)
-        // 跨模块：类型上下文明确时，纳入导入模块里同名同元数的类型构造子
+        // 跨模块：类型上下文明确时，纳入导入模块里同名同元数的类型构造子。
+        // typeMap 按类型构造子键索引，直接查目标类型即可（原全表扫是 O(类型数)）
         if (expCtor) {
-            for (const ti of this.exportManager.allTypeInfos()) {
-                if (ti.ctor.name === expCtor.name && ti.ctor.arity === expCtor.arity) collectConstrs(ti)
-            }
+            const ti = this.exportManager.lookupType(keyOfTypeCtor(expCtor))
+            if (ti) collectConstrs(ti)
         }
         // 函数签名候选：限定名只看目标模块；否则本模块声明优先（遮蔽导入），
         // 本模块没有时回退全局导出索引。hasOwnFunc 区分候选是否来自本模块，
@@ -2051,10 +2088,32 @@ export class Visitor {
         // 等价于 Mercury freeze/2：变量绑定时唤醒挂起目标。
         // 注意跨模块构造子在无类型上下文时不进 constrs（见上方 expCtor 收集条件），
         // 必须用 hasCrossConstrs 补上——否则构造子全在导入模块里时根本不挂起
-        if (allowFreeze && !chosenCI && !chosenFunc
+        // inTrialDepth>0 时处于 trialSig 投机试解：失败会回滚 subst 但 frozen
+        // 队列不会回滚，投机推断挂起的 goal 会指向已丢弃的状态 → 禁止推送；
+        // frozenTerms 去重：同一项重试/嵌套试解不重复登记
+        if (allowFreeze && this.inTrialDepth === 0 && !this.frozenTerms.has(term)
+            && !chosenCI && !chosenFunc
             && (constrs.length > 0 || funcCands.length > 0 || this.hasCrossConstrs(name, arity))) {
+            this.frozenTerms.add(term)
             let lastScore = -1
+            // watch：结果类型变量 + 直接变量实参的（别名链终端）类型变量。
+            // 复合实参的内部变量不挂——它们的进展由各自项的推断承担
+            const watches: { t: MerType; last: string }[] = []
+            const addWatch = (t: MerType | undefined) => {
+                if (t?.kind === 'var') watches.push({ t, last: this.watchKey(t) })
+            }
+            addWatch(resultType)
+            for (const a of term.args) {
+                if (isVariable(a) || ['!/1', '!./1', '!:/1'].includes(a.nameArity)) {
+                    const vt = this.varTypes.get(this.varKey(a))
+                    const rt = vt ? applySubst(vt, this.subst) : undefined
+                    // 存终端变量名：后续别名链延长时 watchKey 仍能跟随解析
+                    if (rt?.kind === 'var') addWatch({ kind: 'var', name: rt.name })
+                }
+            }
             this.frozen.push({
+                term,
+                watches,
                 goal: () => {
                     const resolved = applySubst(resultType, this.subst)
                     const expectedT = resolved.kind === 'ctor' ? this.resolveSynonym(resolved) : undefined
@@ -2175,6 +2234,13 @@ export class Visitor {
     // func/构造子歧义场景应据此保持无类别，而不是直接采信
     private pickSig(cands: FuncInfo[], args: Term[]): { sig: FuncInfo; verified: boolean } | undefined {
         if (cands.length === 0) return undefined
+        // 试解内部不再嵌套试解：trialSig 推实参时遇到多候选重载，若再对每个
+        // 候选完整试解会组合爆炸（候选数 × 嵌套深度）。投机试解里实参保持
+        // 自由变量即可——变量与任何形参类型都能合一，不影响外层候选的可行性
+        // 判定；胜出后正式推断在 inTrialDepth=0 下会重新做完整消歧
+        if (this.inTrialDepth > 0) {
+            return cands.length === 1 ? { sig: cands[0], verified: false } : undefined
+        }
         // 没有任何实参带已知类型时，所有候选都会"成功"，试解无意义 → 直接歧义；
         // 仅单候选时弱返回（不试解），多候选判歧义
         const hasKnown = args.some(a => {
@@ -2231,7 +2297,10 @@ export class Visitor {
             if (param !== undefined
                 && (isVariable(arg) || ['!/1', '!./1', '!:/1'].includes(arg.nameArity))) {
                 const known = this.quickArgType(arg)
-                if (known && known.kind !== 'var' && !unify(known, param, scratch)) return false
+                // 与 tryUnify 一致做 ground 同义词展开：known 可能是 state（io 展开后），
+                // param 是声明里的 io，不展开会 unify(state, io) 误失败
+                if (known && known.kind !== 'var'
+                    && !unify(this.resolveGroundSynonym(known), this.resolveGroundSynonym(param), scratch)) return false
             }
             ti += this.argWidth(arg)
         }
@@ -2277,12 +2346,7 @@ export class Visitor {
     // 是否存在同名同元数的跨模块类型构造子（导出索引内）；
     // 用于无类型上下文时判断 func/构造子是否歧义
     private hasCrossConstrs(name: string, arity: number): boolean {
-        for (const ti of this.exportManager.allTypeInfos()) {
-            for (const ci of ti.constructors) {
-                if (ci.ctor === name && ci.arity === arity) return true
-            }
-        }
-        return false
+        return this.exportManager.hasCtor(name, arity)
     }
     // alts 表按语义元数优先、arity 兜底取候选（与 signatureOf 的双键查询一致）
     private altsOf(map: Map<string, FuncInfo[]>, name: string, sem: number, alt: number): FuncInfo[] {

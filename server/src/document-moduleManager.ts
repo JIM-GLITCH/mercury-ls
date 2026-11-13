@@ -75,8 +75,10 @@ export class ExportManager {
     // 同名同元数的全部声明签名（重载候选；funcMap/funcs 单值表只存其一）
     private funcAltsMap = new Map<string, FuncInfo[]>()
     private predAltsMap = new Map<string, FuncInfo[]>()
-    private byDocTypes = new Map<MercuryDocument, { typeKeys: string[]; funcKeys: string[] }>()
+    private byDocTypes = new Map<MercuryDocument, { typeKeys: string[]; funcKeys: string[]; consKeys: string[] }>()
     private byDocAlts = new Map<MercuryDocument, { map: 'f' | 'p'; key: string; fi: FuncInfo }[]>()
+    // 构造子名/元数 → 出现次数：hasCtor 查询 O(1)，避免每个歧义 functor 全扫 typeMap
+    private ctorIndex = new Map<string, number>()
     set(doc: MercuryDocument) {
         this.delete(doc)
         const vr = doc.visitResult
@@ -87,10 +89,16 @@ export class ExportManager {
         for (const t of terms) this.exportMap.add(t.name, t)
         // 结构化签名：供推断跨模块取类型构造子 / 函数签名
         const typeKeys: string[] = []
+        const consKeys: string[] = []
         for (const ti of vr.types.values()) {
             const k = keyOfTypeCtor(ti.ctor)
             this.typeMap.set(k, ti)
             typeKeys.push(k)
+            for (const ci of ti.constructors) {
+                const ck = keyOf(ci.ctor, ci.arity)
+                this.ctorIndex.set(ck, (this.ctorIndex.get(ck) ?? 0) + 1)
+                consKeys.push(ck)
+            }
         }
         const funcKeys: string[] = []
         const altEntries: { map: 'f' | 'p'; key: string; fi: FuncInfo }[] = []
@@ -103,7 +111,7 @@ export class ExportManager {
         }
         for (const fi of vr.funcs.values()) regFunc(fi, 'f', this.funcAltsMap)
         for (const fi of vr.preds.values()) regFunc(fi, 'p', this.predAltsMap)
-        this.byDocTypes.set(doc, { typeKeys, funcKeys })
+        this.byDocTypes.set(doc, { typeKeys, funcKeys, consKeys })
         this.byDocAlts.set(doc, altEntries)
     }
     delete(doc: MercuryDocument) {
@@ -116,6 +124,11 @@ export class ExportManager {
         if (oldT) {
             for (const k of oldT.typeKeys) this.typeMap.delete(k)
             for (const k of oldT.funcKeys) this.funcMap.delete(k)
+            for (const k of oldT.consKeys) {
+                const n = (this.ctorIndex.get(k) ?? 1) - 1
+                if (n <= 0) this.ctorIndex.delete(k)
+                else this.ctorIndex.set(k, n)
+            }
             this.byDocTypes.delete(doc)
         }
         const oldAlts = this.byDocAlts.get(doc)
@@ -164,6 +177,10 @@ export class ExportManager {
     }
     allTypeInfos(): Iterable<TypeInfo> {
         return this.typeMap.values()
+    }
+    // 导出索引里是否存在同名同元数的类型构造子（跨模块歧义检测用，O(1)）
+    hasCtor(name: string, arity: number): boolean {
+        return this.ctorIndex.has(keyOf(name, arity))
     }
 }
 

@@ -258,6 +258,39 @@ describe('frozen delayed disambiguation', () => {
     }
   })
 
+  it('ground synonym asymmetry: var bound to io must unify with io param (expanded to state)', async () => {
+    // io 是 state 的无参同义词。IO 先经 touch_io 绑成 io（存储端未展开），
+    // 后经 insert_it 的 io 形参约束——trialSig 把形参展开成 state，
+    // 若 unify 不做对称展开会 unify(io, state) 误失败、签名被拒、
+    // StreamInfo 永远绑不上 stream_info（真实 io.m 的 insert_stream_info 场景）
+    const docM = await mk(
+      ':- module msyn.\n' +
+      ':- interface.\n' +
+      ':- type state.\n' +
+      ':- type io == state.\n' +
+      ':- type stream_info ---> stream(int, int, int, int).\n' +
+      ':- type maybe_stream_info ---> stream(int, int, int, int) ; unknown_stream.\n' +
+      ':- pred touch_io(io, io).\n' +
+      ':- pred insert_it(stream_info, io).\n' +
+      ':- end_module msyn.\n' +
+      ':- implementation.\n' +
+      'p(StreamInfo, IO) :-\n' +
+      '    StreamInfo = stream(1, 2, 3, 4),\n' +
+      '    touch_io(IO, IO),\n' +
+      '    insert_it(StreamInfo, IO).\n' +
+      ':- end_module msyn.\n',
+      'msyn',
+    )
+    const inf = docM.visitResult!.inferred
+    const streamTerms = collectTerms(docM.parseResult.value, 'stream/4').filter((t: any) => inf.get(t))
+    expect(streamTerms.length).toBeGreaterThan(0)
+    for (const t of streamTerms) {
+      const i = inf.get(t) as any
+      expect(i?.category).toBe('constructor')
+      expect(merTypeToString(i.type)).toBe('stream_info')
+    }
+  })
+
   it('still-ambiguous cross-module ctor stays unlabeled when no constraint arrives', async () => {
     await mk(
       ':- module mgi.\n' +
