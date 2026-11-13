@@ -21,7 +21,8 @@ function collectTerms(root: any, nameArity: string): any[] {
 }
 
 function merTypeToString(t: any): string {
-  if (t.kind === 'var') return t.name
+  // 与 document-type 的 merTypeToString 一致：剥掉实例化后缀 #n
+  if (t.kind === 'var') return t.name.replace(/#\d+$/, '')
   if (t.kind === 'ctor') return `${t.ctor.name}(${t.args.map(merTypeToString).join(', ')})`
   return '?'
 }

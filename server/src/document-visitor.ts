@@ -1543,13 +1543,10 @@ export class Visitor {
                 this.inferHead(top.args[0])
                 this.inferGoal(top.args[1])
             } else if (top.nameArity === '=/2') {
-                // 函数事实 `F(...) = Expr`：结果按返回类型推断；头参数按签名
-                const sig = this.signatureOf(clause.callee)
-                if (sig) {
-                    this.markVarMode(top.args[1], sig.resultMode ?? 'out')
-                    if (sig.resultType) this.inferTerm(top.args[1], sig.resultType)
-                }
-                this.inferHead(top.args[0])
+                // 函数事实 `F(...) = Expr`：交给 inferHead 的 =/2 分支统一处理——
+                // 调用实参与返回值必须在同一个实例化签名下推断，否则
+                // `func f(T) = list(T)` 里 X 与结果的 T 会断开
+                this.inferHead(top)
             } else {
                 // 谓词事实：仅头
                 this.inferHead(top)
@@ -1587,7 +1584,7 @@ export class Visitor {
         // 参数按签名推断，结果变量 R 按返回类型推断
         if (head.nameArity === '=/2') {
             const call = head.args[0]
-            const sig = this.signatureOf(call)
+            const sig = this.sigAt(call)
             if (sig) {
                 this.inferSignatureArgs(call.args, sig)
                 this.markVarMode(head.args[1], sig.resultMode ?? 'out')
@@ -1598,7 +1595,7 @@ export class Visitor {
             this.inferUnify(head.args[0], head.args[1])
             return
         }
-        const sig = this.signatureOf(head)
+        const sig = this.sigAt(head)
         if (!sig) return
         this.inferSignatureArgs(head.args, sig)
     }
@@ -1674,7 +1671,7 @@ export class Visitor {
     }
     // 调用：按签名对齐实参类型
     private inferCall(term: Term) {
-        const sig = this.signatureOf(term)
+        const sig = this.sigAt(term)
         if (!sig) {
             // 高阶变量调用：形如 (P, V0, V) 的应用节点（(f, a1, a2, ...) 中 f 是持有谓词/函数值的变量），
             // 解析树里表现为 nameArity = "(/N)" 且 args[0] 是变量。
@@ -1848,7 +1845,9 @@ export class Visitor {
             const p = ti.params[i]
             if (p.kind === 'var' && t.args[i]) subst.set(p.name, t.args[i])
         }
-        return applySubst(ti.body, subst)
+        // 展开结果里残留的具名类型变量（非形参的游离变量）同样按本次使用实例化，
+        // 避免与其它声明的同名类型变量在 subst 里串扰
+        return this.freshenType(applySubst(ti.body, subst), new Map())
     }
     // 数据位置 functor：用 expected 类型与签名消歧 构造子/函数；重载且类型无法唯一确定时保持无类别
     private inferFunctor(term: Term, expected?: MerType): MerType {
@@ -1875,50 +1874,69 @@ export class Visitor {
             : undefined
         const crossFunc = qualFunc ?? this.exportManager.lookupFunc(name, arity)
 
+        // 被选中项的实例化类型：类型变量已按本次使用重命名（见 freshenType），
+        // 与 tryUnify/unify 写入 subst 的绑定一致，供参数对齐与结果类型使用
+        let instArgTypes: MerType[] | undefined
+        let instResultType: MerType | undefined
+        const useCI = (ci: ConsInfo) => {
+            const inst = this.freshenCons(ci)
+            instArgTypes = inst.argTypes
+            instResultType = inst.resultType
+        }
+        const useFunc = (f: FuncInfo) => {
+            const s = this.freshenSig(f)
+            instArgTypes = s.argTypes
+            instResultType = s.resultType
+        }
+
         let chosenCI: ConsInfo | undefined
         let chosenFunc: FuncInfo | undefined
         if (qualFunc) {
             // 限定调用直接消解为该模块的 func/签名（不受「类型未知不引入跨模块候选」限制）
             chosenFunc = qualFunc
+            useFunc(qualFunc)
         } else if (expCtor) {
             // 类型上下文明确：取首个能合一的构造子；否则若 func 结果类型能合一则取 func
             // （跨模块 func 仅在类型上下文明确时参与，避免把无类型上下文的重载项误标）
-            // 逐候选试探合一：失败候选不得留下 subst 绑定（tryUnify 失败自动回滚），
-            // 且只有命中的构造子提交其 resultType 合一结果
+            // 逐候选实例化+试探合一：每个候选是独立类型实例，失败候选不得留下
+            // subst 绑定（tryUnify 失败自动回滚），且只有命中的构造子提交其合一结果
             for (const ci of constrs) {
-                if (this.tryUnify(ci.resultType, expected!)) { chosenCI = ci; break }
+                const inst = this.freshenCons(ci)
+                if (this.tryUnify(inst.resultType, expected!)) {
+                    chosenCI = ci
+                    instArgTypes = inst.argTypes
+                    instResultType = inst.resultType
+                    break
+                }
             }
-            if (!chosenCI && (localFunc ?? crossFunc)) {
-                chosenFunc = localFunc ?? crossFunc
+            const f = localFunc ?? crossFunc
+            if (!chosenCI && f) {
+                chosenFunc = f
+                useFunc(f)
             }
         } else {
             // 类型未知：仅用本模块符号消歧；跨模块候选不引入（否则会把本应无类别的重载项误标）
             if (localFunc && constrs.length === 0) {
                 chosenFunc = localFunc
+                useFunc(localFunc)
             } else if (!localFunc && constrs.length === 1) {
                 chosenCI = constrs[0]
+                useCI(constrs[0])
             } else if (localFunc && constrs.length >= 1 && localFunc.argTypes.length === arity) {
                 chosenFunc = localFunc
+                useFunc(localFunc)
             }
             // 其余（多构造子无 func、func+构造子但参数元数不符、跨模块仅 func）无法消歧 → 留无类别
         }
 
-        let resultType: MerType
-        let category: 'constructor' | 'func' | undefined
-        if (chosenCI) {
-            resultType = applySubst(chosenCI.resultType, this.subst)
-            category = 'constructor'
-        } else if (chosenFunc) {
-            resultType = chosenFunc.resultType ?? { kind: 'var', name: this.freshVar() }
-            category = 'func'
-        } else {
-            resultType = { kind: 'var', name: this.freshVar() }
-        }
+        const resultType = instResultType
+            ? applySubst(instResultType, this.subst)
+            : { kind: 'var', name: this.freshVar() } as MerType
+        const category = chosenCI ? 'constructor' as const : chosenFunc ? 'func' as const : undefined
 
         // 对齐参数类型
-        const argTypes = chosenCI ? chosenCI.argTypes.map(a => applySubst(a, this.subst))
-            : chosenFunc ? chosenFunc.argTypes.map(a => applySubst(a, this.subst))
-                : term.args.map(() => ({ kind: 'var', name: this.freshVar() } as MerType))
+        const argTypes = instArgTypes?.map(a => applySubst(a, this.subst))
+            ?? term.args.map(() => ({ kind: 'var', name: this.freshVar() } as MerType))
         for (let i = 0; i < term.args.length; i++) {
             this.inferTerm(term.args[i], argTypes[i])
         }
@@ -1978,6 +1996,53 @@ export class Visitor {
     private hoHeadVar(argTerm: Term): Term {
         if (['::/2', '>>/2'].includes(argTerm.nameArity)) return argTerm.args[0]
         return argTerm
+    }
+    // 签名/构造子类型的实例化入口：查签名后立即 freshen，保证 argTypes 与
+    // resultType 共享同一组重命名后的类型变量
+    private sigAt(termOrName: Term | string, arity?: number): FuncInfo | undefined {
+        const sig = this.signatureOf(termOrName, arity)
+        return sig && this.freshenSig(sig)
+    }
+    // 声明/构造子类型的实例化：把签名里所有具名类型变量（T/K/V...）重命名为
+    // 子句内唯一名（`T#3`）。每次使用（每次调用、每个构造子）都是独立实例——
+    // 否则不同实例共享 subst 里的同名绑定互相污染：先 `t1:int` 绑定类型参数 T
+    // 后，`t2:string` 的 T 已被污染成 int 而被误拒；`q(X), q(Y)` 两次调用被
+    // 强制同型（Mercury 语义里每次调用独立实例化）。`#n` 后缀由
+    // merTypeToString 剥掉，hover 仍显示 T；?N 推断变量原样保留。
+    private freshenType(t: MerType, map: Map<string, MerType>): MerType {
+        if (t.kind === 'var') {
+            // ?N 推断变量与 T#n 已实例化变量原样保留（# 在源码类型变量名中不可能出现）
+            if (/^\?\d+$/.test(t.name) || t.name.includes('#')) return t
+            let v = map.get(t.name)
+            if (!v) {
+                v = { kind: 'var', name: `${t.name}#${this.varCounter++}` }
+                map.set(t.name, v)
+            }
+            return v
+        }
+        if (t.kind === 'ctor') {
+            return { kind: 'ctor', ctor: t.ctor, args: t.args.map(a => this.freshenType(a, map)) }
+        }
+        return {
+            kind: 'ho', pf: t.pf,
+            args: t.args.map(a => this.freshenType(a, map)),
+            result: t.result ? this.freshenType(t.result, map) : undefined,
+        }
+    }
+    private freshenSig(sig: FuncInfo): FuncInfo {
+        const map = new Map<string, MerType>()
+        return {
+            ...sig,
+            argTypes: sig.argTypes.map(a => this.freshenType(a, map)),
+            resultType: sig.resultType ? this.freshenType(sig.resultType, map) : undefined,
+        }
+    }
+    private freshenCons(ci: ConsInfo): { argTypes: MerType[]; resultType: MerType } {
+        const map = new Map<string, MerType>()
+        return {
+            argTypes: ci.argTypes.map(a => this.freshenType(a, map)),
+            resultType: this.freshenType(ci.resultType, map),
+        }
     }
     private signatureOf(termOrName: Term | string, arity?: number): FuncInfo | undefined {
         const name = typeof termOrName === 'string' ? termOrName : termOrName.name

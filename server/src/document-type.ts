@@ -151,7 +151,9 @@ export function merTypeToString(t: MerType): string {
     const render = (ty: MerType): string => {
         switch (ty.kind) {
             case 'var':
-                return /^\?\d+$/.test(ty.name) ? 'unknown' : ty.name
+                // ?N 是推断 fresh 变量 → unknown；T#n 是实例化后的声明类型变量，
+                // 剥掉 #n 后缀还原显示为 T（见 document-visitor freshenType）
+                return /^\?\d+$/.test(ty.name) ? 'unknown' : ty.name.replace(/#\d+$/, '')
             case 'ctor':
                 if (ty.args.length === 0) return ty.ctor.name
                 return `${ty.ctor.name}(${ty.args.map(render).join(', ')})`
