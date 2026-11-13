@@ -80,6 +80,7 @@ export interface InferredInfo {
     category?: 'constructor' | 'func'
     mode?: string           // 变量出现点的 inst 字符串（Phase C 逐出现点记录，hover 标 inst；
                             //  无记录时为子句级近似 in/out，hover 标 mode）
+    sig?: FuncInfo          // 重载消歧后选中的签名（hover 按它显示类型签名）
 }
 
 export function keyOfTypeCtor(tc: TypeCtor): string {

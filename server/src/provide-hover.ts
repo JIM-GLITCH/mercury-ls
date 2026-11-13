@@ -60,8 +60,10 @@ export async function HoverProvider(services: MercuryServices, params:HoverParam
     let typeStr: string | undefined
     if (term.semanticType !== 'module') {
         if (term.semanticType === 'func' || term.semanticType === 'pred') {
-            // 本模块优先；跨模块引用（uint.cast_to_int 等）落全局导出索引
-            const fi = doc.visitResult?.funcs.get(keyOf(term.name, term.semanticArity))
+            // 优先用推断消歧出的签名（重载 func/pred 按实参类型选中）；
+            // 其次本模块签名；跨模块引用（uint.cast_to_int 等）落全局导出索引
+            const fi = doc.visitResult?.inferred.get(term)?.sig
+                ?? doc.visitResult?.funcs.get(keyOf(term.name, term.semanticArity))
                 ?? doc.visitResult?.preds.get(keyOf(term.name, term.semanticArity))
                 ?? services.exportManager.lookupFunc(term.name, term.semanticArity)
             if (fi) {
