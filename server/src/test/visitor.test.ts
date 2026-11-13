@@ -345,6 +345,26 @@ describe('visitor: typeclass / instance declarations', () => {
     expectLabeled(defs, 'exception', 'exception/1', 'inst')
     assertNoWhereMislabeled(defs)
   })
+
+  it('indexes qualified instance head `instance stream.writer(A,B,C)` as writer/3, not ./2', async () => {
+    // 限定名实例头必须先解包 ./2：否则 ./2 节点被当定义名收进索引，
+    // 模块名被误标成 type、类名被误标成 type/inst
+    const v = await visitMercury(
+      ':- instance stream.writer(text_output_stream, string, io).',
+    )
+    const defs = definitionsOf(v)
+    expectLabeled(defs, 'writer', 'writer/3', 'instance')
+    // ./2 / . 节点不应出现在 definition 里
+    for (const [k, entries] of defs) {
+      for (const e of entries) {
+        expect(['./2', '.']).not.toContain(e.nameArity)
+      }
+      expect(k).not.toBe('.')
+    }
+    // 实参是类型引用位置
+    const tref = typeReferencesOf(v)
+    expectLabeled(tref, 'string', 'string/0', 'type')
+  })
 })
 
 describe('visitor: inst declarations', () => {

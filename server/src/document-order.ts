@@ -37,27 +37,31 @@ export function orderByImports<T>(
         const n = getName(it)
         if (n) nameToItem.set(n, it)
     }
-    const deps = new Map<T, T[]>()
+    // 反向邻接：dep → 依赖它的项。旧实现每出队一个节点就全表扫描 items
+    // 再对每个 deps.includes(it)，是 O(V·E)；4186 个文档时是千万级操作。
+    const dependents = new Map<T, T[]>()
     const indeg = new Map<T, number>()
     for (const it of items) {
         const imps = getImports(it).filter(n => nameToItem.has(n)).map(n => nameToItem.get(n)!)
-        deps.set(it, imps)
         indeg.set(it, imps.length)
+        for (const d of imps) {
+            const arr = dependents.get(d)
+            if (arr) arr.push(it)
+            else dependents.set(d, [it])
+        }
     }
     const order: T[] = []
     const queue: T[] = items.filter(it => indeg.get(it) === 0)
     const seen = new Set<T>()
-    while (queue.length) {
-        const it = queue.shift()!
+    for (let qi = 0; qi < queue.length; qi++) {
+        const it = queue[qi]
         if (seen.has(it)) continue
         seen.add(it); order.push(it)
-        for (const other of items) {
+        for (const other of dependents.get(it) ?? []) {
             if (seen.has(other)) continue
-            if (deps.get(other)!.includes(it)) {
-                const v = indeg.get(other)! - 1
-                indeg.set(other, v)
-                if (v === 0) queue.push(other)
-            }
+            const v = indeg.get(other)! - 1
+            indeg.set(other, v)
+            if (v === 0) queue.push(other)
         }
     }
     for (const it of items) if (!seen.has(it)) order.push(it)  // 环兜底

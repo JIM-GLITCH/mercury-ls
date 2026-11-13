@@ -94,6 +94,15 @@ export class Visitor {
     // 变量子句级 mode 近似（head 形参声明 mode / 绑定变量 out / 调用 in 实参；类型推断步骤填充，供 hover 显示）
     private varMode = new Map<string, string>()
     private varCounter = 0
+    // freeze 式延迟约束：消歧失败（信息不足）的 functor 项登记 goal，
+    // 每次 tryUnify 提交绑定后 drain 重试——类型/实参类型一旦有新进展就重跑
+    // 消歧（等价于 Mercury freeze/2：变量绑定时唤醒挂起目标）。goal 返回
+    // true 表示已解决/放弃（移除），false 继续等下一次绑定
+    private frozen: { goal: () => boolean }[] = []
+    private drainingFrozen = false
+    // trialSig 试解期间克隆了 subst/varTypes，tryUnify 的提交不代表真实进展，
+    // 期间不触发 drain（否则 goal 会在克隆状态上误判/误写）
+    private inTrialDepth = 0
     async visit(doc: MercuryDocument, cancelToken: CancellationToken) {
         this.errors = []
         let rootNode = doc.parseResult.value
@@ -1104,9 +1113,11 @@ export class Visitor {
         for (let i = 0; i < 6 && (nameArity(classTerm, "where/2") || nameArity(classTerm, "<=/2")); i++) {
             classTerm = classTerm.args[0]
         }
-        label(classTerm, "typeclass")
-        this.addDefinition(classTerm)
-        this.tryAddExport(classTerm)
+        // 类名同样可能是限定名（typeclass mod.foo）：解包 ./2 再索引
+        const unwrappedClass = this.visitQualifiedTerm(classTerm) ?? classTerm
+        label(unwrappedClass, "typeclass")
+        this.addDefinition(unwrappedClass)
+        this.tryAddExport(unwrappedClass)
         // 递归索引 where 块里的方法签名（pred/func/mode 声明）
         if (whereTerm) {
             for (const method of listToTerms(whereTerm.args[1])) {
@@ -1133,10 +1144,13 @@ export class Visitor {
         for (let i = 0; i < 6 && (nameArity(head, "where/2") || nameArity(head, "<=/2")); i++) {
             head = head.args[0]
         }
-        label(head, "instance")
-        this.addDefinition(head)
+        // 实例头可以是限定名（instance stream.writer(...)）：先解包 ./2，
+        // 否则 ./2 节点本身被当定义名收进索引（definition['.'] / './2'）
+        const unwrapped = this.visitQualifiedTerm(head) ?? head
+        label(unwrapped, "instance")
+        this.addDefinition(unwrapped)
         // 实例化的类型参数是类型引用位置（类型变量除外）
-        for (const arg of head.args ?? []) {
+        for (const arg of unwrapped.args ?? []) {
             if (!isVariable(arg)) this.visitTypeRef(arg)
         }
         if (whereTerm) {
@@ -1553,6 +1567,7 @@ export class Visitor {
         this.varTypes = new Map()
         this.varMode = new Map()
         this.varCounter = 0
+        this.frozen = []
         try {
             if (top.nameArity === ':-/2') {
                 this.inferHead(top.args[0])
@@ -1699,8 +1714,8 @@ export class Visitor {
     // 调用：按签名对齐实参类型；同名重载候选经 trialSig 试解消歧，
     // 选中签名记入 inferred.sig 供 hover 显示
     private inferCall(term: Term) {
-        const sig0 = this.pickSig(this.callCandidates(term), term.args)
-        if (!sig0) {
+        const picked = this.pickSig(this.callCandidates(term), term.args)
+        if (!picked) {
             // 高阶变量调用：形如 (P, V0, V) 的应用节点（(f, a1, a2, ...) 中 f 是持有谓词/函数值的变量），
             // 解析树里表现为 nameArity = "(/N)" 且 args[0] 是变量。
             // 不能当普通数据 functor 推断，否则会把 P 误标成数据项、把实参 V0/V 推成 fresh 未知类型，
@@ -1736,6 +1751,7 @@ export class Visitor {
             this.inferFunctor(term)
             return
         }
+        const sig0 = picked.sig
         const sig = this.freshenSig(sig0)
         this.inferSignatureArgs(term.args, sig)
         this.inferred.set(term, {
@@ -1755,7 +1771,37 @@ export class Visitor {
             return false
         }
         this.subst = trial
+        // 提交成功 = 类型变量有新绑定 → 唤醒 frozen 队列里的延迟消歧目标；
+        // 试解（trialSig）期间状态是克隆的，不算真实进展，不触发
+        if (this.inTrialDepth === 0) this.drainFrozen()
         return true
+    }
+    // drain frozen 队列：goal 返回 true 移除，false 保留等下次绑定。
+    // 循环到无进展为止（一个 goal 的重试可能绑定新变量、级联唤醒其它 goal）；
+    // goal 内部抛错视为放弃该项，防止坏约束卡死队列
+    private drainFrozen() {
+        if (this.drainingFrozen) return
+        this.drainingFrozen = true
+        try {
+            for (;;) {
+                let progressed = false
+                for (let i = this.frozen.length - 1; i >= 0; i--) {
+                    let done: boolean
+                    try {
+                        done = this.frozen[i].goal()
+                    } catch {
+                        done = true
+                    }
+                    if (done) {
+                        this.frozen.splice(i, 1)
+                        progressed = true
+                    }
+                }
+                if (!progressed || this.frozen.length === 0) break
+            }
+        } finally {
+            this.drainingFrozen = false
+        }
     }
     // 统一目标：rhs 类型需与 lhs 一致；lhs 若已有具体类型（来自头签名）则约束 rhs。
     // 首次出现在绑定位置的变量记子句级 mode out（head 形参已在 inferHead 标记，不会被覆盖）
@@ -1888,7 +1934,8 @@ export class Visitor {
         return this.freshenType(applySubst(ti.body, subst), new Map())
     }
     // 数据位置 functor：用 expected 类型与签名消歧 构造子/函数；重载且类型无法唯一确定时保持无类别
-    private inferFunctor(term: Term, expected?: MerType): MerType {
+    // allowFreeze=false 用于 frozen 重试：重试仍失败时不再重复挂起（goal 自己控制重试节奏）
+    private inferFunctor(term: Term, expected?: MerType, allowFreeze = true): MerType {
         const name = term.name
         const arity = term.arity
         const expCtor = expected && expected.kind === 'ctor' ? expected.ctor : undefined
@@ -1915,7 +1962,7 @@ export class Visitor {
         const hasOwnFunc = (!term.qualified || selfQ)
             && this.altsOf(this.funcAlts, name, term.semanticArity, term.arity).length > 0
         let fComputed = false
-        let fCache: FuncInfo | undefined
+        let fCache: { sig: FuncInfo; verified: boolean } | undefined
         const pickFunc = () => {
             if (!fComputed) { fCache = this.pickSig(funcCands, term.args); fComputed = true }
             return fCache
@@ -1940,7 +1987,7 @@ export class Visitor {
         let chosenFunc: FuncInfo | undefined
         // 限定名 M.f(...)（外部模块）：func 候选只来自目标模块（重载经 pickSig
         // 试解消歧）；无 func 候选时落入下方构造子消歧
-        const qualPick = term.qualified && !selfQ ? pickFunc() : undefined
+        const qualPick = term.qualified && !selfQ ? pickFunc()?.sig : undefined
         if (qualPick) {
             chosenFunc = qualPick
             useFunc(qualPick)
@@ -1960,26 +2007,29 @@ export class Visitor {
             }
             const f = pickFunc()
             if (!chosenCI && f) {
-                chosenFunc = f
-                useFunc(f)
+                chosenFunc = f.sig
+                useFunc(f.sig)
             }
         } else {
             // 类型未知：本模块符号优先消歧；跨模块 func 仅在实参类型经试解唯一确定时引入
             //（pickSig 无已知实参类型/并列成功时返回 undefined，不会误标）
             const f = pickFunc()
             if (hasOwnFunc && constrs.length === 0) {
-                if (f) { chosenFunc = f; useFunc(f) }
+                if (f) { chosenFunc = f.sig; useFunc(f.sig) }
             } else if (!hasOwnFunc && constrs.length === 1) {
                 chosenCI = constrs[0]
                 useCI(constrs[0])
-            } else if (hasOwnFunc && constrs.length >= 1 && f && f.argTypes.length === arity) {
-                chosenFunc = f
-                useFunc(f)
-            } else if (!hasOwnFunc && constrs.length === 0 && f && !this.hasCrossConstrs(name, arity)) {
-                // 跨模块 func 候选：仅当实参类型经试解唯一确定、且不存在同名同元数的
-                // 跨模块构造子时才采信——否则 func/构造子歧义，保持无类别（与 linker 兜底一致）
-                chosenFunc = f
-                useFunc(f)
+            } else if (hasOwnFunc && constrs.length >= 1 && f && f.sig.argTypes.length === arity) {
+                chosenFunc = f.sig
+                useFunc(f.sig)
+            } else if (!hasOwnFunc && constrs.length === 0 && f
+                && (f.verified || !this.hasCrossConstrs(name, arity))) {
+                // 跨模块 func 候选：实参类型经试解唯一确定（verified）时采信，
+                // 即使存在同名同元数的跨模块构造子——实参类型是更强的证据
+                //（如 int 实参的 `H0 - H` 应选 int.- 而非 pair 的 `-` 构造子）；
+                // 未经试解验证（单候选+实参未知）且存在跨模块构造子时才保守不标
+                chosenFunc = f.sig
+                useFunc(f.sig)
             }
             // 其余（多构造子无 func、func+构造子但参数元数不符）无法消歧 → 留无类别
         }
@@ -1996,6 +2046,34 @@ export class Visitor {
             this.inferTerm(term.args[i], argTypes[i])
         }
         this.inferred.set(term, { type: resultType, category, sig: chosenFunc })
+        // freeze：信息不足导致的消歧失败（如 stream/4 双构造子、重载 func 实参未知），
+        // 登记延迟目标——等结果类型被后续 goal 绑定（或实参类型有新进展）时重跑消歧。
+        // 等价于 Mercury freeze/2：变量绑定时唤醒挂起目标。
+        // 注意跨模块构造子在无类型上下文时不进 constrs（见上方 expCtor 收集条件），
+        // 必须用 hasCrossConstrs 补上——否则构造子全在导入模块里时根本不挂起
+        if (allowFreeze && !chosenCI && !chosenFunc
+            && (constrs.length > 0 || funcCands.length > 0 || this.hasCrossConstrs(name, arity))) {
+            let lastScore = -1
+            this.frozen.push({
+                goal: () => {
+                    const resolved = applySubst(resultType, this.subst)
+                    const expectedT = resolved.kind === 'ctor' ? this.resolveSynonym(resolved) : undefined
+                    const knownArgs = term.args.reduce((n, a) => {
+                        const t = this.quickArgType(a)
+                        return n + (t && t.kind !== 'var' ? 1 : 0)
+                    }, 0)
+                    // 进展分：结果类型落地权重最高；实参已知类型数次之。
+                    // 分数不变说明自上次重试没有新信息，跳过昂贵的重载试解
+                    const score = (expectedT ? 1 << 20 : 0) + knownArgs
+                    if (score === lastScore) return false
+                    lastScore = score
+                    if (!expectedT && knownArgs === 0) return false
+                    this.inferFunctor(term, expectedT, false)
+                    const after = this.inferred.get(term)
+                    return !!(after?.category ?? after?.sig)
+                },
+            })
+        }
         return resultType
     }
     // 高阶表达式：func(Head) = Result | (pred(Head) is Det) | 带 :- Body 的闭包。
@@ -2075,6 +2153,12 @@ export class Visitor {
         if (st === 'integer') return mk('int')
         if (st === 'float') return mk('float')
         if (st === 'string') return mk('string')
+        // 复合项/函子：读已推断的类型（真实推断阶段写入），用于 hasKnown 与 frozen 进展检测
+        const inferred = this.inferred.get(term)
+        if (inferred?.type) {
+            const t = applySubst(inferred.type, this.subst)
+            return t.kind === 'var' ? undefined : t
+        }
         return undefined
     }
     private countTypeVars(t: MerType): number {
@@ -2086,15 +2170,20 @@ export class Visitor {
     // 提交性合一全部成功才算可行——这是真正的合一判定，复合实参、共享类型变量、
     // 结果类型约束都自然覆盖，不是启发式打分。多个候选都成功时取类型变量最少者
     //（最具体的签名）；仍并列或全失败则返回 undefined（不猜，保持无类别）。
-    private pickSig(cands: FuncInfo[], args: Term[]): FuncInfo | undefined {
+    // 返回 verified=true 表示该签名经过完整试解且唯一胜出（实参类型确实支持它）；
+    // verified=false 仅出现在「单候选 + 实参类型全未知」的弱返回——调用方在
+    // func/构造子歧义场景应据此保持无类别，而不是直接采信
+    private pickSig(cands: FuncInfo[], args: Term[]): { sig: FuncInfo; verified: boolean } | undefined {
         if (cands.length === 0) return undefined
-        if (cands.length === 1) return cands[0]
-        // 没有任何实参带已知类型时，所有候选都会"成功"，试解无意义 → 直接歧义
+        // 没有任何实参带已知类型时，所有候选都会"成功"，试解无意义 → 直接歧义；
+        // 仅单候选时弱返回（不试解），多候选判歧义
         const hasKnown = args.some(a => {
             const t = this.quickArgType(a)
             return !!t && t.kind !== 'var'
         })
-        if (!hasKnown) return undefined
+        if (!hasKnown) {
+            return cands.length === 1 ? { sig: cands[0], verified: false } : undefined
+        }
         // 试算会写 inferred：先快照实参子树的条目，全部试完后回滚，
         // 由胜出候选在正式推断时重新写入（败者的类别/类型不留残渣）
         const argTerms = this.collectArgTerms(args)
@@ -2102,6 +2191,10 @@ export class Visitor {
         for (const t of argTerms) saved.set(t, this.inferred.get(t))
         const successes: { sig: FuncInfo; vars: number }[] = []
         for (const c of cands) {
+            // 廉价预过滤：已知类型的变量实参与候选参数先在草稿 subst 上合一，
+            // 失败的候选必然过不了完整试解（inferTerm 对变量实参做的就是同样
+            // 的 unify），省掉克隆状态+重推实参的开销（+/-/* 等十余个重载时显著）
+            if (!this.precheckSig(c, args)) continue
             if (this.trialSig(c, args)) {
                 successes.push({ sig: c, vars: c.argTypes.reduce((s, a) => s + this.countTypeVars(a), 0) })
             }
@@ -2113,7 +2206,7 @@ export class Visitor {
         if (successes.length === 0) return undefined
         successes.sort((a, b) => a.vars - b.vars)
         if (successes.length > 1 && successes[1].vars === successes[0].vars) return undefined
-        return successes[0].sig
+        return { sig: successes[0].sig, verified: true }
     }
     // 收集实参子树的全部 Term 节点（pickSig 的 inferred 快照/回滚用）
     private collectArgTerms(args: Term[]): Term[] {
@@ -2125,23 +2218,60 @@ export class Visitor {
         for (const a of args) walk(a)
         return out
     }
+    // pickSig 的廉价预检：只对「变量/状态变量且类型已知」的实参做 unify 试探
+    // （inferTerm 对这类实参的失败条件与此相同）；字面量实参在 inferTerm 里
+    // 不与形参类型合一、复合项类型未知，都跳过不判。全部在草稿 subst 上进行，
+    // 不提交任何绑定；任一已知实参合一失败 → 该候选不可能成功。
+    private precheckSig(sig: FuncInfo, args: Term[]): boolean {
+        const s = this.freshenSig(sig)
+        const scratch = new Map(this.subst)
+        let ti = 0
+        for (const arg of args) {
+            const param = s.argTypes[ti]
+            if (param !== undefined
+                && (isVariable(arg) || ['!/1', '!./1', '!:/1'].includes(arg.nameArity))) {
+                const known = this.quickArgType(arg)
+                if (known && known.kind !== 'var' && !unify(known, param, scratch)) return false
+            }
+            ti += this.argWidth(arg)
+        }
+        return true
+    }
     // 候选签名试解：克隆 subst/varTypes/varMode 后完整推一遍实参，
     // 提交性合一（unifyFailed 计数）全过才算可行；状态用后恢复，
-    // 由胜出候选在正式路径重跑一次提交结果
+    // 由胜出候选在正式路径重跑一次提交结果。
+    // 注意 inferTerm 只对「变量实参」做 expected 合一：字面量直接返回固定类型、
+    // 复合项/functor 的结果类型不与形参强制合一——所以这里逐个实参补一次
+    // 「推出类型 vs 形参类型」的合一，否则 uint8.+ 对 `int_expr + 1` 也"成功"，
+    // 所有重载并列 → 判歧义 → hover 回退 funcMap 的任意签名
     private trialSig(sig: FuncInfo, args: Term[]): boolean {
         const sSubst = this.subst, sVarTypes = this.varTypes, sVarMode = this.varMode, sFail = this.unifyFailed
         this.subst = new Map(sSubst)
         this.varTypes = new Map(sVarTypes)
         this.varMode = new Map(sVarMode)
         this.unifyFailed = 0
+        this.inTrialDepth++
         try {
-            this.inferSignatureArgs(args, this.freshenSig(sig))
+            const s = this.freshenSig(sig)
+            const argTypes = s.argTypes.map(a => applySubst(a, this.subst))
+            let ti = 0
+            for (const arg of args) {
+                // 形参类型先展开同义词：inferTerm 内部对变量实参的合一与
+                // 下面的返回类型检查必须用同一展开结果，否则 assoc_list 这类
+                // 同义词形参会被误判不合一
+                const expected = argTypes[ti] && this.resolveSynonym(argTypes[ti])
+                this.markVarMode(arg, s.argModes?.[ti] ?? 'in')
+                const t = this.inferTerm(arg, expected)
+                ti += this.argWidth(arg)
+                if (expected && !this.tryUnify(t, expected)) return false
+            }
             return this.unifyFailed === 0
         } finally {
             this.subst = sSubst
             this.varTypes = sVarTypes
             this.varMode = sVarMode
             this.unifyFailed = sFail
+            this.inTrialDepth--
         }
     }
     // 是否存在同名同元数的跨模块类型构造子（导出索引内）；
