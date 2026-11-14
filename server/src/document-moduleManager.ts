@@ -2,7 +2,7 @@ import { MercuryDocument } from './document-manager'
 // import { moduleMap } from './globalSpace'
 import { MultiMap } from './multimap'
 import { Term } from './term'
-import { FuncInfo, TypeInfo, keyOf, keyOfTypeCtor } from './document-type'
+import { FuncInfo, TypeCtor, TypeInfo, keyOf, keyOfTypeCtor } from './document-type'
 
 
 export class ModuleManager {
@@ -70,12 +70,15 @@ export class ExportManager {
     exportMap = new MultiMap<string, Term>()
     private byDoc = new Map<MercuryDocument, Term[]>()
     // 跨模块类型推断用：类型构造子表 + 函数/谓词签名表
+    // typeMap 键含 module（keyOfTypeCtor）：不同模块的同名类型不再互相覆盖；
+    // typeNameIndex 按裸 name/arity 反查，供未限定引用做唯一模块解析
     private typeMap = new Map<string, TypeInfo>()
+    private typeNameIndex = new Map<string, TypeInfo[]>()
     private funcMap = new Map<string, FuncInfo>()
     // 同名同元数的全部声明签名（重载候选；funcMap/funcs 单值表只存其一）
     private funcAltsMap = new Map<string, FuncInfo[]>()
     private predAltsMap = new Map<string, FuncInfo[]>()
-    private byDocTypes = new Map<MercuryDocument, { typeKeys: string[]; funcKeys: string[]; consKeys: string[] }>()
+    private byDocTypes = new Map<MercuryDocument, { typeKeys: string[]; typeInfos: TypeInfo[]; funcKeys: string[]; consKeys: string[] }>()
     private byDocAlts = new Map<MercuryDocument, { map: 'f' | 'p'; key: string; fi: FuncInfo }[]>()
     // 构造子名/元数 → 出现次数：hasCtor 查询 O(1)，避免每个歧义 functor 全扫 typeMap
     private ctorIndex = new Map<string, number>()
@@ -89,11 +92,17 @@ export class ExportManager {
         for (const t of terms) this.exportMap.add(t.name, t)
         // 结构化签名：供推断跨模块取类型构造子 / 函数签名
         const typeKeys: string[] = []
+        const typeInfos: TypeInfo[] = []
         const consKeys: string[] = []
         for (const ti of vr.types.values()) {
             const k = keyOfTypeCtor(ti.ctor)
             this.typeMap.set(k, ti)
             typeKeys.push(k)
+            typeInfos.push(ti)
+            const nk = keyOf(ti.ctor.name, ti.ctor.arity)
+            const arr = this.typeNameIndex.get(nk)
+            if (arr) arr.push(ti)
+            else this.typeNameIndex.set(nk, [ti])
             for (const ci of ti.constructors) {
                 const ck = keyOf(ci.ctor, ci.arity)
                 this.ctorIndex.set(ck, (this.ctorIndex.get(ck) ?? 0) + 1)
@@ -111,7 +120,7 @@ export class ExportManager {
         }
         for (const fi of vr.funcs.values()) regFunc(fi, 'f', this.funcAltsMap)
         for (const fi of vr.preds.values()) regFunc(fi, 'p', this.predAltsMap)
-        this.byDocTypes.set(doc, { typeKeys, funcKeys, consKeys })
+        this.byDocTypes.set(doc, { typeKeys, typeInfos, funcKeys, consKeys })
         this.byDocAlts.set(doc, altEntries)
     }
     delete(doc: MercuryDocument) {
@@ -123,6 +132,15 @@ export class ExportManager {
         const oldT = this.byDocTypes.get(doc)
         if (oldT) {
             for (const k of oldT.typeKeys) this.typeMap.delete(k)
+            for (const ti of oldT.typeInfos) {
+                const nk = keyOf(ti.ctor.name, ti.ctor.arity)
+                const arr = this.typeNameIndex.get(nk)
+                if (arr) {
+                    const i = arr.indexOf(ti)
+                    if (i >= 0) arr.splice(i, 1)
+                    if (arr.length === 0) this.typeNameIndex.delete(nk)
+                }
+            }
             for (const k of oldT.funcKeys) this.funcMap.delete(k)
             for (const k of oldT.consKeys) {
                 const n = (this.ctorIndex.get(k) ?? 1) - 1
@@ -156,9 +174,15 @@ export class ExportManager {
         })
         return result
     }
-    // 跨模块推断查询
-    lookupType(ctorKey: string): TypeInfo | undefined {
-        return this.typeMap.get(ctorKey)
+    // 跨模块推断查询：ctor.module 已知时精确命中（module.name/arity）；
+    // 未限定引用退回 typeNameIndex——同名类型跨多个模块时视为歧义，不猜
+    lookupType(ctor: TypeCtor): TypeInfo | undefined {
+        const exact = this.typeMap.get(keyOfTypeCtor(ctor))
+        if (exact) return exact
+        if (ctor.module) return undefined
+        const cands = this.typeNameIndex.get(keyOf(ctor.name, ctor.arity)) ?? []
+        const modules = new Set(cands.map(ti => ti.ctor.module ?? ''))
+        return modules.size === 1 ? cands[0] : undefined
     }
     lookupFunc(name: string, arity: number): FuncInfo | undefined {
         return this.funcMap.get(keyOf(name, arity))

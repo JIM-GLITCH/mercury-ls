@@ -1,8 +1,9 @@
 import { Hover, HoverParams, MarkupContent } from 'vscode-languageserver'
-import { semanticNameArityOf } from './utils'
+import { semanticArityOf } from './utils'
 import { search, termRange } from './term'
 import { URI } from 'vscode-uri'
-import { merTypeToString, keyOf } from './document-type'
+import { merTypeToString, keyOf, type FuncInfo, type MerType } from './document-type'
+import { moduleQualifiedName } from './document-moduleManager'
 import type { MercuryServices } from './services'
 
 export async function HoverProvider(services: MercuryServices, params:HoverParams) {
@@ -11,21 +12,63 @@ export async function HoverProvider(services: MercuryServices, params:HoverParam
     let doc = services.documents.getOrCreateDocument(URI.parse(uri));
     let  term  = search(doc.parseResult.value,pos)
     if(!term)
-        return 
+        return
+
+    // func/pred 的签名（含跨模块导出索引兜底）：头部限定名与 type 行共用
+    const sigFi = (term.semanticType === 'func' || term.semanticType === 'pred')
+        ? doc.visitResult?.inferred.get(term)?.sig
+            ?? doc.visitResult?.funcs.get(keyOf(term.name, term.semanticArity))
+            ?? doc.visitResult?.preds.get(keyOf(term.name, term.semanticArity))
+            ?? services.exportManager.lookupFunc(term.name, term.semanticArity)
+        : undefined
+
+    // 符号的限定显示名：能解析出定义模块就带 module 前缀（m.add / io.error）
+    const entityModule = (): string | undefined => {
+        switch (term.semanticType) {
+            case 'func':
+            case 'pred':
+                return sigFi?.module
+            case 'type': {
+                if (term.qualified) return moduleQualifiedName(term.qualified)
+                const arity = term.semanticArity ?? term.arity
+                const local = doc.visitResult?.types.get(keyOf(term.name, arity))
+                if (local) return local.ctor.module
+                return services.exportManager.lookupType({ name: term.name, arity })?.ctor.module
+            }
+            case 'constructor': {
+                if (term.qualified) return moduleQualifiedName(term.qualified)
+                // 构造子结果类型的 ctor.module = 所属类型模块（推断已写入时最准）
+                const t = doc.visitResult?.inferred.get(term)?.type
+                if (t?.kind === 'ctor') return t.ctor.module
+                for (const ti of doc.visitResult?.types.values() ?? []) {
+                    const ci = ti.constructors.find(c => c.ctor === term.name && c.arity === term.arity)
+                    if (ci) return ci.typeCtor.module
+                }
+                return undefined
+            }
+            default:
+                return term.qualified ? moduleQualifiedName(term.qualified) : undefined
+        }
+    }
+    const qname = entityModule()
+    const dispName = qname ? `${qname}.${term.name}` : term.name
+
     let header: string
     if(term.semanticType){
         switch (term.semanticType){
             case 'func':
             case 'pred':
             case 'type':
+            case "constructor":
+                header = `(${term.semanticType}) ${dispName}/${semanticArityOf(term)}`
+                break ;
             case "inst":
             case "mode":
-            case "constructor":
             case "typeclass":
             case "instance":
             case "pragma":
             case "operator":
-                header = `(${term.semanticType}) ${semanticNameArityOf(term)}`
+                header = `(${term.semanticType}) ${term.name}/${semanticArityOf(term)}`
                 break ;
             case 'module':
             case "variable":
@@ -47,7 +90,7 @@ export async function HoverProvider(services: MercuryServices, params:HoverParam
                 header = term.name;
                 break ;
             case 'atom':
-                header = semanticNameArityOf(term);
+                header = `${term.name}/${semanticArityOf(term)}`;
                 break ;
             default :
                 header = term.name;
@@ -60,17 +103,13 @@ export async function HoverProvider(services: MercuryServices, params:HoverParam
     let typeStr: string | undefined
     if (term.semanticType !== 'module') {
         if (term.semanticType === 'func' || term.semanticType === 'pred') {
-            // 优先用推断消歧出的签名（重载 func/pred 按实参类型选中）；
-            // 其次本模块签名；跨模块引用（uint.cast_to_int 等）落全局导出索引
-            const fi = doc.visitResult?.inferred.get(term)?.sig
-                ?? doc.visitResult?.funcs.get(keyOf(term.name, term.semanticArity))
-                ?? doc.visitResult?.preds.get(keyOf(term.name, term.semanticArity))
-                ?? services.exportManager.lookupFunc(term.name, term.semanticArity)
+            const fi = sigFi
             if (fi) {
+                const sigName = fi.module ? `${fi.module}.${fi.name}` : fi.name
                 const args = fi.argTypes.map(merTypeToString).join(', ')
                 const lines = [term.semanticType === 'func'
-                    ? `type ${fi.name}(${args}) = ${fi.resultType ? merTypeToString(fi.resultType) : '?'}`
-                    : `type ${fi.name}(${args})`]
+                    ? `type ${sigName}(${args}) = ${fi.resultType ? merTypeToString(fi.resultType) : '?'}`
+                    : `type ${sigName}(${args})`]
                 const modeLines = doc.visitResult?.modeSigs.get(keyOf(term.name, term.semanticArity)) ?? []
                 if (modeLines.length > 0) {
                     for (const ml of modeLines) {
@@ -82,8 +121,8 @@ export async function HoverProvider(services: MercuryServices, params:HoverParam
                     const refName = (r: { kind: string; name: string }) => r.name
                     const argModes = fi.argModeRefs.map(refName).join(', ')
                     lines.push(term.semanticType === 'func'
-                        ? `mode ${fi.name}(${argModes}) = (${fi.resultModeRef ? refName(fi.resultModeRef) : 'out'})`
-                        : `mode ${fi.name}(${argModes})`)
+                        ? `mode ${sigName}(${argModes}) = (${fi.resultModeRef ? refName(fi.resultModeRef) : 'out'})`
+                        : `mode ${sigName}(${argModes})`)
                 }
                 typeStr = lines.join('\n')
             }
@@ -94,7 +133,8 @@ export async function HoverProvider(services: MercuryServices, params:HoverParam
                 const ci = ti.constructors.find(c => c.ctor === term.name && c.arity === term.arity)
                 if (ci) {
                     const args = ci.argTypes.map(merTypeToString).join(', ')
-                    const head = args ? `${ci.ctor}(${args})` : ci.ctor
+                    const ctorName = ci.typeCtor.module ? `${ci.typeCtor.module}.${ci.ctor}` : ci.ctor
+                    const head = args ? `${ctorName}(${args})` : ctorName
                     typeStr = `type ${head} = ${merTypeToString(ci.resultType)}`
                     break
                 }

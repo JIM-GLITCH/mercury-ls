@@ -57,11 +57,11 @@ describe('type variable instantiation per use', () => {
     expect(t2Body.length).toBeGreaterThan(0)
     for (const t of t1Body) {
       expect((inf.get(t) as any)?.category).toBe('constructor')
-      expect(merTypeToString((inf.get(t) as any).type)).toBe('t(int)')
+      expect(merTypeToString((inf.get(t) as any).type)).toBe('test.t(int)')
     }
     for (const t of t2Body) {
       expect((inf.get(t) as any)?.category).toBe('constructor')
-      expect(merTypeToString((inf.get(t) as any).type)).toBe('t(string)')
+      expect(merTypeToString((inf.get(t) as any).type)).toBe('test.t(string)')
     }
     // Y 应推出 string
     const yBody = collectTerms(doc.parseResult.value, 'Y/0').filter((t: any) => inf.get(t))

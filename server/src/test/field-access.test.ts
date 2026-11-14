@@ -106,8 +106,8 @@ describe('record syntax ^ field specifier → field access function indexing', (
       textDocument: { uri: doc.uri.toString() },
       position: termRange(spec).start,
     } as any)
-    expect(hover?.contents?.value).toContain('(func) elem/2')
-    expect(hover?.contents?.value).toContain('type elem(')
+    expect(hover?.contents?.value).toContain('(func) m.elem/2')
+    expect(hover?.contents?.value).toContain('type m.elem(')
   })
 
   it('also links to the field label `elem :: T` that generates the access functions', async () => {

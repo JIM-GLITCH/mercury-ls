@@ -2,7 +2,10 @@ import { Term } from './term'
 import type { MerModeRef } from './document-mode'
 
 // 类型构造子（对应编译器 type_ctor(sym_name, arity)）
-export type TypeCtor = { name: string; arity: number }
+// module 是点分限定名（io.error 的 io、msi.stream_info 的 msi；嵌套模块 a.b.c
+// 的限定符为 a.b）。undefined 表示未限定引用且未能解析到定义模块（builtin
+// 类型天然无 module），unify 时视为通配——两侧都带 module 且不同才判不匹配
+export type TypeCtor = { name: string; arity: number; module?: string }
 
 // 轻量类型表示（对应编译器 mer_type），仅用于 LSP 级消歧，不含 kind / 类型类约束
 export type MerType =
@@ -38,6 +41,7 @@ export interface ProcMode {
 export interface FuncInfo {
     name: string
     arity: number
+    module?: string       // 定义模块点分名（hover 显示 module.name；跨模块签名经导出索引带出）
     argTypes: MerType[]
     argModes?: (string | undefined)[] // 各参数的 mode（::/>> 显式声明时收集；hover 显示用）
     resultType?: MerType    // func 有返回类型；pred 无
@@ -84,25 +88,34 @@ export interface InferredInfo {
 }
 
 export function keyOfTypeCtor(tc: TypeCtor): string {
-    return tc.name + '/' + tc.arity
+    return (tc.module ? tc.module + '.' : '') + tc.name + '/' + tc.arity
 }
 export function keyOf(name: string, arity: number): string {
     return name + '/' + arity
 }
 
-// 把类型表达式 Term 转换为 MerType。Term 是解析出的类型 AST：
-// 变量 → var；builtin/用户类型 → ctor；高阶 pred/func → ho；列表/元组 → ctor
+// 限定链的点分名：./2 左结合链 args[0] 是限定符、args[1] 是名字；
+// a.b → "a.b"（模块名各段都是原子）。与 document-moduleManager 的
+// moduleQualifiedName 输出格式一致，但不依赖 visit 设置的 .qualified 字段
+function dottedQualifier(term: Term): string {
+    return term.nameArity === './2'
+        ? `${dottedQualifier(term.args[0])}.${term.args[1].name}`
+        : term.name
+}
+
 // 类型名项拆解：./2 是左结合链（a.b.c = '.''('.'(a,b),c)），最内层元素
-// 是类型头（原子或 error(T) 应用项），前面的都是限定符——既可是模块名
+// 是类型头（原子或 error(T) 应用项），args[0] 一侧是限定符——既可是模块名
 // （msi.stream_info 引用 msi 模块的 stream_info），也可是类型名的命名空间
-// （io.error）。两侧统一取最内层名字：全局类型索引本来就按非限定名登记，
-// 拼前缀会让 msi.stream_info 与声明的 stream_info 对不上
-export function typeHeadParts(term: Term): { name: string; arity: number; args: Term[] } {
+// （io.error）。qualifier 保留限定符点分名，由调用方决定如何解析为 module；
+// 声明侧（beginTypeInfo）与引用侧（termToMerType）必须都走这里
+export function typeHeadParts(term: Term): { name: string; arity: number; args: Term[]; qualifier?: string } {
     let head = term
-    // 左结合链：沿 args[0] 一直走到最内层，args[1] 是该层名字——
-    // 等价于逐层取右边：a.b.c 的最内层 head 是 c
+    // 左结合链：沿 args[1] 一直走到最内层（最外层 ./2 的 args[1] 是类型头）
     while (head.nameArity === './2') head = head.args[1]
-    return { name: head.name, arity: head.arity, args: head.args }
+    return {
+        name: head.name, arity: head.arity, args: head.args,
+        qualifier: term.nameArity === './2' ? dottedQualifier(term.args[0]) : undefined,
+    }
 }
 
 export function termToMerType(term: Term): MerType {
@@ -147,10 +160,15 @@ export function termToMerType(term: Term): MerType {
     if (name === 'pred' || name === 'predicate') {
         return { kind: 'ho', pf: 'pred', args: term.args.map(termToMerType) }
     }
-    // 限定类型名 Module.Type / a.b.c：typeHeadParts 还原点分名（io.error），
-    // 与类型声明处登记的 ctor 名一致；未限定时行为与原来相同
+    // 限定类型名 Module.Type / a.b.c：typeHeadParts 还原点分名与限定符，
+    // ctor.module 记限定符（io.error → module 'io'）；未限定时 module 留空，
+    // 由调用方（Visitor.toMerType）按本模块/导出索引解析补齐
     const parts = typeHeadParts(term)
-    return { kind: 'ctor', ctor: { name: parts.name, arity: parts.arity }, args: parts.args.map(termToMerType) }
+    return {
+        kind: 'ctor',
+        ctor: { name: parts.name, arity: parts.arity, module: parts.qualifier },
+        args: parts.args.map(termToMerType),
+    }
 }
 
 // MerType → 可读字符串（用于 hover 展示变量/项的类型）。
@@ -163,9 +181,11 @@ export function merTypeToString(t: MerType): string {
                 // ?N 是推断 fresh 变量 → unknown；T#n 是实例化后的声明类型变量，
                 // 剥掉 #n 后缀还原显示为 T（见 document-visitor freshenType）
                 return /^\?\d+$/.test(ty.name) ? 'unknown' : ty.name.replace(/#\d+$/, '')
-            case 'ctor':
-                if (ty.args.length === 0) return ty.ctor.name
-                return `${ty.ctor.name}(${ty.args.map(render).join(', ')})`
+            case 'ctor': {
+                const cn = ty.ctor.module ? `${ty.ctor.module}.${ty.ctor.name}` : ty.ctor.name
+                if (ty.args.length === 0) return cn
+                return `${cn}(${ty.args.map(render).join(', ')})`
+            }
             case 'ho': {
                 const args = ty.args.map(render).join(', ')
                 return ty.pf === 'func'
@@ -240,6 +260,9 @@ export function unify(a: MerType, b: MerType, subst: Map<string, MerType>): bool
     }
     if (a2.kind === 'ctor' && b2.kind === 'ctor') {
         if (a2.ctor.name !== b2.ctor.name || a2.ctor.arity !== b2.ctor.arity) return false
+        // 同名类型消歧：两侧都解析出模块且不同 → 不同类型（io.error vs
+        // other.error）；任一侧 module 缺省（未限定/未解析/builtin）按通配放行
+        if (a2.ctor.module && b2.ctor.module && a2.ctor.module !== b2.ctor.module) return false
         for (let i = 0; i < a2.args.length; i++) {
             if (!unify(a2.args[i], b2.args[i], subst)) return false
         }

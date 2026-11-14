@@ -203,13 +203,13 @@ describe('frozen delayed disambiguation', () => {
       // 消歧失败时挂起；insert_stream_info 把 StreamInfo 绑到 stream_info 后
       // 唤醒重跑，应选中 stream_info.stream/4 构造子
       expect(i?.category).toBe('constructor')
-      expect(merTypeToString(i.type)).toBe('stream_info')
+      expect(merTypeToString(i.type)).toBe('msi.stream_info')
     }
     // StreamInfo 变量也应显示 stream_info
     const siTerms = collectTerms(docM.parseResult.value, 'StreamInfo/0').filter((t: any) => inf.get(t))
     expect(siTerms.length).toBeGreaterThan(0)
     for (const t of siTerms) {
-      expect(merTypeToString((inf.get(t) as any).type)).toBe('stream_info')
+      expect(merTypeToString((inf.get(t) as any).type)).toBe('msi.stream_info')
     }
   })
 
@@ -249,12 +249,12 @@ describe('frozen delayed disambiguation', () => {
     for (const t of streamTerms) {
       const i = inf.get(t) as any
       expect(i?.category).toBe('constructor')
-      expect(merTypeToString(i.type)).toBe('stream_info')
+      expect(merTypeToString(i.type)).toBe('msi2.stream_info')
     }
     const siTerms = collectTerms(docM.parseResult.value, 'StreamInfo/0').filter((t: any) => inf.get(t))
     expect(siTerms.length).toBeGreaterThan(0)
     for (const t of siTerms) {
-      expect(merTypeToString((inf.get(t) as any).type)).toBe('stream_info')
+      expect(merTypeToString((inf.get(t) as any).type)).toBe('msi2.stream_info')
     }
   })
 
@@ -287,7 +287,7 @@ describe('frozen delayed disambiguation', () => {
     for (const t of streamTerms) {
       const i = inf.get(t) as any
       expect(i?.category).toBe('constructor')
-      expect(merTypeToString(i.type)).toBe('stream_info')
+      expect(merTypeToString(i.type)).toBe('msyn.stream_info')
     }
   })
 

@@ -1455,10 +1455,10 @@ describe('hover shows inferred types', () => {
       position: termRange(addRef).start,
     } as any)
     const value: string = (hover!.contents as any).value
-    expect(value).toContain('(func) add/2')
+    expect(value).toContain('(func) m.add/2')
     // 第二行：type + 类型签名（不带 mode）；第三行：mode + mode 声明
-    expect(value).toContain('type add(int, int) = int')
-    expect(value).toContain('mode add(in, in) = (out)')
+    expect(value).toContain('type m.add(int, int) = int')
+    expect(value).toContain('mode m.add(in, in) = (out)')
     expect(value).not.toContain('::')
   })
 
@@ -1483,13 +1483,13 @@ describe('hover shows inferred types', () => {
     }
     // 类型行 + mode 行（复合 mode in(i_node) 原样渲染；mode 行带 determinism）
     const q = await hoverOf('q/1')
-    expect(q).toContain('(pred) q/1')
-    expect(q).toContain('type q(int)')
-    expect(q).toContain('mode q(in(i_node)) is det')
+    expect(q).toContain('(pred) m.q/1')
+    expect(q).toContain('type m.q(int)')
+    expect(q).toContain('mode m.q(in(i_node)) is det')
     const f = await hoverOf('f/1')
-    expect(f).toContain('(func) f/1')
-    expect(f).toContain('type f(int) = int')
-    expect(f).toContain('mode f(in) = (out) is det')
+    expect(f).toContain('(func) m.f/1')
+    expect(f).toContain('type m.f(int) = int')
+    expect(f).toContain('mode m.f(in) = (out) is det')
   })
 
   it('shows owning type in constructor hover', async () => {
@@ -1512,9 +1512,9 @@ describe('hover shows inferred types', () => {
       return (h!.contents as any).value as string
     }
     // 构造子签名：参数 = 结果类型（所属类型）
-    expect(await hoverOf('node/2')).toContain('type node(T, tree(T)) = tree(T)')
+    expect(await hoverOf('node/2')).toContain('type m.node(T, m.tree(T)) = m.tree(T)')
     // 零元构造子不带空括号
-    expect(await hoverOf('u/0')).toContain('type u = unit')
+    expect(await hoverOf('u/0')).toContain('type m.u = m.unit')
   })
 
   it('infers variable types inside if-then-else branches from head signature', async () => {
@@ -1678,8 +1678,8 @@ describe('hover shows inferred types', () => {
       position: termRange(ctTerm).start,
     } as any)
     const value: string = (hover!.contents as any).value
-    expect(value).toContain('type cast_to_int(uint) = int')
-    expect(value).toContain('mode cast_to_int(in) = (out)')
+    expect(value).toContain('type uint.cast_to_int(uint) = int')
+    expect(value).toContain('mode uint.cast_to_int(in) = (out)')
   })
 
   it('binds a function result variable from a qualified output call', async () => {
@@ -1760,7 +1760,7 @@ describe('hover shows inferred types', () => {
     const vr = doc.visitResult
     // hover modeSigs：显式声明替换默认行（默认 in,in,in 是无注解 pred 声明的推断，不再显示）
     const sigs = vr.modeSigs.get('lookup/3') ?? []
-    expect(sigs).toEqual(['lookup(in, in, out) is det'])
+    expect(sigs).toEqual(['m.lookup(in, in, out) is det'])
     // 签名 argModeRefs 覆盖为声明值（mode checker 调用检查随之使用 in,in,out）
     expect(vr.preds.get('lookup/3')?.argModeRefs).toEqual([
       { kind: 'builtin', name: 'in', args: [] },
@@ -1880,7 +1880,7 @@ describe('hover shows inferred types', () => {
     const doc = await mk(src, 'update-head-type')
     const kvs = [...doc.visitResult.inferred.entries()].filter(([t]: any) => t.name === 'KVs')
     const kvTypes = kvs.map(([, info]: any) => merTypeToString(info.type))
-    expect(kvTypes).toContain('assoc_list(K, V)')
+    expect(kvTypes).toContain('assoc_list.assoc_list(K, V)')
   })
 
   it('qualified calls resolve signatures from the qualified module (mode checker)', async () => {

@@ -861,7 +861,7 @@ export class Visitor {
             this.visitTypeRef(term.args[1])
             const info = this.beginTypeInfo(term.args[0])
             // 记录底层类型，供推断时展开同义词（如 assoc_list(K,V) == list(pair(K,V))）
-            info.body = termToMerType(term.args[1])
+            info.body = this.toMerType(term.args[1])
             this.addTypeInfo(info)
         }
         // 纯子类型声明（无 ---> 构造子体）： type T =< Super.
@@ -892,10 +892,15 @@ export class Visitor {
     // 开始收集一个类型定义，返回 TypeInfo（构造子通过 currentType 追加）
     private beginTypeInfo(typeHead: Term): TypeInfo {
         // 类型名可能是限定名（io.error 的 ./2 链）：typeHeadParts 还原点分名
-        // 与参数项，否则 ctor 会记成 '. '/2、参数错把限定符当类型参数
+        // 与限定符，否则 ctor 会记成 '. '/2、参数错把限定符当类型参数。
+        // module 取限定符（显式限定声明），否则取当前模块名——同一模块里的
+        // 类型在导出索引里以 module.name/arity 登记，消除跨模块同名冲突
         const parts = typeHeadParts(typeHead)
-        const tc: TypeCtor = { name: parts.name, arity: parts.arity }
-        const info: TypeInfo = { ctor: tc, params: parts.args.map(termToMerType), constructors: [] }
+        const tc: TypeCtor = {
+            name: parts.name, arity: parts.arity,
+            module: parts.qualifier ?? this.localModuleName(),
+        }
+        const info: TypeInfo = { ctor: tc, params: parts.args.map(a => this.toMerType(a)), constructors: [] }
         this.currentType = info
         return info
     }
@@ -903,8 +908,51 @@ export class Visitor {
         this.addTypeInfo(info)
         this.currentType = undefined
     }
+    // 本模块点分名（module a.b. → 'a.b'）；无 module 声明时 undefined
+    private localModuleName(): string | undefined {
+        return this.module ? moduleQualifiedName(this.module) : undefined
+    }
     private addTypeInfo(info: TypeInfo) {
-        this.types.set(keyOfTypeCtor(info.ctor), info)
+        // 本模块表按裸 name/arity 键（模块内不可能同名同元数重复定义）；
+        // ctor.module 仍记录模块名，导出索引（ExportManager）用 qualified 键
+        this.types.set(keyOf(info.ctor.name, info.ctor.arity), info)
+    }
+    // Term → MerType 并补齐 ctor.module：termToMerType 只解出显式限定符，
+    // 未限定引用在这里按「本模块声明优先 → 全局导出索引唯一命中」解析
+    private toMerType(term: Term): MerType {
+        return this.resolveMerModules(termToMerType(term))
+    }
+    private resolveMerModules(t: MerType): MerType {
+        if (t.kind === 'var') return t
+        if (t.kind === 'ho') {
+            return {
+                ...t,
+                args: t.args.map(a => this.resolveMerModules(a)),
+                result: t.result ? this.resolveMerModules(t.result) : undefined,
+            }
+        }
+        const ctor = t.ctor.module ? t.ctor : { ...t.ctor, module: this.typeModuleOf(t.ctor) }
+        return { kind: 'ctor', ctor, args: t.args.map(a => this.resolveMerModules(a)) }
+    }
+    // 未限定类型引用 → 定义模块名：本模块已声明的优先（遮蔽导入），
+    // 否则查全局导出索引；跨模块同名歧义或 builtin 时返回 undefined
+    private typeModuleOf(ctor: TypeCtor): string | undefined {
+        // 正在声明的类型自身（递归引用如 node(T, tree(T))）：尚未入 this.types
+        const ct = this.currentType
+        if (ct && ct.ctor.name === ctor.name && ct.ctor.arity === ctor.arity) {
+            return ct.ctor.module ?? this.localModuleName()
+        }
+        const local = this.types.get(keyOf(ctor.name, ctor.arity))
+        if (local) return local.ctor.module ?? this.localModuleName()
+        return this.exportManager.lookupType(ctor)?.ctor.module
+    }
+    // 本模块类型查询：限定名只匹配同模块声明（ctor.module 与本模块名一致），
+    // 未限定名按 name/arity 命中本模块表
+    private localTypeInfo(ctor: TypeCtor): TypeInfo | undefined {
+        const ti = this.types.get(keyOf(ctor.name, ctor.arity))
+        if (!ti) return undefined
+        if (ctor.module && ti.ctor.module && ctor.module !== ti.ctor.module) return undefined
+        return ti
     }
     visitTypeConstrutors(term: Term) {
         let list = stream(semicolonBinaryTermToList(term))
@@ -932,7 +980,7 @@ export class Visitor {
             }
             const ci: ConsInfo = {
                 ctor: term.name, arity: term.arity,
-                argTypes: term.args.map(a => termToMerType(a)),
+                argTypes: term.args.map(a => this.toMerType(a)),
                 resultType, typeCtor: this.currentType.ctor,
             }
             this.currentType.constructors.push(ci)
@@ -1234,7 +1282,7 @@ export class Visitor {
         }
         const det = determinism ? ` is ${determinism}` : ''
         this.pushModeSigReplacingDefault(
-            key, `${head.name}(${head.args.map(a => this.modeArgToString(a)).join(', ')})${det}`)
+            key, `${this.qualDisplayName(head.name)}(${head.args.map(a => this.modeArgToString(a)).join(', ')})${det}`)
     }
     // func-mode 声明 `:- mode f(Modes) = (Mode) [is Det].`
     visitFuncMode(term: Term, determinism?: string) {
@@ -1255,8 +1303,13 @@ export class Visitor {
         }
         const det = determinism ? ` is ${determinism}` : ''
         this.pushModeSigReplacingDefault(
-            key, `${head.name}(${head.args.map(a => this.modeArgToString(a)).join(', ')})` +
+            key, `${this.qualDisplayName(head.name)}(${head.args.map(a => this.modeArgToString(a)).join(', ')})` +
         ` = (${this.modeArgToString(term.args[1])})${det}`)
+    }
+    // 签名/mode 行的限定显示名：module.name（无 module 声明时裸名）
+    private qualDisplayName(name: string, module?: string): string {
+        const m = module ?? this.localModuleName()
+        return m ? `${m}.${name}` : name
     }
     // mode 声明参数 → 展示串（in / array_ui / in(node)）
     private modeArgToString(t: Term): string {
@@ -1394,10 +1447,10 @@ export class Visitor {
         const retRef = ret ? this.retModeRefOf(ret) : undefined
         const key = keyOf(func.name, func.semanticArity)
         const info: FuncInfo = {
-            name: func.name, arity: func.semanticArity,
-            argTypes: this.shareTypeParams(func.args.map(a => termToMerType(a))),
+            name: func.name, arity: func.semanticArity, module: this.localModuleName(),
+            argTypes: this.shareTypeParams(func.args.map(a => this.toMerType(a))),
             argModes: argModesOf(func.args),
-            resultType: ret ? this.shareTypeParams([termToMerType(ret)])[0] : undefined,
+            resultType: ret ? this.shareTypeParams([this.toMerType(ret)])[0] : undefined,
             resultMode: ret ? modeOfArg(ret) : undefined,
             argModeRefs: argRefs,
             resultModeRef: retRef,
@@ -1413,15 +1466,15 @@ export class Visitor {
         const modes = func.args.map(modeOfArg).map(m => m ?? 'in')
         const rm = ret ? modeOfArg(ret) ?? 'out' : 'out'
         const det = determinism ? ` is ${determinism}` : ''
-        this.pushModeSig(keyOf(func.name, func.semanticArity), `${func.name}(${modes.join(', ')}) = (${rm})${det}`)
+        this.pushModeSig(keyOf(func.name, func.semanticArity), `${this.qualDisplayName(func.name)}(${modes.join(', ')}) = (${rm})${det}`)
     }
     // 记录谓词签名（name/arity → 参数类型/mode；谓词无返回类型）
     private recordPredInfo(pred: Term, determinism?: string) {
         const argRefs = pred.args.map(a => this.argModeRefOf(a))
         const key = keyOf(pred.name, pred.semanticArity)
         const info: FuncInfo = {
-            name: pred.name, arity: pred.semanticArity,
-            argTypes: this.shareTypeParams(pred.args.map(a => termToMerType(a))),
+            name: pred.name, arity: pred.semanticArity, module: this.localModuleName(),
+            argTypes: this.shareTypeParams(pred.args.map(a => this.toMerType(a))),
             argModes: argModesOf(pred.args),
             argModeRefs: argRefs,
             hasExplicitModes: this.hasExplicitModes(pred.args),
@@ -1433,7 +1486,7 @@ export class Visitor {
         this.pushAlt(this.predAlts, key, info)
         const modes = pred.args.map(modeOfArg).map(m => m ?? 'in')
         const det = determinism ? ` is ${determinism}` : ''
-        this.pushModeSig(keyOf(pred.name, pred.semanticArity), `${pred.name}(${modes.join(', ')})${det}`)
+        this.pushModeSig(keyOf(pred.name, pred.semanticArity), `${this.qualDisplayName(pred.name)}(${modes.join(', ')})${det}`)
     }
     // :- mode I == Init >> Final 结构化入库（Phase A）；mode 别名 `I == Body`（Body 是单个
     // mode 引用，如 array.m 的 `:- mode array_uo == out(uniq_array).`）记 alias 引用，
@@ -1784,8 +1837,8 @@ export class Visitor {
         let cur = t
         for (let i = 0; i < 8; i++) {
             if (cur.kind !== 'ctor') return cur
-            const ti = this.types.get(keyOfTypeCtor(cur.ctor))
-                ?? this.exportManager.lookupType(keyOfTypeCtor(cur.ctor))
+            const ti = this.localTypeInfo(cur.ctor)
+                ?? this.exportManager.lookupType(cur.ctor)
             if (!ti?.body || ti.params.length > 0 || this.countTypeVars(ti.body) > 0) return cur
             cur = ti.body
         }
@@ -1808,7 +1861,7 @@ export class Visitor {
     private watchKey(t: MerType): string {
         const r = applySubst(t, this.subst)
         if (r.kind === 'var') return `v:${r.name}`
-        if (r.kind === 'ctor') return `c:${r.ctor.name}/${r.ctor.arity}`
+        if (r.kind === 'ctor') return `c:${keyOfTypeCtor(r.ctor)}`
         return 'ho'
     }
     // drain frozen 队列：只对 watch 解析键发生变化的 goal 调用 goal()；
@@ -1930,7 +1983,7 @@ export class Visitor {
         // 展开类型同义词：assoc_list(K,V) == list(pair(K,V)) → 取 list 元素类型 pair(K,V)
         if (expected) {
             const resolved = this.resolveSynonym(expected)
-            if (resolved.kind === 'ctor' && resolved.ctor.name === 'list' && resolved.args.length === 1) {
+            if (resolved.kind === 'ctor' && resolved.ctor.name === 'list' && !resolved.ctor.module && resolved.args.length === 1) {
                 elemType = resolved.args[0]
             }
         }
@@ -1962,7 +2015,7 @@ export class Visitor {
     // 本地 this.types 与跨模块 exportManager 都查。非同义词原样返回。
     private resolveSynonym(t: MerType): MerType {
         if (t.kind !== 'ctor') return t
-        const ti = this.types.get(keyOfTypeCtor(t.ctor)) ?? this.exportManager.lookupType(keyOfTypeCtor(t.ctor))
+        const ti = this.localTypeInfo(t.ctor) ?? this.exportManager.lookupType(t.ctor)
         if (!ti || !ti.body) return t
         const subst = new Map<string, MerType>()
         for (let i = 0; i < ti.params.length; i++) {
@@ -1989,7 +2042,7 @@ export class Visitor {
         // 跨模块：类型上下文明确时，纳入导入模块里同名同元数的类型构造子。
         // typeMap 按类型构造子键索引，直接查目标类型即可（原全表扫是 O(类型数)）
         if (expCtor) {
-            const ti = this.exportManager.lookupType(keyOfTypeCtor(expCtor))
+            const ti = this.exportManager.lookupType(expCtor)
             if (ti) collectConstrs(ti)
         }
         // 函数签名候选：限定名只看目标模块；否则本模块声明优先（遮蔽导入），
