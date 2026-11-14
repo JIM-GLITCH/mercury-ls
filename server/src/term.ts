@@ -82,6 +82,8 @@ export interface Term {
      *  语义类型 provide hover时 find definition reference 时用到
      */
     semanticType?: SemanticType
+    /** interface/decl 段的声明项（`:- pred/func/type ...`），与实现子句定义区分 */
+    isDeclaration?: boolean
     /**
      * the clause this term belong to 
      */
@@ -97,6 +99,7 @@ export interface Term {
 export class TermImpl implements Term {
     fieldAccess?: FieldAccessInfo
     semanticType?: SemanticType
+    isDeclaration?: boolean
     semanticArity: number
     nameArity: string
     constructor(TermType: SyntaxType, token: Token, args: Term[] = [], startToken: Token = token, endToken: Token = token, name: string = token.value) {

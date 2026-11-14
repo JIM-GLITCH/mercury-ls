@@ -5,7 +5,7 @@ import { SemanticType } from "./document-visitor"
 import { stream } from './stream'
 import { findDefTerms, findAtTextDocumentPositionTerm, uriTerm } from './provide-definition'
 import { MercuryDocument } from './document-manager'
-import { equalQualified } from './document-moduleManager'
+
 import { URI } from 'vscode-uri'
 import type { MercuryServices } from './services'
 /**
@@ -121,16 +121,11 @@ function uriTermToCallHierarchyOutgoingCall(services: MercuryServices, uriTerm: 
 }
 
 function findModuleOutgoingCalls(services: MercuryServices, { uri, term}:uriTerm): CallHierarchyOutgoingCall[]  {
-    const srcDoc = services.documents.getOrCreateDocument(uri)
-    const srcModule = srcDoc?.visitResult?.module
-    const rel = srcModule ? moduleQualifiedName(srcModule) : undefined
-    let document = services.moduleManager.get(term, rel);
+    let document = services.moduleManager.get(moduleQualifiedName(term));
     if(!document)
         return []
-    // document 是目标模块：其 imports 的相对名以目标模块自身为解析上下文
-    const trel = document.visitResult?.module ? moduleQualifiedName(document.visitResult.module) : undefined
     return stream(document.visitResult?.imports??[])
-        .map(x=>services.moduleManager.get(x, trel)?.visitResult?.module)
+        .map(x=>services.moduleManager.get(x)?.visitResult?.module)
         .nonNullable()
         .map(moduleTerm=>uriTermToCallHierarchyOutgoingCall(services, {uri,term:moduleTerm}))
         .nonNullable().toArray()
@@ -140,13 +135,18 @@ function findModuleIncmoingCalls(services: MercuryServices, uriTerm: { uri: URI;
     let {uri,term} = uriTerm;
     let doc = services.documents.getOrCreateDocument(uri)
     let candidates = doc.importedByDocs
+    const targetName = moduleQualifiedName(term)
     let res =  stream(candidates).map(candidateDoc =>{
         let module = candidateDoc.visitResult?.module
-        if(module){
-            return {
-                from:uriTermToCallHierarchyItem({uri: doc.uri, term:module}),
-                fromRanges:[termTokenRange(doc.visitResult?.imports.find(x=>equalQualified(x,term))!)]
-            }
+        if(!module) return undefined
+        // imports 已是点分字符串组；import 语句的位置从 reference 索引的
+        // 模块引用项取（import/include/use 的模块名都经 addReference 收集）
+        const impTerm = (candidateDoc.visitResult?.reference.get(term.name) ?? [])
+            .find(x => x.semanticType === 'module' && moduleQualifiedName(x) === targetName)
+        if (!impTerm) return undefined
+        return {
+            from:uriTermToCallHierarchyItem({uri: candidateDoc.uri, term:module}),
+            fromRanges:[termTokenRange(impTerm)]
         }
     }).nonNullable()
     return res

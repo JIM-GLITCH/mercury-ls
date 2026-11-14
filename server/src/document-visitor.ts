@@ -32,9 +32,13 @@ export type VisitResult = {
     typeReference: MultiMap<string, Term>,
     instReference: MultiMap<string, Term>,
     modeReference: MultiMap<string, Term>,
-    declaration: MultiMap<string, Term>,
+    // 定义表：实现子句头（addDefinition）与 interface/decl 声明项（addDeclaration，
+    // term.isDeclaration=true）合并在一张表，key=name（不含 arity）；
+    // 查询方按 sameArity/semanticType/isDeclaration 过滤
     exports: MultiMap<string, Term>
-    imports: Term[]
+    // import/include/use 的模块点分名（'io.stream_ops'）；include_module 的
+    // 相对名已在 visit 侧补成绝对名。需要源码位置时从 reference 索引找模块项
+    imports: string[]
     // 类型推断基础数据（阶段 0+1 收集，尚未用于 link 消歧）
     types: Map<string, TypeInfo>          // 类型构造子 → 类型定义（含构造子列表）
     funcs: Map<string, FuncInfo>          // 函数签名（name/arity → 参数+返回类型）
@@ -64,7 +68,7 @@ export class Visitor {
         this.exportManager = services?.exportManager ?? new ExportManager()
     }
     module?: Term
-    imports = [] as Term[]
+    imports = [] as string[]
     section?: string
     currentClause!: Clause
     errors: Diagnostic[] = []
@@ -73,7 +77,6 @@ export class Visitor {
     typeReference = new MultiMap<string, Term>()
     instReference = new MultiMap<string, Term>()
     modeReference = new MultiMap<string, Term>()
-    declaration = new MultiMap<string, Term>()
     exports = new MultiMap<string, Term>()
     types = new Map<string, TypeInfo>()
     funcs = new Map<string, FuncInfo>()
@@ -125,7 +128,6 @@ export class Visitor {
             typeReference: this.typeReference,
             instReference: this.instReference,
             modeReference: this.modeReference,
-            declaration: this.declaration,
             exports: this.exports,
             imports: this.imports,
             types: this.types,
@@ -470,9 +472,11 @@ export class Visitor {
         }
     }
     visitPredDef(term: Term) {
-        label(term, "pred")
-        this.addDefinition(term)
-        this.currentClause.callee = term
+        // 限定定义头 `m.p(X) :- ...` 是 ./2 节点：解包后索引，否则 definition['.']
+        const head = this.visitQualifiedTerm(term) ?? term
+        label(head, "pred")
+        this.addDefinition(head)
+        this.currentClause.callee = head
     }
     visitRuleBody(term: Term) {
         switch (term.nameArity) {
@@ -637,16 +641,19 @@ export class Visitor {
 
     visitFuncRuleHead(term: Term) {
         let [func, funcResult] = term.args
-        this.visitFuncDef(func)
+        const head = this.visitFuncDef(func)
         // 定义子句 `F(...) = 表达式` 的右侧是函数体/结果表达式，不是返回类型；
         // 按数据项访问（functor 或数据构造子由 linker 阶段区分），避免误标成 type
         this.visitDataTerm(funcResult)
-        this.currentClause.callee = func
+        this.currentClause.callee = head
     }
     visitFuncDef(func: Term) {
-        const head = this.visitQualifiedTerm(func)
+        // 限定定义头 `m.f(X) = ...` 是 ./2 节点：必须解包后再索引，
+        // 否则 definition 以 '.' 为键、callee 也拿不到 functor 项
+        const head = this.visitQualifiedTerm(func) ?? func
         label(head, "func")
-        this.addDefinition(func)
+        this.addDefinition(head)
+        return head
     }
     visitFuncReturn(funcReturn: Term) {
         // 函数返回值 `= (Type :: Mode)` 与声明参数同构：左侧是类型引用，右侧是 mode 引用。
@@ -1580,7 +1587,8 @@ export class Visitor {
         this.addCalled(term)
     }
     addDeclaration(term: Term) {
-        this.declaration.add(term.name, term)
+        term.isDeclaration = true
+        this.definition.add(term.name, term)
         this.tryAddExport(term)
         this.addCallee(term)
     }
@@ -1594,7 +1602,7 @@ export class Visitor {
         this.exports.add(term.name, term)
     }
     addImport(module: Term) {
-        this.imports.push(module)
+        this.imports.push(moduleQualifiedName(module))
     }
     addError(msg: string, term: Term) {
         this.errors.push(Diagnostic.create(
@@ -2428,6 +2436,16 @@ export class Visitor {
     private isSelfQualified(qualified: string | undefined): boolean {
         return !!(qualified && this.module && qualified === this.localModuleName())
     }
+    // 限定模块名 → 文档：精确名优先；miss 时以本模块名为前缀再试
+    //（module io 里的 stream_ops.f = io.stream_ops.f——相对限定引用）。
+    // 解析上下文在这层而非 moduleManager.get：get 保持纯字符串查找
+    private qualifiedModuleDoc(qualified: string | undefined) {
+        if (!qualified) return undefined
+        const exact = this.moduleManager.get(qualified)
+        if (exact) return exact
+        const self = this.localModuleName()
+        return self ? this.moduleManager.get(`${self}.${qualified}`) : undefined
+    }
     // goal 位置调用的签名候选：限定名只看目标模块；否则本模块声明优先（遮蔽导入），
     // 本模块没有时回退全局导出索引（偏宽，由 pickSig 的实参类型消歧兜底）
     private callCandidates(term: Term): FuncInfo[] {
@@ -2436,7 +2454,7 @@ export class Visitor {
             if (this.isSelfQualified(term.qualified)) {
                 return [...this.altsOf(this.funcAlts, name, sem, alt), ...this.altsOf(this.predAlts, name, sem, alt)]
             }
-            const vr = this.moduleManager.get(term.qualified, this.localModuleName())?.visitResult
+            const vr = this.qualifiedModuleDoc(term.qualified)?.visitResult
             if (!vr) return []
             return [...this.altsOf(vr.funcAlts, name, sem, alt), ...this.altsOf(vr.predAlts, name, sem, alt)]
         }
@@ -2452,7 +2470,7 @@ export class Visitor {
                 // 自限定：只看本模块声明，不回退导出索引（限定名不该看到 import 的符号）
                 return this.altsOf(this.funcAlts, name, sem, alt)
             }
-            const vr = this.moduleManager.get(term.qualified, this.localModuleName())?.visitResult
+            const vr = this.qualifiedModuleDoc(term.qualified)?.visitResult
             return vr ? this.altsOf(vr.funcAlts, name, sem, alt) : []
         }
         const own = this.altsOf(this.funcAlts, name, sem, alt)
@@ -2519,7 +2537,7 @@ export class Visitor {
                 return this.funcs.get(keyOf(name, a)) ?? this.funcs.get(keyOf(name, aAlt))
                     ?? this.preds.get(keyOf(name, a)) ?? this.preds.get(keyOf(name, aAlt))
             }
-            const doc = this.moduleManager.get(termOrName.qualified, this.localModuleName())
+            const doc = this.qualifiedModuleDoc(termOrName.qualified)
             const sig = doc?.visitResult?.funcs.get(keyOf(name, a)) ?? doc?.visitResult?.funcs.get(keyOf(name, aAlt))
                 ?? doc?.visitResult?.preds.get(keyOf(name, a)) ?? doc?.visitResult?.preds.get(keyOf(name, aAlt))
             if (sig) return sig

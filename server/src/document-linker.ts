@@ -60,13 +60,10 @@ export class DefaultLinker implements Linker{
     // 消解无类别引用的 semanticType：本模块 + import 模块（限定名则为目标模块）
     // 中同名同元数的定义/声明，全部候选类别一致时返回该类别
     private resolveRefKind(ref: Term, name: string, vr: VisitResult): SemanticType | undefined {
-        let candidates = [
-            ...vr.definition.get(name),
-            ...vr.declaration.get(name),
-        ]
+        // definition 表已合并 decl/def（decl 项带 isDeclaration 标记）
+        let candidates = [...vr.definition.get(name)]
         if (ref.qualified) {
-            const rel = vr.module ? moduleQualifiedName(vr.module) : undefined
-            const targetDoc = this.services.moduleManager.get(ref.qualified, rel)
+            const targetDoc = this.services.moduleManager.get(ref.qualified)
             if (targetDoc?.visitResult) {
                 candidates = candidates.concat(this.lookupCandidates(targetDoc.visitResult, name))
             }
@@ -83,7 +80,7 @@ export class DefaultLinker implements Linker{
         return kinds.values().next().value
     }
     private lookupCandidates(vr: VisitResult, name: string): Term[] {
-        return [...vr.definition.get(name), ...vr.declaration.get(name)]
+        return [...vr.definition.get(name)]
     }
     addError(msg: string, term: Term) {
         this.errors.push(Diagnostic.create(

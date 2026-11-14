@@ -81,7 +81,7 @@ function visibleRef(refTerm: Term, termModule: string | undefined, doc: MercuryD
     const vr = doc.visitResult
     if (!vr?.module) return true
     if (moduleQualifiedName(vr.module) === termModule) return true
-    return (vr.imports ?? []).some(imp => moduleQualifiedName(imp) === termModule)
+    return (vr.imports ?? []).some(imp => imp === termModule)
 }
 // 记录语法 `^` 字段说明符的引用名（派生规则见 term.ts 的 FieldAccessInfo）：
 // 在 `^ elem(I)` 上是 elem；在 `'elem :='` 定义上要反推回 elem；

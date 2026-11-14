@@ -17,13 +17,8 @@ export async function DeclarationProvider(services: MercuryServices, params:Decl
         return ;
     }
     
-    // 相对模块名（include_module 子模块 / 相对限定引用）以本文件模块为解析上下文
-    const srcDoc = services.documents.getOrCreateDocument(uriTerm.uri)
-    const srcModule = srcDoc?.visitResult?.module
-    const rel = srcModule ? moduleQualifiedName(srcModule) : undefined
-
     if(semanticType=="module"){
-        let doc = services.moduleManager.get(term, rel);
+        let doc = services.moduleManager.get(moduleQualifiedName(term));
         if(!doc)
             return []
         let defTerm = doc.visitResult!.module!
@@ -32,7 +27,7 @@ export async function DeclarationProvider(services: MercuryServices, params:Decl
     }
     /* 如果有module属性 在 module里查找 */
     if(term.qualified){
-        let doc  =  services.moduleManager.get(term.qualified, rel)
+        let doc  =  services.moduleManager.get(term.qualified)
         if(!doc)
             return [];
         let uri = doc.uri
@@ -46,7 +41,8 @@ export async function DeclarationProvider(services: MercuryServices, params:Decl
     /* 在本文件查找 */
     let uri = uriTerm.uri;
     let doc  = services.documents.getOrCreateDocument(uri);
-    let candidates = doc.visitResult!.declaration.get(term.name);
+    // definition 表合并了 decl/def：declaration 查询只取 isDeclaration 项
+    let candidates = doc.visitResult!.definition.get(term.name).filter(x => x.isDeclaration);
     let res = stream(candidates)
         .filter(x=>sameArity(x,term))
         .map(term=>uriTermToLocation({uri,term}))

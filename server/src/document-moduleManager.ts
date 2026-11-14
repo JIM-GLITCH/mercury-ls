@@ -14,16 +14,8 @@ export class ModuleManager {
     // doc → 其 module 项：invalidate 后 visitResult 被清空，delete 时无法再从
     // visitResult 反查模块名，必须在 set 时记下
     private byDoc = new Map<MercuryDocument, Term>()
-    get(term:Term | string, relativeTo?: string){
-        // 键是点分限定名（'io.stream_ops'）：传 Term 走 moduleQualifiedName
-        // 归一（'./2' 原始链与规范化 .qualified 字符串都正确），
-        // 传字符串（term.qualified）直接用
-        const want = typeof term === 'string' ? term : moduleQualifiedName(term)
-        const hit = this.getExact(want)
-        if (hit || !relativeTo) return hit
-        // 相对模块名兜底：module io 里的 stream_ops / stream_ops.f = io.stream_ops(.f)；
-        // 精确名优先（顶层模块 lists 不会被误解析成 io.lists）
-        return this.getExact(relativeTo + '.' + want)
+    get(moduleName:string){
+        return this.getExact(moduleName)
     }
     private getExact(name:string){
         for (const candidate of this.moduleMap.get(name)) {

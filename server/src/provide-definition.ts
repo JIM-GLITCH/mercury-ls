@@ -61,9 +61,22 @@ export async function TypeDefinitionProvider(services: MercuryServices, params: 
 //     return defterm1.concat(defterm2)
 // }
 function findDefinitionTerm(services: MercuryServices, term:Term,document:MercuryDocument){
+    // 推断消歧结果优先：inferred.sig.module / 推断类型 ctor.module 直接给出
+    // 定义模块——覆盖非限定跨模块调用（imports 逐层找可能落空）与重载消歧；
+    // 推断未跑（非 priority 文档）时为 undefined，回退下面的名字路径
+    const info = document.visitResult?.inferred.get(term)
+    const inferredModule = (term.semanticType === 'func' || term.semanticType === 'pred')
+        ? info?.sig?.module
+        : term.semanticType === 'constructor' && info?.type.kind === 'ctor'
+            ? info.type.ctor.module : undefined
+    if (inferredModule) {
+        const doc = services.moduleManager.get(inferredModule)
+        const defs = doc && findDefTermInThisDocument(term, doc)
+        if (defs && !defs.isEmpty()) return defs
+    }
     // term qualified
     if(term.qualified){
-        let doc =services.moduleManager.get(term.qualified, moduleNameOf(document))
+        let doc =services.moduleManager.get(term.qualified)
         if(!doc) return stream([]);
         let res = findDefTermInThisDocument(term,doc)
         return res
@@ -85,9 +98,13 @@ function findDefTermInThisDocument( term: Term, document: MercuryDocument){
     // 按引用处的 semanticType 限定可匹配的定义类别：
     // 例如 type 引用不应命中同名的 inst / pred / mode 定义
     const defKinds = defKindsForRef(term.semanticType)
-    let res = stream(definition.get(term.name))
+    const matches = definition.get(term.name)
         .filter(x=>sameArity(x,term))
         .filter(x=>!defKinds || defKinds.includes(x.semanticType ?? ''))
+    // 优先实现子句定义；只有声明（interface decl）时回退 decl 项
+    const defs = matches.filter(x => !x.isDeclaration)
+    const pool = defs.length ? defs : matches
+    let res = stream(pool)
         .map(term=>(uriTerm.create(uri,term)))
     return res;
 
@@ -146,18 +163,25 @@ function findDefTermInOtherDocument(services: MercuryServices, term: Term, docum
     }
 
     let res = stream(imports)
-    .map(x => services.moduleManager.get(x, moduleNameOf(document)))
+    .map(x => services.moduleManager.get(x))
     .nonNullable()
     .flatMap(doc=>findDefTermInThisDocument(term,doc))
 
-    return res;
-}
+    // exportManager 兜底：interface 导出的 func/pred 带 module 限定名，
+    // 覆盖 imports 缺失/推断未跑（非 priority 文档 inferred 为空）的场景；
+    // 与 hover 的 lookupFunc 全局兜底同源
+    const exports = services.exportManager.get(term.name)
+    const fromExports = exports
+        ? stream(exports)
+            .filter(x => sameArity(x, term))
+            .flatMap(exp => {
+                const doc = exp.qualified ? services.moduleManager.get(exp.qualified) : undefined
+                return doc ? findDefTermInThisDocument(term, doc) : stream<uriTerm>([])
+            })
+        : stream<uriTerm>([])
 
-// 文档所属模块的点分名：moduleManager.get 的 relativeTo 参数
-//（include_module 相对名 / 相对限定调用的解析上下文）
-function moduleNameOf(doc: MercuryDocument): string | undefined {
-    const m = doc.visitResult?.module
-    return m ? moduleQualifiedName(m) : undefined
+    return res.concat(fromExports)
+        .distinct(u => `${u.uri.toString()}:${termTokenRange(u.term).start.line}:${termTokenRange(u.term).start.character}`);
 }
 
 export interface uriTerm{
@@ -195,9 +219,8 @@ function findFieldAccessDefinitions(
         ? [update, selection, label]
         : [selection, update, label]
     const docs: MercuryDocument[] = [document]
-    const rel = moduleNameOf(document)
     for (const imp of document.visitResult?.imports ?? []) {
-        const doc = services.moduleManager.get(imp, rel)
+        const doc = services.moduleManager.get(imp)
         if (doc && !docs.includes(doc)) docs.push(doc)
     }
     const result: uriTerm[] = []
@@ -212,7 +235,8 @@ function findFieldAccessDefinitions(
         for (const doc of docs) {
             const vr = doc.visitResult
             if (!vr) continue
-            for (const def of [...vr.definition.get(q.name), ...vr.declaration.get(q.name)]) {
+            // definition 表已合并 decl/def
+            for (const def of vr.definition.get(q.name)) {
                 if (semanticArityOf(def) !== q.arity) continue
                 if (!q.kinds.includes(def.semanticType ?? '')) continue
                 push(doc.uri, def)
@@ -257,8 +281,7 @@ export  function findDefTerms(services: MercuryServices, params:uriTerm):Stream<
         }
 
         case 'module':{
-            const rel = moduleNameOf(document)
-            const targetDoc = services.moduleManager.get(term, rel);
+            const targetDoc = services.moduleManager.get(moduleQualifiedName(term));
             if(!targetDoc)
                 return stream([]);
             let module = targetDoc.visitResult?.module

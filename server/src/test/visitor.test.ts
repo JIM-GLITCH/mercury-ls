@@ -74,22 +74,29 @@ function collectTerms(term: any, nameArity: string, acc: any[] = []): any[] {
 
 function definitionsOf(v: Visitor): Map<string, DefEntry[]> {
   const m = new Map<string, DefEntry[]>()
+  // definition 表合并了 decl/def：definitions 视图只取实现定义
   for (const [k, terms] of (v as any).definition.entriesGroupedByKey()) {
-    m.set(
-      k,
-      terms.map((t: any) => ({ nameArity: t.nameArity, semanticType: t.semanticType })),
-    )
+    const defs = terms.filter((t: any) => !t.isDeclaration)
+    if (defs.length) {
+      m.set(
+        k,
+        defs.map((t: any) => ({ nameArity: t.nameArity, semanticType: t.semanticType })),
+      )
+    }
   }
   return m
 }
 
 function declarationsOf(v: Visitor): Map<string, DefEntry[]> {
   const m = new Map<string, DefEntry[]>()
-  for (const [k, terms] of (v as any).declaration.entriesGroupedByKey()) {
-    m.set(
-      k,
-      terms.map((t: any) => ({ nameArity: t.nameArity, semanticType: t.semanticType })),
-    )
+  for (const [k, terms] of (v as any).definition.entriesGroupedByKey()) {
+    const decls = terms.filter((t: any) => t.isDeclaration)
+    if (decls.length) {
+      m.set(
+        k,
+        decls.map((t: any) => ({ nameArity: t.nameArity, semanticType: t.semanticType })),
+      )
+    }
   }
   return m
 }

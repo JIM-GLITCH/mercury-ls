@@ -3,7 +3,7 @@ import { URI } from 'vscode-uri'
 import { Visitor } from '../document-visitor'
 import { createMercuryServices, type MercuryServices } from '../services'
 import { merTypeToString, unify, type MerType } from '../document-type'
-import { termRange, moduleQualifiedName } from '../term'
+import { termRange } from '../term'
 import { scanHeader } from '../document-order'
 
 let services: MercuryServices
@@ -157,7 +157,7 @@ describe('module-qualified type constructors', () => {
       ':- implementation.\n' +
       'p :- do_open_text(A, B, C, D, E, F, G).\n'
     const doc = await mk(src, 'm6')
-    expect(doc.visitResult!.imports.map(moduleQualifiedName)).toContain('io.stream_ops')
+    expect(doc.visitResult!.imports).toContain('io.stream_ops')
     const off = src.indexOf('do_open_text', src.indexOf('implementation'))
     const before = src.slice(0, off)
     const position = {
@@ -192,7 +192,7 @@ describe('module-qualified type constructors', () => {
       ':- implementation.\n' +
       'p :- stream_ops.do_open_text(A, B, C, D, E, F, G).\n'
     const doc = await mk(src, 'io')
-    expect(doc.visitResult!.imports.map(moduleQualifiedName)).toContain('io.stream_ops')
+    expect(doc.visitResult!.imports).toContain('io.stream_ops')
     const defAt = async (needle: string, fromIdx: number) => {
       const off = src.indexOf(needle, fromIdx)
       const before = src.slice(0, off)
@@ -209,6 +209,73 @@ describe('module-qualified type constructors', () => {
     const callLocs = await defAt('do_open_text', src.indexOf('implementation'))
     expect(callLocs.length).toBeGreaterThan(0)
     expect(callLocs[0].uri).toBe(dep.uri.toString())
+  })
+
+  it('unqualified call into include_module submodule jumps via inferred.sig.module', async () => {
+    // 父模块 io include_module(stream_ops)，io.m 里非限定调用
+    // do_open_binary：inferred.sig.module='io.stream_ops' 直接定位定义模块，
+    // 不依赖 imports 逐层查找（真实 io 库场景）
+    const dep = await mk(
+      ':- module io.stream_ops.\n' +
+      ':- interface.\n' +
+      ':- pred do_open_binary(string, string, int, stream, system_error, io, io) is det.\n' +
+      ':- end_module io.stream_ops.\n' +
+      ':- implementation.\n' +
+      'do_open_binary(_,_,_,_,_,_,_) :- true.\n', 'ios3')
+    const src =
+      ':- module io.\n' +
+      ':- include_module(stream_ops).\n' +
+      ':- interface.\n' +
+      ':- pred open_binary_input(string, int) is det.\n' +
+      ':- end_module io.\n' +
+      ':- implementation.\n' +
+      'open_binary_input(F, R) :-\n' +
+      '    do_open_binary(F, "rb", N, S, E, !IO).\n'
+    const doc = await mk(src, 'io3')
+    expect(doc.visitResult!.imports).toContain('io.stream_ops')
+    const off = src.indexOf('do_open_binary', src.indexOf('implementation'))
+    const before = src.slice(0, off)
+    const locs = await services.providers.definition({
+      textDocument: { uri: doc.uri.toString() },
+      position: {
+        line: before.split('\n').length - 1,
+        character: off - before.lastIndexOf('\n') - 1,
+      },
+    } as any)
+    expect(locs.length).toBeGreaterThan(0)
+    expect(locs[0].uri).toBe(dep.uri.toString())
+  })
+
+  it('goto def falls back to exportManager when imports lack the module', async () => {
+    // 调用方未 import 目标模块（或 imports 未收录）时，exportManager 的
+    // interface 导出项带 module 限定名，仍能定位定义模块——与 hover 的
+    // lookupFunc 全局兜底同源
+    const dep = await mk(
+      ':- module io.stream_ops.\n' +
+      ':- interface.\n' +
+      ':- pred do_open_binary(string, string, int, stream, system_error, io, io) is det.\n' +
+      ':- end_module io.stream_ops.\n' +
+      ':- implementation.\n' +
+      'do_open_binary(_,_,_,_,_,_,_) :- true.\n', 'ios4')
+    const src =
+      ':- module m.\n' +
+      ':- interface.\n' +
+      ':- pred p.\n' +
+      ':- end_module m.\n' +
+      ':- implementation.\n' +
+      'p :- do_open_binary(A, B, C, D, E, !IO).\n'
+    const doc = await mk(src, 'm7')
+    const off = src.indexOf('do_open_binary', src.indexOf('implementation'))
+    const before = src.slice(0, off)
+    const locs = await services.providers.definition({
+      textDocument: { uri: doc.uri.toString() },
+      position: {
+        line: before.split('\n').length - 1,
+        character: off - before.lastIndexOf('\n') - 1,
+      },
+    } as any)
+    expect(locs.length).toBeGreaterThan(0)
+    expect(locs[0].uri).toBe(dep.uri.toString())
   })
 
   it('scanHeader resolves nested module names (not ".")', () => {

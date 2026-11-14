@@ -27,8 +27,9 @@ export async function DocumentSymbolProvider(services: MercuryServices, params: 
             selectionRange: range
         })
     }
+    // definition 表含 decl/def：文档符号只列实现定义，跳过 interface 声明项
     let definition = document.visitResult.definition;
-    let KeyValuePairs = definition.values().map(x=>[semanticNameArityOf(x),x] as [string ,Term]);
+    let KeyValuePairs = definition.values().filter(x => !x.isDeclaration).map(x=>[semanticNameArityOf(x),x] as [string ,Term]);
     let map  = new MultiMap(KeyValuePairs)
     for (const [displayName,funcTerms] of map.entriesGroupedByKey()) {
         let subFuncs:DocumentSymbol[]=[] 
