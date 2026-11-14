@@ -1,27 +1,40 @@
-import { Term } from './term'
+import { Term, moduleQualifiedName } from './term'
 
 // ===== 模块依赖排序（跨模块推断要求 import 目标先于 importer 的 visit）=====
 // 从 parse 树抽头信息，无需完整 visit（visit 后才能拿到 vr.imports，不能用于排序）
 export function scanHeader(root: Term): { module?: string; imports: string[] } {
     const imports: string[] = []
+    const includes: string[] = []
     let moduleName: string | undefined
-    const addImports = (t: Term) => {
+    const addNames = (t: Term, out: string[]) => {
         if (t.nameArity === ',/2') {
-            addImports(t.args[0])
-            addImports(t.args[1])
+            addNames(t.args[0], out)
+            addNames(t.args[1], out)
             return
         }
-        imports.push(t.name)
+        // 嵌套模块名（io.stream_ops）是 './2' 链，t.name='.'；统一走点分名
+        out.push(moduleQualifiedName(t))
     }
     const walk = (t: Term) => {
         if (t.nameArity === 'module/1' && t.args.length > 0) {
-            moduleName = t.args[0].name
+            moduleName = moduleQualifiedName(t.args[0])
         } else if (t.nameArity === 'import_module/1' && t.args.length > 0) {
-            addImports(t.args[0])
+            // import_module/use_module 必须写全限定名
+            addNames(t.args[0], imports)
+        } else if (t.nameArity === 'use_module/1' && t.args.length > 0) {
+            addNames(t.args[0], imports)
+        } else if (t.nameArity === 'include_module/1' && t.args.length > 0) {
+            // include_module 声明子模块，名字相对当前模块（stream_ops → io.stream_ops），
+            // 等 walk 完拿到 moduleName 再解析
+            addNames(t.args[0], includes)
         }
         for (const a of t.args) walk(a)
     }
     walk(root)
+    for (const inc of includes) {
+        imports.push(moduleName && inc !== moduleName && !inc.startsWith(moduleName + '.')
+            ? moduleName + '.' + inc : inc)
+    }
     return { module: moduleName, imports }
 }
 

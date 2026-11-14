@@ -38,7 +38,8 @@ export interface FieldAccessInfo {
 export interface Term {
     fieldAccess?: FieldAccessInfo
     definition?: Term
-    qualified?: Term
+    /** 模块限定前缀的点分名（'io.stream_ops'）；undefined = 无限定。统一用字符串，不存 Term 链 */
+    qualified?: string
     /** The container node in the AST; every node except the root node has a container. */
     container?: Term
     /** 
@@ -132,7 +133,7 @@ export class TermImpl implements Term {
     toString(depth = 1): string {
         return termToString(this, depth)
     }
-    qualified?: Term;
+    qualified?: string;
 }
 
 export function atom(token: Token, name?: string) {
@@ -396,6 +397,37 @@ export function search(term: Term | undefined, position: Position): Term | undef
         }
     }
 }
+// ===== 模块限定名（qualified name）的唯一工具 =====
+// 统一用点分字符串表示：Term.qualified 存的是限定前缀（'io.stream_ops'，
+// 不含名字本身）；moduleQualifiedName 把任意 Term 形态归一成 'a.b.c'。
+// 源码里的 './2' 左结合链（.(.(a,b),c)）只存在于 parse 树，visit 阶段
+// 由 visitQualifiedTerm/visitQualifiedModule 解包并把前缀写成字符串。
+
+/** 任意形态的模块限定名 → 'a.b.c' 点分串（裸原子 → 'a'；已规范化项 → 前缀.名） */
+export function moduleQualifiedName(term: Term): string {
+    if (term.nameArity === './2') {
+        // 原始 './2' 链：args[0] 是前缀、args[1] 是本段名（不看其 .qualified，避免重复计数）
+        return `${moduleQualifiedName(term.args[0])}.${term.args[1].name}`
+    }
+    return term.qualified ? `${term.qualified}.${term.name}` : term.name
+}
+
+/** 模块限定名相等性：按点分名比较（'./2' 链与规范化形态视为等价） */
+export function equalQualified(term: Term, targetTerm: Term): boolean {
+    return moduleQualifiedName(term) === moduleQualifiedName(targetTerm)
+}
+
+/**
+ * 把 prefix 模块的点分名补到 term.qualified 最前（原地修改）。
+ * include_module 声明的是当前模块的子模块、名字可免全限定
+ * （module io 里的 stream_ops = io.stream_ops）：visit 侧统一补成
+ * 绝对限定名，消费方（moduleManager.get / equalQualified）无需感知相对解析。
+ */
+export function prependModuleQualifier(term: Term, prefix: Term): void {
+    const p = moduleQualifiedName(prefix)
+    term.qualified = term.qualified ? `${p}.${term.qualified}` : p
+}
+
 /**
  * 把term转换成string
  * @param term 要打印的term

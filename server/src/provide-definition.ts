@@ -1,6 +1,6 @@
 import { DefinitionParams, Location, TextDocumentPositionParams, TypeDefinitionParams } from 'vscode-languageserver'
 import { sameArity, semanticArityOf, sleep, termTokenRange } from './utils'
-import { Term, search, termRange } from './term'
+import { Term, search, termRange, moduleQualifiedName } from './term'
 import { DefTerm, Document } from './document'
 import { EMPTY_STREAM, Stream, stream } from './stream'
 import { MercuryDocument } from './document-manager'
@@ -42,7 +42,10 @@ export async function TypeDefinitionProvider(services: MercuryServices, params: 
                 semanticArity: typeCtor.arity,
                 semanticType: 'type',
             }
-            return findDefTerms(services, { term: typeTerm as Term, uri })
+            // ctor.module 精确定位声明模块（typeMap 含未导出类型）；
+            // 找不到回退当前文档 → 全局导出索引的旧路径
+            const ownerDoc = services.exportManager.lookupTypeDoc(typeCtor)
+            return findDefTerms(services, { term: typeTerm as Term, uri: ownerDoc?.uri ?? uri })
                 .filter(uriTerm => uriTerm.term.semanticType === 'type')
                 .map(uriTermToLocation)
                 .toArray()
@@ -60,7 +63,7 @@ export async function TypeDefinitionProvider(services: MercuryServices, params: 
 function findDefinitionTerm(services: MercuryServices, term:Term,document:MercuryDocument){
     // term qualified
     if(term.qualified){
-        let doc =services.moduleManager.get(term.qualified)
+        let doc =services.moduleManager.get(term.qualified, moduleNameOf(document))
         if(!doc) return stream([]);
         let res = findDefTermInThisDocument(term,doc)
         return res
@@ -111,22 +114,29 @@ function findDefTermInOtherDocument(services: MercuryServices, term: Term, docum
     // 对于 type 和 constructor，使用 exportManager 进行全局查找
     // 因为它们经常通过多层 import 传播
     if (term.semanticType === 'type' || term.semanticType === 'constructor') {
-        const exports = services.exportManager.get(term.name)
-        if (!exports) return stream([])
-
         const defKinds = defKindsForRef(term.semanticType)
-        return stream(exports)
-            .filter(x => sameArity(x, term))
-            .filter(x => !defKinds || defKinds.includes(x.semanticType ?? ''))
-            .map(exportTerm => {
-                // exportTerm.qualified 指向所属模块，从 moduleManager 获取文档
-                const moduleTerm = exportTerm.qualified
-                if (!moduleTerm) return null
-                const doc = services.moduleManager.get(moduleTerm)
-                if (!doc) return null
-                return uriTerm.create(doc.uri, exportTerm)
-            })
-            .nonNullable()
+        const matchDef = (x: Term) => sameArity(x, term) && (!defKinds || defKinds.includes(x.semanticType ?? ''))
+        // 导出索引：interface 段导出的符号
+        const exports = services.exportManager.get(term.name)
+        const fromExports = exports
+            ? stream(exports)
+                .filter(matchDef)
+                .map(exportTerm => {
+                    // exportTerm.qualified 指向所属模块，从 moduleManager 获取文档
+                    const moduleTerm = exportTerm.qualified
+                    if (!moduleTerm) return null
+                    const doc = services.moduleManager.get(moduleTerm)
+                    if (!doc) return null
+                    return uriTerm.create(doc.uri, exportTerm)
+                })
+                .nonNullable()
+            : stream<uriTerm>([])
+        // typeMap 收全部类型（含未导出）：按 name/arity 找声明文档兜底，
+        // 否则 implementation 段声明的类型 goto-def 永远落空
+        const typeDocs = services.exportManager.lookupTypeDocs(term.name, semanticArityOf(term))
+        const fromTypeDocs = stream(typeDocs).flatMap(d => findDefTermInThisDocument(term, d))
+        return fromExports.concat(fromTypeDocs)
+            .distinct(u => `${u.uri.toString()}:${termTokenRange(u.term).start.line}:${termTokenRange(u.term).start.character}`)
     }
 
     // 对于 func 和 pred，保持单层查找（通常在当前模块或直接 import 中定义）
@@ -136,11 +146,18 @@ function findDefTermInOtherDocument(services: MercuryServices, term: Term, docum
     }
 
     let res = stream(imports)
-    .map(x => services.moduleManager.get(x))
+    .map(x => services.moduleManager.get(x, moduleNameOf(document)))
     .nonNullable()
     .flatMap(doc=>findDefTermInThisDocument(term,doc))
 
     return res;
+}
+
+// 文档所属模块的点分名：moduleManager.get 的 relativeTo 参数
+//（include_module 相对名 / 相对限定调用的解析上下文）
+function moduleNameOf(doc: MercuryDocument): string | undefined {
+    const m = doc.visitResult?.module
+    return m ? moduleQualifiedName(m) : undefined
 }
 
 export interface uriTerm{
@@ -178,8 +195,9 @@ function findFieldAccessDefinitions(
         ? [update, selection, label]
         : [selection, update, label]
     const docs: MercuryDocument[] = [document]
+    const rel = moduleNameOf(document)
     for (const imp of document.visitResult?.imports ?? []) {
-        const doc = services.moduleManager.get(imp)
+        const doc = services.moduleManager.get(imp, rel)
         if (doc && !docs.includes(doc)) docs.push(doc)
     }
     const result: uriTerm[] = []
@@ -239,13 +257,14 @@ export  function findDefTerms(services: MercuryServices, params:uriTerm):Stream<
         }
 
         case 'module':{
-            let document = services.moduleManager.get(term);
-            if(!document)
+            const rel = moduleNameOf(document)
+            const targetDoc = services.moduleManager.get(term, rel);
+            if(!targetDoc)
                 return stream([]);
-            let module = document.visitResult?.module
+            let module = targetDoc.visitResult?.module
             if(!module)
                 return stream([]);
-            let uri = document.uri ;
+            let uri = targetDoc.uri ;
             return stream([{
                 uri,
                 term:module

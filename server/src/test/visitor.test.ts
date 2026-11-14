@@ -826,7 +826,7 @@ describe('goto definition / find references for insts (providers)', () => {
     expect(refs.get('wrap')?.length).toBe(1)
     expect(refs.get('pair')?.length).toBe(1)
     expect(refs.get('init')?.length).toBe(1)
-    expect((refs.get('init')[0] as any).qualified?.name).toBe('uva')
+    expect((refs.get('init')[0] as any).qualified).toBe('uva')
     // 参数位置的闭包 p/2（Name/Arity）记语义元数
     expect(refs.get('p')?.length).toBe(1)
     expect((refs.get('p')[0] as any).semanticArity).toBe(2)

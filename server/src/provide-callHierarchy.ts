@@ -1,6 +1,6 @@
 import { CallHierarchyIncomingCall, CallHierarchyIncomingCallsParams, CallHierarchyItem, CallHierarchyOutgoingCall, CallHierarchyOutgoingCallsParams, CallHierarchyPrepareParams, CancellationToken, SymbolKind } from 'vscode-languageserver'
 import {   semanticNameArityOf, sameArity, sameSemanticType, sleep, termTokenRange, tokenRange } from './utils'
-import { Term, termRange } from './term'
+import { Term, termRange, moduleQualifiedName } from './term'
 import { SemanticType } from "./document-visitor"
 import { stream } from './stream'
 import { findDefTerms, findAtTextDocumentPositionTerm, uriTerm } from './provide-definition'
@@ -121,11 +121,16 @@ function uriTermToCallHierarchyOutgoingCall(services: MercuryServices, uriTerm: 
 }
 
 function findModuleOutgoingCalls(services: MercuryServices, { uri, term}:uriTerm): CallHierarchyOutgoingCall[]  {
-    let document = services.moduleManager.get(term);
+    const srcDoc = services.documents.getOrCreateDocument(uri)
+    const srcModule = srcDoc?.visitResult?.module
+    const rel = srcModule ? moduleQualifiedName(srcModule) : undefined
+    let document = services.moduleManager.get(term, rel);
     if(!document)
         return []
+    // document 是目标模块：其 imports 的相对名以目标模块自身为解析上下文
+    const trel = document.visitResult?.module ? moduleQualifiedName(document.visitResult.module) : undefined
     return stream(document.visitResult?.imports??[])
-        .map(x=>services.moduleManager.get(x)?.visitResult?.module)
+        .map(x=>services.moduleManager.get(x, trel)?.visitResult?.module)
         .nonNullable()
         .map(moduleTerm=>uriTermToCallHierarchyOutgoingCall(services, {uri,term:moduleTerm}))
         .nonNullable().toArray()

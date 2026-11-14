@@ -3,7 +3,7 @@ import { semanticArityOf } from './utils'
 import { search, termRange } from './term'
 import { URI } from 'vscode-uri'
 import { merTypeToString, keyOf, type FuncInfo, type MerType } from './document-type'
-import { moduleQualifiedName } from './document-moduleManager'
+
 import type { MercuryServices } from './services'
 
 export async function HoverProvider(services: MercuryServices, params:HoverParams) {
@@ -29,14 +29,14 @@ export async function HoverProvider(services: MercuryServices, params:HoverParam
             case 'pred':
                 return sigFi?.module
             case 'type': {
-                if (term.qualified) return moduleQualifiedName(term.qualified)
+                if (term.qualified) return term.qualified
                 const arity = term.semanticArity ?? term.arity
                 const local = doc.visitResult?.types.get(keyOf(term.name, arity))
                 if (local) return local.ctor.module
                 return services.exportManager.lookupType({ name: term.name, arity })?.ctor.module
             }
             case 'constructor': {
-                if (term.qualified) return moduleQualifiedName(term.qualified)
+                if (term.qualified) return term.qualified
                 // 构造子结果类型的 ctor.module = 所属类型模块（推断已写入时最准）
                 const t = doc.visitResult?.inferred.get(term)?.type
                 if (t?.kind === 'ctor') return t.ctor.module
@@ -47,7 +47,7 @@ export async function HoverProvider(services: MercuryServices, params:HoverParam
                 return undefined
             }
             default:
-                return term.qualified ? moduleQualifiedName(term.qualified) : undefined
+                return term.qualified
         }
     }
     const qname = entityModule()

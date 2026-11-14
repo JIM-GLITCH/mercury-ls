@@ -1,8 +1,7 @@
 import { Location, ReferenceParams } from 'vscode-languageserver'
 import { semanticArityOf, sleep } from './utils'
-import { FieldAccessInfo, Term, search, termRange } from './term'
+import { FieldAccessInfo, Term, moduleQualifiedName, search, termRange } from './term'
 import { MercuryDocument } from './document-manager'
-import { equalQualified } from './document-moduleManager'
 import { URI } from 'vscode-uri'
 import type { MercuryServices } from './services'
 
@@ -16,8 +15,10 @@ export async function ReferenceProvider(services: MercuryServices, params:Refere
     let term = search(document.parseResult.value,pos);
 
     if(!term) return [];
-    // 目标符号所属模块：引用带限定名则取其限定，否则为所在文档的模块
-    const termModule: Term | undefined = term.qualified ?? document.visitResult?.module
+    // 目标符号所属模块的点分名：引用带限定名则取其限定，否则为所在文档的模块
+    const docModule = document.visitResult?.module
+    const termModule: string | undefined = term.qualified
+        ?? (docModule ? moduleQualifiedName(docModule) : undefined)
     switch (term.semanticType) {
         case 'variable':{
             // 查找 variable的引用 只需要在这个varaible在的clause范围里查找
@@ -73,14 +74,14 @@ export async function ReferenceProvider(services: MercuryServices, params:Refere
 //   显式限定到其它模块的同名引用直接排除（这是 qualified 不一致混入的根源）；
 // - 非限定引用 f：只保留目标模块自身、或 import 了目标模块的文档；
 //   文档没有模块声明（无法判定归属）时不过滤
-function visibleRef(refTerm: Term, termModule: Term | undefined, doc: MercuryDocument): boolean {
+function visibleRef(refTerm: Term, termModule: string | undefined, doc: MercuryDocument): boolean {
     if (!termModule) return true
     const q = refTerm.qualified
-    if (q) return equalQualified(q, termModule)
+    if (q) return q === termModule
     const vr = doc.visitResult
     if (!vr?.module) return true
-    if (equalQualified(vr.module, termModule)) return true
-    return (vr.imports ?? []).some(imp => equalQualified(imp, termModule))
+    if (moduleQualifiedName(vr.module) === termModule) return true
+    return (vr.imports ?? []).some(imp => moduleQualifiedName(imp) === termModule)
 }
 // 记录语法 `^` 字段说明符的引用名（派生规则见 term.ts 的 FieldAccessInfo）：
 // 在 `^ elem(I)` 上是 elem；在 `'elem :='` 定义上要反推回 elem；
@@ -100,7 +101,7 @@ function matchesFieldRef(term: Term, fs: FieldAccessInfo): boolean {
         return fs.selectionName === term.name && fs.selectionArity === semanticArityOf(term)
     return false
 }
-function findReferences(services: MercuryServices, term:Term, termModule:Term|undefined, refs:Location[]){
+function findReferences(services: MercuryServices, term:Term, termModule:string|undefined, refs:Location[]){
     const seen = new Set<string>()
     const push = (doc: MercuryDocument, refTerm: Term) => {
         const uri = doc.uri.toString()
@@ -131,7 +132,7 @@ function findReferences(services: MercuryServices, term:Term, termModule:Term|un
         }
     }
 }
-function findTypeReferences(services: MercuryServices, term:Term, termModule:Term|undefined, refs:Location[]){
+function findTypeReferences(services: MercuryServices, term:Term, termModule:string|undefined, refs:Location[]){
     for (const doc of services.documents.all) {
         for (const refTerm of doc.visitResult?.typeReference.get(term.name)??[]) {
             if(semanticArityOf(refTerm)!=semanticArityOf(term)) continue;
@@ -140,7 +141,7 @@ function findTypeReferences(services: MercuryServices, term:Term, termModule:Ter
         }
     }
 }
-function findInstReferences(services: MercuryServices, term:Term, termModule:Term|undefined, refs:Location[]){
+function findInstReferences(services: MercuryServices, term:Term, termModule:string|undefined, refs:Location[]){
     for (const doc of services.documents.all) {
         for (const refTerm of doc.visitResult?.instReference.get(term.name)??[]) {
             if(semanticArityOf(refTerm)!=semanticArityOf(term)) continue;
@@ -149,7 +150,7 @@ function findInstReferences(services: MercuryServices, term:Term, termModule:Ter
         }
     }
 }
-function findModeReferences(services: MercuryServices, term:Term, termModule:Term|undefined, refs:Location[]){
+function findModeReferences(services: MercuryServices, term:Term, termModule:string|undefined, refs:Location[]){
     for (const doc of services.documents.all) {
         for (const refTerm of doc.visitResult?.modeReference.get(term.name)??[]) {
             if(semanticArityOf(refTerm)!=semanticArityOf(term)) continue;

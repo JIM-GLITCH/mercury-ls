@@ -1,8 +1,12 @@
 import { MercuryDocument } from './document-manager'
 // import { moduleMap } from './globalSpace'
 import { MultiMap } from './multimap'
-import { Term } from './term'
+import { Term, moduleQualifiedName } from './term'
 import { FuncInfo, TypeCtor, TypeInfo, keyOf, keyOfTypeCtor } from './document-type'
+
+// 限定名工具统一收敛在 term.ts（对 './2' 原始链与 .qualified 规范化形态都正确）；
+// 此处 re-export 保持既有 import 路径不变
+export { equalQualified, moduleQualifiedName } from './term'
 
 
 export class ModuleManager {
@@ -10,12 +14,23 @@ export class ModuleManager {
     // doc → 其 module 项：invalidate 后 visitResult 被清空，delete 时无法再从
     // visitResult 反查模块名，必须在 set 时记下
     private byDoc = new Map<MercuryDocument, Term>()
-    get(term:Term){
-        for (const candidate of this.moduleMap.get(term.name)) {
+    get(term:Term | string, relativeTo?: string){
+        // 键是点分限定名（'io.stream_ops'）：传 Term 走 moduleQualifiedName
+        // 归一（'./2' 原始链与规范化 .qualified 字符串都正确），
+        // 传字符串（term.qualified）直接用
+        const want = typeof term === 'string' ? term : moduleQualifiedName(term)
+        const hit = this.getExact(want)
+        if (hit || !relativeTo) return hit
+        // 相对模块名兜底：module io 里的 stream_ops / stream_ops.f = io.stream_ops(.f)；
+        // 精确名优先（顶层模块 lists 不会被误解析成 io.lists）
+        return this.getExact(relativeTo + '.' + want)
+    }
+    private getExact(name:string){
+        for (const candidate of this.moduleMap.get(name)) {
             // 重建窗口期（invalidate 后、visit 完成前）visitResult 为空，跳过；
             // 否则 visitResult!.module 会抛异常、被 inferClause 的 catch 静默吞掉
             const targetTerm = candidate.visitResult?.module
-            if (targetTerm && equalQualified(term,targetTerm)){
+            if (targetTerm && moduleQualifiedName(targetTerm) === name){
                 return candidate
             }
         }
@@ -23,44 +38,19 @@ export class ModuleManager {
     set(term:Term,doc:MercuryDocument){
         // 幂等：重建时同一 doc 会重复登记，先清旧条目（含历史残留的重复项）
         this.delete(doc)
-        this.moduleMap.add(term.name,doc);
+        this.moduleMap.add(moduleQualifiedName(term),doc);
         this.byDoc.set(doc,term)
     }
     delete(doc:MercuryDocument){
         const term = this.byDoc.get(doc) ?? doc.visitResult?.module
         if (term) {
             // MultiMap.delete(key, value) 每次只删一条，循环清干净
-            while (this.moduleMap.delete(term.name, doc)) { }
+            while (this.moduleMap.delete(moduleQualifiedName(term), doc)) { }
         }
         this.byDoc.delete(doc)
     }
 }
 
-export function equalQualified(term: Term, targetTerm: Term):boolean {
-    if(term.name != targetTerm.name){
-        return false
-    }
-    if(targetTerm.qualified && term.qualified){
-        return equalQualified(targetTerm.qualified,term.qualified)
-    }
-    return true
-}
-/** 把模块限定名 Term（可能带 `./2` 链）还原成 `std.array` 这样的点分字符串 */
-export function moduleQualifiedName(term: Term): string {
-    const parts: string[] = []
-    const walk = (t: Term | undefined) => {
-        if (!t) return
-        if (t.nameArity === './2') {
-            walk(t.args[0])
-            walk(t.args[1])
-            return
-        }
-        walk(t.qualified)
-        parts.push(t.name)
-    }
-    walk(term)
-    return parts.join('.')
-}
 /**
  * 全局导出符号索引：各模块 `:- interface.` 段声明的符号（visitor 的 exports，
  * term.qualified 指向所属模块）。供 linker 按名字直接取候选，免去逐个
@@ -74,6 +64,9 @@ export class ExportManager {
     // typeNameIndex 按裸 name/arity 反查，供未限定引用做唯一模块解析
     private typeMap = new Map<string, TypeInfo>()
     private typeNameIndex = new Map<string, TypeInfo[]>()
+    // 类型构造子键 → 声明它的文档：typeMap 收全部类型（含未导出的），
+    // 供 goto-type-def 定位非导出类型的定义位置
+    private typeDocMap = new Map<string, MercuryDocument>()
     private funcMap = new Map<string, FuncInfo>()
     // 同名同元数的全部声明签名（重载候选；funcMap/funcs 单值表只存其一）
     private funcAltsMap = new Map<string, FuncInfo[]>()
@@ -97,6 +90,7 @@ export class ExportManager {
         for (const ti of vr.types.values()) {
             const k = keyOfTypeCtor(ti.ctor)
             this.typeMap.set(k, ti)
+            this.typeDocMap.set(k, doc)
             typeKeys.push(k)
             typeInfos.push(ti)
             const nk = keyOf(ti.ctor.name, ti.ctor.arity)
@@ -131,7 +125,10 @@ export class ExportManager {
         }
         const oldT = this.byDocTypes.get(doc)
         if (oldT) {
-            for (const k of oldT.typeKeys) this.typeMap.delete(k)
+            for (const k of oldT.typeKeys) {
+                this.typeMap.delete(k)
+                this.typeDocMap.delete(k)
+            }
             for (const ti of oldT.typeInfos) {
                 const nk = keyOf(ti.ctor.name, ti.ctor.arity)
                 const arr = this.typeNameIndex.get(nk)
@@ -170,7 +167,8 @@ export class ExportManager {
     getByModule(moduleName: string): Term[] {
         const result: Term[] = []
         this.exportMap.forEach(t => {
-            if (t.qualified && moduleQualifiedName(t.qualified) === moduleName) result.push(t)
+            // export 项的 .qualified 是所属模块点分名字符串
+            if (t.qualified === moduleName) result.push(t)
         })
         return result
     }
@@ -183,6 +181,24 @@ export class ExportManager {
         const cands = this.typeNameIndex.get(keyOf(ctor.name, ctor.arity)) ?? []
         const modules = new Set(cands.map(ti => ti.ctor.module ?? ''))
         return modules.size === 1 ? cands[0] : undefined
+    }
+    // 类型构造子 → 声明文档：module 已知精确命中；未限定时同名跨模块
+    // 歧义返回 undefined（不猜，调用方回退按名搜索）
+    lookupTypeDoc(ctor: TypeCtor): MercuryDocument | undefined {
+        const doc = this.typeDocMap.get(keyOfTypeCtor(ctor))
+        if (doc) return doc
+        if (ctor.module) return undefined
+        const ti = this.lookupType(ctor)
+        return ti ? this.typeDocMap.get(keyOfTypeCtor(ti.ctor)) : undefined
+    }
+    // 裸 name/arity → 全部声明该类型的文档（含未导出类型；goto-def 兜底用）
+    lookupTypeDocs(name: string, arity: number): MercuryDocument[] {
+        const docs: MercuryDocument[] = []
+        for (const ti of this.typeNameIndex.get(keyOf(name, arity)) ?? []) {
+            const doc = this.typeDocMap.get(keyOfTypeCtor(ti.ctor))
+            if (doc && !docs.includes(doc)) docs.push(doc)
+        }
+        return docs
     }
     lookupFunc(name: string, arity: number): FuncInfo | undefined {
         return this.funcMap.get(keyOf(name, arity))

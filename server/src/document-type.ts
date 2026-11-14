@@ -1,4 +1,4 @@
-import { Term } from './term'
+import { Term, moduleQualifiedName } from './term'
 import type { MerModeRef } from './document-mode'
 
 // 类型构造子（对应编译器 type_ctor(sym_name, arity)）
@@ -94,15 +94,6 @@ export function keyOf(name: string, arity: number): string {
     return name + '/' + arity
 }
 
-// 限定链的点分名：./2 左结合链 args[0] 是限定符、args[1] 是名字；
-// a.b → "a.b"（模块名各段都是原子）。与 document-moduleManager 的
-// moduleQualifiedName 输出格式一致，但不依赖 visit 设置的 .qualified 字段
-function dottedQualifier(term: Term): string {
-    return term.nameArity === './2'
-        ? `${dottedQualifier(term.args[0])}.${term.args[1].name}`
-        : term.name
-}
-
 // 类型名项拆解：./2 是左结合链（a.b.c = '.''('.'(a,b),c)），最内层元素
 // 是类型头（原子或 error(T) 应用项），args[0] 一侧是限定符——既可是模块名
 // （msi.stream_info 引用 msi 模块的 stream_info），也可是类型名的命名空间
@@ -114,7 +105,8 @@ export function typeHeadParts(term: Term): { name: string; arity: number; args: 
     while (head.nameArity === './2') head = head.args[1]
     return {
         name: head.name, arity: head.arity, args: head.args,
-        qualifier: term.nameArity === './2' ? dottedQualifier(term.args[0]) : undefined,
+        // 限定符点分名统一走 term.ts 的 moduleQualifiedName（嵌套模块 a.b.c 正确）
+        qualifier: term.nameArity === './2' ? moduleQualifiedName(term.args[0]) : undefined,
     }
 }
 

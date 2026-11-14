@@ -1,6 +1,6 @@
 import { DeclarationParams, Location } from 'vscode-languageserver'
 import {  sameArity, sameSemanticType, sleep, termTokenRange } from './utils'
-import { Term, termRange } from './term'
+import { Term, termRange, moduleQualifiedName } from './term'
 import { stream } from './stream'
 import { findAtTextDocumentPositionTerm, uriTerm } from './provide-definition'
 import { URI } from 'vscode-uri'
@@ -17,8 +17,13 @@ export async function DeclarationProvider(services: MercuryServices, params:Decl
         return ;
     }
     
+    // 相对模块名（include_module 子模块 / 相对限定引用）以本文件模块为解析上下文
+    const srcDoc = services.documents.getOrCreateDocument(uriTerm.uri)
+    const srcModule = srcDoc?.visitResult?.module
+    const rel = srcModule ? moduleQualifiedName(srcModule) : undefined
+
     if(semanticType=="module"){
-        let doc = services.moduleManager.get(term);
+        let doc = services.moduleManager.get(term, rel);
         if(!doc)
             return []
         let defTerm = doc.visitResult!.module!
@@ -27,7 +32,7 @@ export async function DeclarationProvider(services: MercuryServices, params:Decl
     }
     /* 如果有module属性 在 module里查找 */
     if(term.qualified){
-        let doc  =  services.moduleManager.get(term.qualified)
+        let doc  =  services.moduleManager.get(term.qualified, rel)
         if(!doc)
             return [];
         let uri = doc.uri

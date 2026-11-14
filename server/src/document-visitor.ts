@@ -2,7 +2,7 @@ import { CancellationToken, Diagnostic, DiagnosticSeverity } from 'vscode-langua
 import { MercuryDocument } from './document-manager'
 import { MultiMap } from './multimap'
 import { TreeStreamImpl, stream } from './stream'
-import { Clause, RootNode, Term } from './term'
+import { Clause, RootNode, Term, prependModuleQualifier } from './term'
 import { sameArity } from './utils'
 import { interruptAndCheck } from './promise-util'
 import { ExportManager, ModuleManager, moduleQualifiedName } from './document-moduleManager'
@@ -1017,6 +1017,17 @@ export class Visitor {
     visitIncludeModuleDecl(term: Term) {
         for (const moduleTerm of commaSeparatedTermToList(term)) {
             let module = this.visitModule(moduleTerm)
+            // include_module 声明的是当前模块的子模块，名字可免全限定
+            //（Mercury 语义：module io 里的 stream_ops = io.stream_ops）。
+            // 统一补成绝对限定名再入索引，否则 moduleManager.get('stream_ops')
+            // 永远找不到注册名 'io.stream_ops'；已带本模块前缀的写法跳过
+            if (this.module) {
+                const cur = moduleQualifiedName(this.module)
+                const written = moduleQualifiedName(module)
+                if (written !== cur && !written.startsWith(cur + '.')) {
+                    prependModuleQualifier(module, this.module)
+                }
+            }
             this.addReference(module)
             this.addImport(module)
         }
@@ -1061,8 +1072,10 @@ export class Visitor {
     visitQualifiedTerm(term: Term) {
         if (nameArity(term, "./2")) {
             let [left, right] = term.args
-            right.qualified = left
             let module = this.visitQualifiedModule(left)
+            // .qualified 统一为点分前缀字符串（'io.stream_ops'），不存 Term 链；
+            // left 可能是 './2' 原始链，moduleQualifiedName 对两种形态都正确
+            right.qualified = moduleQualifiedName(left)
             label(module, "module")
             this.addReference(left)
             return right
@@ -1072,7 +1085,7 @@ export class Visitor {
     visitQualifiedModule(term: Term) {
         if (nameArity(term, "./2")) {
             let [left, right] = term.args
-            right.qualified = left
+            right.qualified = moduleQualifiedName(left)
             let module = this.visitQualifiedModule(left)
             label(module, "module")
             this.addReference(left)
@@ -1577,7 +1590,7 @@ export class Visitor {
     }
 
     addExport(term: Term) {
-        term.qualified = this.module
+        term.qualified = this.module ? moduleQualifiedName(this.module) : undefined
         this.exports.add(term.name, term)
     }
     addImport(module: Term) {
@@ -1972,7 +1985,8 @@ export class Visitor {
         let t = term
         while (!isVariable(t) && t.nameArity === './2') {
             const right = t.args[1]
-            if (t.args[0]) right.qualified = t.args[0]
+            // .qualified 统一为点分前缀字符串（与 visitQualifiedTerm 一致）
+            if (t.args[0]) right.qualified = moduleQualifiedName(t.args[0])
             t = right
         }
         return t
@@ -2411,9 +2425,8 @@ export class Visitor {
     // 限定名是否指向当前模块自身（如 array.m 里的 array.size）：
     // 模块要等 visit 完才注册进 moduleManager，自限定调用必须按本模块符号解析，
     // 否则在自身 visit 期间永远查不到（首遍推断失败 → 重建后表现为类型回退）
-    private isSelfQualified(qualified: Term | undefined): boolean {
-        return !!(qualified && this.module
-            && moduleQualifiedName(qualified) === moduleQualifiedName(this.module))
+    private isSelfQualified(qualified: string | undefined): boolean {
+        return !!(qualified && this.module && qualified === this.localModuleName())
     }
     // goal 位置调用的签名候选：限定名只看目标模块；否则本模块声明优先（遮蔽导入），
     // 本模块没有时回退全局导出索引（偏宽，由 pickSig 的实参类型消歧兜底）
@@ -2423,7 +2436,7 @@ export class Visitor {
             if (this.isSelfQualified(term.qualified)) {
                 return [...this.altsOf(this.funcAlts, name, sem, alt), ...this.altsOf(this.predAlts, name, sem, alt)]
             }
-            const vr = this.moduleManager.get(term.qualified)?.visitResult
+            const vr = this.moduleManager.get(term.qualified, this.localModuleName())?.visitResult
             if (!vr) return []
             return [...this.altsOf(vr.funcAlts, name, sem, alt), ...this.altsOf(vr.predAlts, name, sem, alt)]
         }
@@ -2439,7 +2452,7 @@ export class Visitor {
                 // 自限定：只看本模块声明，不回退导出索引（限定名不该看到 import 的符号）
                 return this.altsOf(this.funcAlts, name, sem, alt)
             }
-            const vr = this.moduleManager.get(term.qualified)?.visitResult
+            const vr = this.moduleManager.get(term.qualified, this.localModuleName())?.visitResult
             return vr ? this.altsOf(vr.funcAlts, name, sem, alt) : []
         }
         const own = this.altsOf(this.funcAlts, name, sem, alt)
@@ -2506,7 +2519,7 @@ export class Visitor {
                 return this.funcs.get(keyOf(name, a)) ?? this.funcs.get(keyOf(name, aAlt))
                     ?? this.preds.get(keyOf(name, a)) ?? this.preds.get(keyOf(name, aAlt))
             }
-            const doc = this.moduleManager.get(termOrName.qualified)
+            const doc = this.moduleManager.get(termOrName.qualified, this.localModuleName())
             const sig = doc?.visitResult?.funcs.get(keyOf(name, a)) ?? doc?.visitResult?.funcs.get(keyOf(name, aAlt))
                 ?? doc?.visitResult?.preds.get(keyOf(name, a)) ?? doc?.visitResult?.preds.get(keyOf(name, aAlt))
             if (sig) return sig

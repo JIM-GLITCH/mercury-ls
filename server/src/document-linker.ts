@@ -2,7 +2,7 @@ import { CancellationToken, Diagnostic, DiagnosticSeverity } from 'vscode-langua
 import { MercuryDocument } from './document-manager'
 import { label, SemanticType, VisitResult } from './document-visitor'
 import type { MercuryServices } from './services'
-import { Term } from './term'
+import { Term, moduleQualifiedName } from './term'
 import { sameArity } from './utils'
 import { interruptAndCheck } from './promise-util'
 import { MultiMap } from './multimap'
@@ -65,7 +65,8 @@ export class DefaultLinker implements Linker{
             ...vr.declaration.get(name),
         ]
         if (ref.qualified) {
-            const targetDoc = this.services.moduleManager.get(ref.qualified)
+            const rel = vr.module ? moduleQualifiedName(vr.module) : undefined
+            const targetDoc = this.services.moduleManager.get(ref.qualified, rel)
             if (targetDoc?.visitResult) {
                 candidates = candidates.concat(this.lookupCandidates(targetDoc.visitResult, name))
             }
