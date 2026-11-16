@@ -77,6 +77,10 @@ export class Visitor {
     modeReference = new MultiMap<string, Term>()
     exports = new MultiMap<string, Term>()
     types = new Map<string, TypeInfo[]>()
+    // types 每次 addTypeInfo 递增；consIndex 是它的惰性物化（构造子名 →
+    // ConsInfo），inferFunctor 查构造子候选时避免每个 functor 全表扫类型
+    private typesVersion = 0
+    private consIndex?: { v: number; map: Map<string, ConsInfo[]> }
     sigAlts = new Map<string, FuncInfo[]>()
     modeSigs = new Map<string, string[]>()
     instDefs = new Map<string, InstDef>()
@@ -912,6 +916,7 @@ export class Visitor {
         return this.module ? moduleQualifiedName(this.module) : undefined
     }
     private addTypeInfo(info: TypeInfo) {
+        this.typesVersion++
         // 本模块表按裸 name 存候选（同 name 不同 arity/限定模块共存，查询时
         // 按 ctor.arity/module 过滤）；同一 qualified 类型重复声明
         //（interface/implementation 双写）后者覆盖，保持旧单值 Map 的语义
@@ -2050,6 +2055,24 @@ export class Visitor {
         // 避免与其它声明的同名类型变量在 subst 里串扰
         return this.freshenType(applySubst(ti.body, subst), new Map())
     }
+    // 构造子名 → ConsInfo 候选（本模块）：typesVersion 变化时惰性重建，
+    // 保持「边 visit 边可见」的实时语义（前向声明的类型在 addTypeInfo 后即可查）
+    private consByName(name: string): ConsInfo[] {
+        if (this.consIndex?.v !== this.typesVersion) {
+            const map = new Map<string, ConsInfo[]>()
+            for (const arr of this.types.values()) {
+                for (const ti of arr) {
+                    for (const ci of ti.constructors) {
+                        const a = map.get(ci.ctor)
+                        if (a) a.push(ci)
+                        else map.set(ci.ctor, [ci])
+                    }
+                }
+            }
+            this.consIndex = { v: this.typesVersion, map }
+        }
+        return this.consIndex.map.get(name) ?? []
+    }
     // 数据位置 functor：用 expected 类型与签名消歧 构造子/函数；重载且类型无法唯一确定时保持无类别
     // allowFreeze=false 用于 frozen 重试：重试仍失败时不再重复挂起（goal 自己控制重试节奏）
     private inferFunctor(term: Term, expected?: MerType, allowFreeze = true): MerType {
@@ -2057,17 +2080,18 @@ export class Visitor {
         const arity = term.arity
         const expCtor = expected && expected.kind === 'ctor' ? expected.ctor : undefined
         const constrs: ConsInfo[] = []
-        const collectConstrs = (ti: TypeInfo) => {
-            for (const ci of ti.constructors) {
-                if (ci.ctor === name && ci.arity === arity) constrs.push(ci)
-            }
+        for (const ci of this.consByName(name)) {
+            if (ci.arity === arity) constrs.push(ci)
         }
-        for (const arr of this.types.values()) for (const ti of arr) collectConstrs(ti)
         // 跨模块：类型上下文明确时，纳入导入模块里同名同元数的类型构造子。
-        // typeMap 按类型构造子键索引，直接查目标类型即可（原全表扫是 O(类型数)）
+        // 导出索引按类型构造子键定位，直接查目标类型即可（原全表扫是 O(类型数)）
         if (expCtor) {
             const ti = this.exportManager.lookupType(expCtor)
-            if (ti) collectConstrs(ti)
+            if (ti) {
+                for (const ci of ti.constructors) {
+                    if (ci.ctor === name && ci.arity === arity) constrs.push(ci)
+                }
+            }
         }
         // 函数签名候选：限定名只看目标模块；否则本模块声明优先（遮蔽导入），
         // 本模块没有时回退全局导出索引。hasOwnFunc 区分候选是否来自本模块，
@@ -2445,33 +2469,37 @@ export class Visitor {
         const self = this.localModuleName()
         return self ? this.moduleManager.get(`${self}.${qualified}`) : undefined
     }
+    // term 限定名的签名作用域：'self' = 自限定（硬作用域，只看本模块，
+    // 不回退导出索引）；Map = 外部限定目标模块的 sigAlts；undefined = 无限定名
+    private qualifiedSigScope(term: Term): 'self' | Map<string, FuncInfo[]> | undefined {
+        if (!term.qualified) return undefined
+        if (this.isSelfQualified(term.qualified)) return 'self'
+        return this.qualifiedModuleDoc(term.qualified)?.visitResult?.sigAlts
+    }
     // goal 位置调用的签名候选：限定名只看目标模块；否则本模块声明优先（遮蔽导入），
     // 本模块没有时回退全局导出索引（偏宽，由 pickSig 的实参类型消歧兜底）
     private callCandidates(term: Term): FuncInfo[] {
         const name = term.name, sem = term.semanticArity, alt = term.arity
-        const own = (map: Map<string, FuncInfo[]>) => [
+        const both = (map: Map<string, FuncInfo[]>) => [
             ...sigCandidates(map, name, sem, alt, 'func'),
             ...sigCandidates(map, name, sem, alt, 'pred'),
         ]
-        if (term.qualified) {
-            if (this.isSelfQualified(term.qualified)) return own(this.sigAlts)
-            const vr = this.qualifiedModuleDoc(term.qualified)?.visitResult
-            return vr ? own(vr.sigAlts) : []
+        const scope = this.qualifiedSigScope(term)
+        if (scope !== undefined) {
+            const map = scope === 'self' ? this.sigAlts : scope
+            return map ? both(map) : []
         }
-        const local = own(this.sigAlts)
+        const local = both(this.sigAlts)
         if (local.length) return local
         return this.exportManager.lookupSigAlts(name, sem, alt)
     }
     // 数据位置 functor 的函数候选（构造子另行收集；pred 不进入项位置）
     private funcCandidates(term: Term): FuncInfo[] {
         const name = term.name, sem = term.semanticArity, alt = term.arity
-        if (term.qualified) {
-            if (this.isSelfQualified(term.qualified)) {
-                // 自限定：只看本模块声明，不回退导出索引（限定名不该看到 import 的符号）
-                return sigCandidates(this.sigAlts, name, sem, alt, 'func')
-            }
-            const vr = this.qualifiedModuleDoc(term.qualified)?.visitResult
-            return vr ? sigCandidates(vr.sigAlts, name, sem, alt, 'func') : []
+        const scope = this.qualifiedSigScope(term)
+        if (scope !== undefined) {
+            const map = scope === 'self' ? this.sigAlts : scope
+            return map ? sigCandidates(map, name, sem, alt, 'func') : []
         }
         const own = sigCandidates(this.sigAlts, name, sem, alt, 'func')
         if (own.length) return own
@@ -2530,24 +2558,18 @@ export class Visitor {
         // 状态变量 !X 在语义元数上按两个参数（!.X / !:X）计，但声明处常按单个逻辑参数计（如
         // `:- pred p(list(T)::out)` 配 `p(!List)`）。两种元数都查一次，兼容这种写法。
         const aAlt = typeof termOrName === 'string' ? a : termOrName.arity
-        // 单值查找 = 同 (kind, arity) 候选里最后一个（pushAlt 追加序即声明序，
-        // 末位与旧单值 Map 的后写覆盖语义一致）；优先级 func→pred、sem→alt 不变
-        const local = (map: Map<string, FuncInfo[]>) => {
-            const arr = map.get(name)
-            const lastOf = (kind: 'func' | 'pred', ar: number) =>
-                arr?.filter(f => f.kind === kind && f.arity === ar).at(-1)
-            return lastOf('func', a) ?? lastOf('func', aAlt)
-                ?? lastOf('pred', a) ?? lastOf('pred', aAlt)
-        }
+        // 单值查找 = sigCandidates 末位（sem→alt 遮蔽与旧 name/arity 双键查询
+        // 等价；func→pred 优先级不变）
+        const local = (map: Map<string, FuncInfo[]>) =>
+            sigCandidates(map, name, a, aAlt, 'func').at(-1)
+            ?? sigCandidates(map, name, a, aAlt, 'pred').at(-1)
         if (typeof termOrName !== 'string' && termOrName.qualified) {
-            // 自限定名（本模块里的 M.f）：模块尚未注册进 moduleManager，
-            // 只查本模块声明，不回退导出索引（限定名不该看到 import 的符号）
-            if (this.isSelfQualified(termOrName.qualified)) {
-                return local(this.sigAlts)
-            }
-            const vr = this.qualifiedModuleDoc(termOrName.qualified)?.visitResult
-            const sig = vr && local(vr.sigAlts)
+            const scope = this.qualifiedSigScope(termOrName)
+            // 自限定：硬作用域，只看本模块（不回退导出索引）
+            if (scope === 'self') return local(this.sigAlts)
+            const sig = scope && local(scope)
             if (sig) return sig
+            // 外部限定未命中 → 继续走无限定兜底（与旧 signatureOf 语义一致）
         }
         return local(this.sigAlts)
             ?? this.exportManager.lookupFunc(name, a) ?? this.exportManager.lookupFunc(name, aAlt)
