@@ -33,7 +33,8 @@ export async function HoverProvider(services: MercuryServices, params:HoverParam
             case 'type': {
                 if (term.qualified) return term.qualified
                 const arity = term.semanticArity ?? term.arity
-                const local = doc.visitResult?.types.get(keyOf(term.name, arity))
+                const local = doc.visitResult?.types.get(term.name)
+                    ?.filter(ti => ti.ctor.arity === arity).at(-1)
                 if (local) return local.ctor.module
                 return services.exportManager.lookupType({ name: term.name, arity })?.ctor.module
             }
@@ -42,7 +43,7 @@ export async function HoverProvider(services: MercuryServices, params:HoverParam
                 // 构造子结果类型的 ctor.module = 所属类型模块（推断已写入时最准）
                 const t = doc.visitResult?.inferred.get(term)?.type
                 if (t?.kind === 'ctor') return t.ctor.module
-                for (const ti of doc.visitResult?.types.values() ?? []) {
+                for (const ti of [...(doc.visitResult?.types.values() ?? [])].flat()) {
                     const ci = ti.constructors.find(c => c.ctor === term.name && c.arity === term.arity)
                     if (ci) return ci.typeCtor.module
                 }
@@ -131,7 +132,7 @@ export async function HoverProvider(services: MercuryServices, params:HoverParam
         }
         // constructor：type 行显示构造子签名（Mercury 里构造子即函数：参数 = 结果类型）
         else if (term.semanticType === 'constructor') {
-            for (const ti of doc.visitResult?.types.values() ?? []) {
+            for (const ti of [...(doc.visitResult?.types.values() ?? [])].flat()) {
                 const ci = ti.constructors.find(c => c.ctor === term.name && c.arity === term.arity)
                 if (ci) {
                     const args = ci.argTypes.map(merTypeToString).join(', ')

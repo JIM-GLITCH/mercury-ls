@@ -40,7 +40,7 @@ export type VisitResult = {
     // 相对名已在 visit 侧补成绝对名。需要源码位置时从 reference 索引找模块项
     imports: string[]
     // 类型推断基础数据（阶段 0+1 收集，尚未用于 link 消歧）
-    types: Map<string, TypeInfo>          // 类型构造子 → 类型定义（含构造子列表）
+    types: Map<string, TypeInfo[]>        // 类型名 → 定义候选（同 name 不同 arity/限定模块共存）
     // 同名的全部签名声明（func/pred 同命名空间；key 为裸 name，元数在
     // FuncInfo.arity 上过滤，查询走 sigCandidates 的 sem→alt 遮蔽语义）
     sigAlts: Map<string, FuncInfo[]>
@@ -76,7 +76,7 @@ export class Visitor {
     instReference = new MultiMap<string, Term>()
     modeReference = new MultiMap<string, Term>()
     exports = new MultiMap<string, Term>()
-    types = new Map<string, TypeInfo>()
+    types = new Map<string, TypeInfo[]>()
     sigAlts = new Map<string, FuncInfo[]>()
     modeSigs = new Map<string, string[]>()
     instDefs = new Map<string, InstDef>()
@@ -912,9 +912,18 @@ export class Visitor {
         return this.module ? moduleQualifiedName(this.module) : undefined
     }
     private addTypeInfo(info: TypeInfo) {
-        // 本模块表按裸 name/arity 键（模块内不可能同名同元数重复定义）；
-        // ctor.module 仍记录模块名，导出索引（ExportManager）用 qualified 键
-        this.types.set(keyOf(info.ctor.name, info.ctor.arity), info)
+        // 本模块表按裸 name 存候选（同 name 不同 arity/限定模块共存，查询时
+        // 按 ctor.arity/module 过滤）；同一 qualified 类型重复声明
+        //（interface/implementation 双写）后者覆盖，保持旧单值 Map 的语义
+        const k = keyOfTypeCtor(info.ctor)
+        const arr = this.types.get(info.ctor.name)
+        if (arr) {
+            const i = arr.findIndex(ti => keyOfTypeCtor(ti.ctor) === k)
+            if (i >= 0) arr[i] = info
+            else arr.push(info)
+        } else {
+            this.types.set(info.ctor.name, [info])
+        }
     }
     // Term → MerType 并补齐 ctor.module：termToMerType 只解出显式限定符，
     // 未限定引用在这里按「本模块声明优先 → 全局导出索引唯一命中」解析
@@ -941,17 +950,21 @@ export class Visitor {
         if (ct && ct.ctor.name === ctor.name && ct.ctor.arity === ctor.arity) {
             return ct.ctor.module ?? this.localModuleName()
         }
-        const local = this.types.get(keyOf(ctor.name, ctor.arity))
+        const cands = this.types.get(ctor.name)?.filter(ti => ti.ctor.arity === ctor.arity) ?? []
+        const local = cands.find(ti => ti.ctor.module === this.localModuleName()) ?? cands.at(-1)
         if (local) return local.ctor.module ?? this.localModuleName()
         return this.exportManager.lookupType(ctor)?.ctor.module
     }
     // 本模块类型查询：限定名只匹配同模块声明（ctor.module 与本模块名一致），
-    // 未限定名按 name/arity 命中本模块表
+    // 未限定名按 name/arity 命中本模块表；同 name+arity 多个限定声明时
+    // 优先本模块模块名，其次取最后声明
     private localTypeInfo(ctor: TypeCtor): TypeInfo | undefined {
-        const ti = this.types.get(keyOf(ctor.name, ctor.arity))
-        if (!ti) return undefined
-        if (ctor.module && ti.ctor.module && ctor.module !== ti.ctor.module) return undefined
-        return ti
+        const cands = this.types.get(ctor.name)?.filter(ti => ti.ctor.arity === ctor.arity) ?? []
+        const compat = ctor.module
+            ? cands.filter(ti => !ti.ctor.module || ti.ctor.module === ctor.module)
+            : cands
+        if (!compat.length) return undefined
+        return compat.find(ti => ti.ctor.module === this.localModuleName()) ?? compat.at(-1)
     }
     visitTypeConstrutors(term: Term) {
         let list = stream(semicolonBinaryTermToList(term))
@@ -2049,7 +2062,7 @@ export class Visitor {
                 if (ci.ctor === name && ci.arity === arity) constrs.push(ci)
             }
         }
-        for (const ti of this.types.values()) collectConstrs(ti)
+        for (const arr of this.types.values()) for (const ti of arr) collectConstrs(ti)
         // 跨模块：类型上下文明确时，纳入导入模块里同名同元数的类型构造子。
         // typeMap 按类型构造子键索引，直接查目标类型即可（原全表扫是 O(类型数)）
         if (expCtor) {

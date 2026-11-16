@@ -1058,7 +1058,7 @@ describe('goto definition / find references for insts (providers)', () => {
     )
     const types = (v as any).types as Map<string, any>
     // 类型 pair(K, V) → 2 个类型参数，构造子 `-`/2
-    const pair = types.get('pair/2')
+    const pair = types.get('pair')?.find((ti: any) => ti.ctor.arity === 2)
     expect(pair).toBeTruthy()
     expect(pair.params.length).toBe(2)
     const minusCtor = pair.constructors.find((c: any) => c.ctor === '-')
@@ -1069,7 +1069,7 @@ describe('goto definition / find references for insts (providers)', () => {
     expect(minusCtor.resultType.args.length).toBe(2)
 
     // list(T) 的 [] 与 [|] 构造子也收集
-    const list = types.get('list/1')
+    const list = types.get('list')?.find((ti: any) => ti.ctor.arity === 1)
     expect(list.constructors.find((c: any) => c.ctor === '[]')).toBeTruthy()
     expect(list.constructors.find((c: any) => c.ctor === '[|]')).toBeTruthy()
 

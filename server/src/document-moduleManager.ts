@@ -52,11 +52,11 @@ export class ExportManager {
     exportMap = new MultiMap<string, Term>()
     private byDoc = new Map<MercuryDocument, Term[]>()
     // 跨模块类型推断用：类型构造子表 + 函数/谓词签名表
-    // typeMap 键含 module（keyOfTypeCtor）：不同模块的同名类型不再互相覆盖；
-    // typeNameIndex 按裸 name/arity 反查，供未限定引用做唯一模块解析
-    private typeMap = new Map<string, TypeInfo>()
-    private typeNameIndex = new Map<string, TypeInfo[]>()
-    // 类型构造子键 → 声明它的文档：typeMap 收全部类型（含未导出的），
+    // typeIndex 按裸 name 存全部类型（func/pred 的 sigAltsMap 同构）：
+    // arity/module 在 TypeInfo.ctor 上过滤；ctor.module 区分同名跨模块类型，
+    // 未限定引用做唯一模块解析
+    private typeIndex = new Map<string, TypeInfo[]>()
+    // 类型构造子键（module.name/arity）→ 声明它的文档：收全部类型（含未导出的），
     // 供 goto-type-def 定位非导出类型的定义位置
     private typeDocMap = new Map<string, MercuryDocument>()
     // 同名的全部签名声明（func/pred 同命名空间；key 为裸 name，元数在
@@ -64,7 +64,7 @@ export class ExportManager {
     private sigAltsMap = new Map<string, FuncInfo[]>()
     private byDocTypes = new Map<MercuryDocument, { typeKeys: string[]; typeInfos: TypeInfo[]; consKeys: string[] }>()
     private byDocAlts = new Map<MercuryDocument, { key: string; fi: FuncInfo }[]>()
-    // 构造子名/元数 → 出现次数：hasCtor 查询 O(1)，避免每个歧义 functor 全扫 typeMap
+    // 构造子名/元数 → 出现次数：hasCtor 查询 O(1)，避免每个歧义 functor 全扫 typeIndex
     private ctorIndex = new Map<string, number>()
     set(doc: MercuryDocument) {
         this.delete(doc)
@@ -78,16 +78,14 @@ export class ExportManager {
         const typeKeys: string[] = []
         const typeInfos: TypeInfo[] = []
         const consKeys: string[] = []
-        for (const ti of vr.types.values()) {
+        for (const arr of vr.types.values()) for (const ti of arr) {
             const k = keyOfTypeCtor(ti.ctor)
-            this.typeMap.set(k, ti)
             this.typeDocMap.set(k, doc)
             typeKeys.push(k)
             typeInfos.push(ti)
-            const nk = keyOf(ti.ctor.name, ti.ctor.arity)
-            const arr = this.typeNameIndex.get(nk)
+            const arr = this.typeIndex.get(ti.ctor.name)
             if (arr) arr.push(ti)
-            else this.typeNameIndex.set(nk, [ti])
+            else this.typeIndex.set(ti.ctor.name, [ti])
             for (const ci of ti.constructors) {
                 const ck = keyOf(ci.ctor, ci.arity)
                 this.ctorIndex.set(ck, (this.ctorIndex.get(ck) ?? 0) + 1)
@@ -113,16 +111,14 @@ export class ExportManager {
         const oldT = this.byDocTypes.get(doc)
         if (oldT) {
             for (const k of oldT.typeKeys) {
-                this.typeMap.delete(k)
                 this.typeDocMap.delete(k)
             }
             for (const ti of oldT.typeInfos) {
-                const nk = keyOf(ti.ctor.name, ti.ctor.arity)
-                const arr = this.typeNameIndex.get(nk)
+                const arr = this.typeIndex.get(ti.ctor.name)
                 if (arr) {
                     const i = arr.indexOf(ti)
                     if (i >= 0) arr.splice(i, 1)
-                    if (arr.length === 0) this.typeNameIndex.delete(nk)
+                    if (arr.length === 0) this.typeIndex.delete(ti.ctor.name)
                 }
             }
             for (const k of oldT.consKeys) {
@@ -158,12 +154,11 @@ export class ExportManager {
         return result
     }
     // 跨模块推断查询：ctor.module 已知时精确命中（module.name/arity）；
-    // 未限定引用退回 typeNameIndex——同名类型跨多个模块时视为歧义，不猜
+    // 未限定引用退回裸 name 候选——同名类型跨多个模块时视为歧义，不猜
     lookupType(ctor: TypeCtor): TypeInfo | undefined {
-        const exact = this.typeMap.get(keyOfTypeCtor(ctor))
-        if (exact) return exact
-        if (ctor.module) return undefined
-        const cands = this.typeNameIndex.get(keyOf(ctor.name, ctor.arity)) ?? []
+        const cands = this.typeIndex.get(ctor.name)?.filter(ti => ti.ctor.arity === ctor.arity)
+        if (!cands?.length) return undefined
+        if (ctor.module) return cands.find(ti => ti.ctor.module === ctor.module)
         const modules = new Set(cands.map(ti => ti.ctor.module ?? ''))
         return modules.size === 1 ? cands[0] : undefined
     }
@@ -179,7 +174,7 @@ export class ExportManager {
     // 裸 name/arity → 全部声明该类型的文档（含未导出类型；goto-def 兜底用）
     lookupTypeDocs(name: string, arity: number): MercuryDocument[] {
         const docs: MercuryDocument[] = []
-        for (const ti of this.typeNameIndex.get(keyOf(name, arity)) ?? []) {
+        for (const ti of this.typeIndex.get(name)?.filter(ti => ti.ctor.arity === arity) ?? []) {
             const doc = this.typeDocMap.get(keyOfTypeCtor(ti.ctor))
             if (doc && !docs.includes(doc)) docs.push(doc)
         }
@@ -204,7 +199,7 @@ export class ExportManager {
         return [...this.lookupFuncAlts(name, sem, alt), ...this.lookupPredAlts(name, sem, alt)]
     }
     allTypeInfos(): Iterable<TypeInfo> {
-        return this.typeMap.values()
+        return [...this.typeIndex.values()].flat()
     }
     // 导出索引里是否存在同名同元数的类型构造子（跨模块歧义检测用，O(1)）
     hasCtor(name: string, arity: number): boolean {
