@@ -59,11 +59,10 @@ export class ExportManager {
     // 类型构造子键 → 声明它的文档：typeMap 收全部类型（含未导出的），
     // 供 goto-type-def 定位非导出类型的定义位置
     private typeDocMap = new Map<string, MercuryDocument>()
-    private funcMap = new Map<string, FuncInfo>()
-    // 同名同元数的全部声明签名（重载候选；funcMap/funcs 单值表只存其一）
+    // 同名同元数的全部声明签名（重载候选；单值查询经 lookupFunc 取末位派生）
     private funcAltsMap = new Map<string, FuncInfo[]>()
     private predAltsMap = new Map<string, FuncInfo[]>()
-    private byDocTypes = new Map<MercuryDocument, { typeKeys: string[]; typeInfos: TypeInfo[]; funcKeys: string[]; consKeys: string[] }>()
+    private byDocTypes = new Map<MercuryDocument, { typeKeys: string[]; typeInfos: TypeInfo[]; consKeys: string[] }>()
     private byDocAlts = new Map<MercuryDocument, { map: 'f' | 'p'; key: string; fi: FuncInfo }[]>()
     // 构造子名/元数 → 出现次数：hasCtor 查询 O(1)，避免每个歧义 functor 全扫 typeMap
     private ctorIndex = new Map<string, number>()
@@ -95,18 +94,15 @@ export class ExportManager {
                 consKeys.push(ck)
             }
         }
-        const funcKeys: string[] = []
         const altEntries: { map: 'f' | 'p'; key: string; fi: FuncInfo }[] = []
         const regFunc = (fi: FuncInfo, map: 'f' | 'p', alts: Map<string, FuncInfo[]>) => {
             const k = keyOf(fi.name, fi.arity)
-            this.funcMap.set(k, fi)
-            funcKeys.push(k)
             pushAlt(alts, k, fi)
             altEntries.push({ map, key: k, fi })
         }
         for (const arr of vr.funcAlts.values()) for (const fi of arr) regFunc(fi, 'f', this.funcAltsMap)
         for (const arr of vr.predAlts.values()) for (const fi of arr) regFunc(fi, 'p', this.predAltsMap)
-        this.byDocTypes.set(doc, { typeKeys, typeInfos, funcKeys, consKeys })
+        this.byDocTypes.set(doc, { typeKeys, typeInfos, consKeys })
         this.byDocAlts.set(doc, altEntries)
     }
     delete(doc: MercuryDocument) {
@@ -130,7 +126,6 @@ export class ExportManager {
                     if (arr.length === 0) this.typeNameIndex.delete(nk)
                 }
             }
-            for (const k of oldT.funcKeys) this.funcMap.delete(k)
             for (const k of oldT.consKeys) {
                 const n = (this.ctorIndex.get(k) ?? 1) - 1
                 if (n <= 0) this.ctorIndex.delete(k)
@@ -192,8 +187,12 @@ export class ExportManager {
         }
         return docs
     }
+    // 单值签名查询：func/pred 候选末位（与旧 funcMap 后写覆盖语义一致；
+    // func 与 pred 同 key 撞名时 func 优先——原 funcMap 里 pred 后注册会覆盖，
+    // 但该撞名本身是歧义场景，取 func 与 lookupSigAlts 的优先级一致）
     lookupFunc(name: string, arity: number): FuncInfo | undefined {
-        return this.funcMap.get(keyOf(name, arity))
+        const k = keyOf(name, arity)
+        return this.funcAltsMap.get(k)?.at(-1) ?? this.predAltsMap.get(k)?.at(-1)
     }
     // 重载候选查询：func / pred / 合并（调用位置两者皆可）
     lookupFuncAlts(name: string, sem: number, alt: number): FuncInfo[] {
