@@ -104,8 +104,8 @@ export class ExportManager {
             pushAlt(alts, k, fi)
             altEntries.push({ map, key: k, fi })
         }
-        for (const fi of vr.funcs.values()) regFunc(fi, 'f', this.funcAltsMap)
-        for (const fi of vr.preds.values()) regFunc(fi, 'p', this.predAltsMap)
+        for (const arr of vr.funcAlts.values()) for (const fi of arr) regFunc(fi, 'f', this.funcAltsMap)
+        for (const arr of vr.predAlts.values()) for (const fi of arr) regFunc(fi, 'p', this.predAltsMap)
         this.byDocTypes.set(doc, { typeKeys, typeInfos, funcKeys, consKeys })
         this.byDocAlts.set(doc, altEntries)
     }

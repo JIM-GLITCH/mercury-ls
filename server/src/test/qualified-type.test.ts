@@ -35,7 +35,7 @@ describe('module-qualified type constructors', () => {
     await mk(':- module io.\n:- interface.\n:- type error.\n:- end_module io.\n', 'io')
     const doc = await mk(
       ':- module m.\n:- interface.\n:- pred p(io.error).\n:- end_module m.\n', 'm')
-    const p = doc.visitResult!.preds.get('p/1')!
+    const p = doc.visitResult!.predAlts.get('p/1')![0]
     expect(merTypeToString(p.argTypes[0])).toBe('io.error')
   })
 
@@ -43,7 +43,7 @@ describe('module-qualified type constructors', () => {
     await mk(':- module msi.\n:- interface.\n:- type stream_info.\n:- end_module msi.\n', 'msi')
     const doc = await mk(
       ':- module m.\n:- interface.\n:- import_module msi.\n:- pred p(stream_info).\n:- end_module m.\n', 'm2')
-    const p = doc.visitResult!.preds.get('p/1')!
+    const p = doc.visitResult!.predAlts.get('p/1')![0]
     expect(merTypeToString(p.argTypes[0])).toBe('msi.stream_info')
   })
 
@@ -63,7 +63,7 @@ describe('module-qualified type constructors', () => {
     await mk(':- module eb.\n:- interface.\n:- type dup.\n:- end_module eb.\n', 'eb')
     const doc = await mk(
       ':- module m.\n:- interface.\n:- pred p(dup).\n:- end_module m.\n', 'm3')
-    const p = doc.visitResult!.preds.get('p/1')!
+    const p = doc.visitResult!.predAlts.get('p/1')![0]
     // ea.dup 与 eb.dup 并存 → 不猜模块，显示裸名（unify 仍按通配兼容）
     expect(merTypeToString(p.argTypes[0])).toBe('dup')
   })

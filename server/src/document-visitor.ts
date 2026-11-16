@@ -41,9 +41,7 @@ export type VisitResult = {
     imports: string[]
     // 类型推断基础数据（阶段 0+1 收集，尚未用于 link 消歧）
     types: Map<string, TypeInfo>          // 类型构造子 → 类型定义（含构造子列表）
-    funcs: Map<string, FuncInfo>          // 函数签名（name/arity → 参数+返回类型）
-    preds: Map<string, FuncInfo>          // 谓词签名（name/arity → 参数类型）
-    // 同名同元数的全部声明签名（重载候选；funcs/preds 只存最后一个，供签名查找兜底）
+    // 同名同元数的全部声明签名（重载候选；单值查找取最后一个，供签名查找兜底）
     funcAlts: Map<string, FuncInfo[]>
     predAlts: Map<string, FuncInfo[]>
     // name/arity → mode 声明展示串（每个声明一行，如 add(in, in) = (out)；未注解用默认 in/out）
@@ -79,8 +77,6 @@ export class Visitor {
     modeReference = new MultiMap<string, Term>()
     exports = new MultiMap<string, Term>()
     types = new Map<string, TypeInfo>()
-    funcs = new Map<string, FuncInfo>()
-    preds = new Map<string, FuncInfo>()
     funcAlts = new Map<string, FuncInfo[]>()
     predAlts = new Map<string, FuncInfo[]>()
     modeSigs = new Map<string, string[]>()
@@ -131,8 +127,6 @@ export class Visitor {
             exports: this.exports,
             imports: this.imports,
             types: this.types,
-            funcs: this.funcs,
-            preds: this.preds,
             funcAlts: this.funcAlts,
             predAlts: this.predAlts,
             modeSigs: this.modeSigs,
@@ -1263,8 +1257,8 @@ export class Visitor {
         } else {
             const head = this.visitQualifiedTerm(term) ?? term
             if (head.semanticArity > 0 && !isVariable(head) &&
-                (this.preds.has(keyOf(head.name, head.semanticArity)) ||
-                    this.funcs.has(keyOf(head.name, head.semanticArity)))) {
+                (this.predAlts.get(keyOf(head.name, head.semanticArity))?.length ||
+                    this.funcAlts.get(keyOf(head.name, head.semanticArity))?.length)) {
                 // `:- mode P(Modes).`（无确定性后缀）的 pred/func-mode 声明；
                 // 与抽象 mode 声明（:- mode M.，通常 arity 0 或非 pred/func 名）区分
                 this.visitFuncOrPredModeDecl(head)
@@ -1294,8 +1288,7 @@ export class Visitor {
         label(head, "pred")
         const key = keyOf(head.name, head.semanticArity)
         const refs = head.args.map(modeTermToRef)
-        const fi = this.preds.get(key)
-        if (fi) {
+        for (const fi of this.predAlts.get(key) ?? []) {
             fi.modes = fi.modes ?? []
             fi.modes.push({ argModeRefs: refs, det: determinism })
             if (!fi.hasExplicitModes && fi.modes.length === 1) fi.argModeRefs = refs
@@ -1312,8 +1305,7 @@ export class Visitor {
         const key = keyOf(head.name, head.semanticArity)
         const refs = head.args.map(modeTermToRef)
         const retRef = modeTermToRef(term.args[1])
-        const fi = this.funcs.get(key)
-        if (fi) {
+        for (const fi of this.funcAlts.get(key) ?? []) {
             fi.modes = fi.modes ?? []
             fi.modes.push({ argModeRefs: refs, resultModeRef: retRef, det: determinism })
             if (!fi.hasExplicitModes && fi.modes.length === 1) {
@@ -1480,7 +1472,6 @@ export class Visitor {
                 ? [{ argModeRefs: argRefs, resultModeRef: retRef, det: determinism }]
                 : [],
         }
-        this.funcs.set(key, info)
         this.pushAlt(this.funcAlts, key, info)
         // 每个 mode 声明一行（Mercury 默认 mode：参数 in，函数结果 out）；带确定性后缀
         const modes = func.args.map(modeOfArg).map(m => m ?? 'in')
@@ -1502,7 +1493,6 @@ export class Visitor {
                 ? [{ argModeRefs: argRefs, det: determinism }]
                 : [],
         }
-        this.preds.set(key, info)
         this.pushAlt(this.predAlts, key, info)
         const modes = pred.args.map(modeOfArg).map(m => m ?? 'in')
         const det = determinism ? ` is ${determinism}` : ''
@@ -2530,20 +2520,23 @@ export class Visitor {
         // 状态变量 !X 在语义元数上按两个参数（!.X / !:X）计，但声明处常按单个逻辑参数计（如
         // `:- pred p(list(T)::out)` 配 `p(!List)`）。两种元数都查一次，兼容这种写法。
         const aAlt = typeof termOrName === 'string' ? a : termOrName.arity
+        // 单值查找 = 同 key 候选里最后一个（pushAlt 追加序即声明序，末位与旧
+        // funcs/preds 单值 Map 的后写覆盖语义一致）；优先级 func→pred、sem→alt 不变
+        const lastOf = (map: Map<string, FuncInfo[]>, k: string) => map.get(k)?.at(-1)
+        const local = (fa: Map<string, FuncInfo[]>, pa: Map<string, FuncInfo[]>) =>
+            lastOf(fa, keyOf(name, a)) ?? lastOf(fa, keyOf(name, aAlt))
+            ?? lastOf(pa, keyOf(name, a)) ?? lastOf(pa, keyOf(name, aAlt))
         if (typeof termOrName !== 'string' && termOrName.qualified) {
             // 自限定名（本模块里的 M.f）：模块尚未注册进 moduleManager，
             // 只查本模块声明，不回退导出索引（限定名不该看到 import 的符号）
             if (this.isSelfQualified(termOrName.qualified)) {
-                return this.funcs.get(keyOf(name, a)) ?? this.funcs.get(keyOf(name, aAlt))
-                    ?? this.preds.get(keyOf(name, a)) ?? this.preds.get(keyOf(name, aAlt))
+                return local(this.funcAlts, this.predAlts)
             }
-            const doc = this.qualifiedModuleDoc(termOrName.qualified)
-            const sig = doc?.visitResult?.funcs.get(keyOf(name, a)) ?? doc?.visitResult?.funcs.get(keyOf(name, aAlt))
-                ?? doc?.visitResult?.preds.get(keyOf(name, a)) ?? doc?.visitResult?.preds.get(keyOf(name, aAlt))
+            const vr = this.qualifiedModuleDoc(termOrName.qualified)?.visitResult
+            const sig = vr && local(vr.funcAlts, vr.predAlts)
             if (sig) return sig
         }
-        return this.funcs.get(keyOf(name, a)) ?? this.funcs.get(keyOf(name, aAlt))
-            ?? this.preds.get(keyOf(name, a)) ?? this.preds.get(keyOf(name, aAlt))
+        return local(this.funcAlts, this.predAlts)
             ?? this.exportManager.lookupFunc(name, a) ?? this.exportManager.lookupFunc(name, aAlt)
     }
     private varKey(term: Term): string {
