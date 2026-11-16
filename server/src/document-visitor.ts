@@ -9,7 +9,7 @@ import { ExportManager, ModuleManager, moduleQualifiedName } from './document-mo
 import type { MercuryServices } from './services'
 import {
     applySubst, ConsInfo, FuncInfo, InferredInfo, MerType, TypeCtor, TypeInfo,
-    keyOf, keyOfTypeCtor, modeOfArg, argModesOf, termToMerType, typeHeadParts, unify,
+    keyOf, keyOfTypeCtor, modeOfArg, argModesOf, termToMerType, typeHeadParts, unify, sigCandidates,
 } from './document-type'
 import {
     instTermToMerInst, instFunctorAlts, modeTermToRef, instDefHead,
@@ -41,9 +41,9 @@ export type VisitResult = {
     imports: string[]
     // 类型推断基础数据（阶段 0+1 收集，尚未用于 link 消歧）
     types: Map<string, TypeInfo>          // 类型构造子 → 类型定义（含构造子列表）
-    // 同名同元数的全部声明签名（重载候选；单值查找取最后一个，供签名查找兜底）
-    funcAlts: Map<string, FuncInfo[]>
-    predAlts: Map<string, FuncInfo[]>
+    // 同名的全部签名声明（func/pred 同命名空间；key 为裸 name，元数在
+    // FuncInfo.arity 上过滤，查询走 sigCandidates 的 sem→alt 遮蔽语义）
+    sigAlts: Map<string, FuncInfo[]>
     // name/arity → mode 声明展示串（每个声明一行，如 add(in, in) = (out)；未注解用默认 in/out）
     modeSigs: Map<string, string[]>
     // Phase A：:- inst / :- mode 声明的结构化表示（mode 分析用）
@@ -77,8 +77,7 @@ export class Visitor {
     modeReference = new MultiMap<string, Term>()
     exports = new MultiMap<string, Term>()
     types = new Map<string, TypeInfo>()
-    funcAlts = new Map<string, FuncInfo[]>()
-    predAlts = new Map<string, FuncInfo[]>()
+    sigAlts = new Map<string, FuncInfo[]>()
     modeSigs = new Map<string, string[]>()
     instDefs = new Map<string, InstDef>()
     modeDefs = new Map<string, ModeDef>()
@@ -127,8 +126,7 @@ export class Visitor {
             exports: this.exports,
             imports: this.imports,
             types: this.types,
-            funcAlts: this.funcAlts,
-            predAlts: this.predAlts,
+            sigAlts: this.sigAlts,
             modeSigs: this.modeSigs,
             instDefs: this.instDefs,
             modeDefs: this.modeDefs,
@@ -1257,8 +1255,7 @@ export class Visitor {
         } else {
             const head = this.visitQualifiedTerm(term) ?? term
             if (head.semanticArity > 0 && !isVariable(head) &&
-                (this.predAlts.get(keyOf(head.name, head.semanticArity))?.length ||
-                    this.funcAlts.get(keyOf(head.name, head.semanticArity))?.length)) {
+                this.sigAlts.get(head.name)?.some(f => f.arity === head.semanticArity)) {
                 // `:- mode P(Modes).`（无确定性后缀）的 pred/func-mode 声明；
                 // 与抽象 mode 声明（:- mode M.，通常 arity 0 或非 pred/func 名）区分
                 this.visitFuncOrPredModeDecl(head)
@@ -1288,7 +1285,8 @@ export class Visitor {
         label(head, "pred")
         const key = keyOf(head.name, head.semanticArity)
         const refs = head.args.map(modeTermToRef)
-        for (const fi of this.predAlts.get(key) ?? []) {
+        for (const fi of this.sigAlts.get(head.name)?.filter(
+            f => f.kind === 'pred' && f.arity === head.semanticArity) ?? []) {
             fi.modes = fi.modes ?? []
             fi.modes.push({ argModeRefs: refs, det: determinism })
             if (!fi.hasExplicitModes && fi.modes.length === 1) fi.argModeRefs = refs
@@ -1305,7 +1303,8 @@ export class Visitor {
         const key = keyOf(head.name, head.semanticArity)
         const refs = head.args.map(modeTermToRef)
         const retRef = modeTermToRef(term.args[1])
-        for (const fi of this.funcAlts.get(key) ?? []) {
+        for (const fi of this.sigAlts.get(head.name)?.filter(
+            f => f.kind === 'func' && f.arity === head.semanticArity) ?? []) {
             fi.modes = fi.modes ?? []
             fi.modes.push({ argModeRefs: refs, resultModeRef: retRef, det: determinism })
             if (!fi.hasExplicitModes && fi.modes.length === 1) {
@@ -1457,8 +1456,8 @@ export class Visitor {
     private recordFuncInfo(func: Term, ret: Term | undefined, determinism?: string) {
         const argRefs = func.args.map(a => this.argModeRefOf(a))
         const retRef = ret ? this.retModeRefOf(ret) : undefined
-        const key = keyOf(func.name, func.semanticArity)
         const info: FuncInfo = {
+            kind: 'func',
             name: func.name, arity: func.semanticArity, module: this.localModuleName(),
             argTypes: this.shareTypeParams(func.args.map(a => this.toMerType(a))),
             argModes: argModesOf(func.args),
@@ -1472,7 +1471,7 @@ export class Visitor {
                 ? [{ argModeRefs: argRefs, resultModeRef: retRef, det: determinism }]
                 : [],
         }
-        this.pushAlt(this.funcAlts, key, info)
+        this.pushAlt(this.sigAlts, func.name, info)
         // 每个 mode 声明一行（Mercury 默认 mode：参数 in，函数结果 out）；带确定性后缀
         const modes = func.args.map(modeOfArg).map(m => m ?? 'in')
         const rm = ret ? modeOfArg(ret) ?? 'out' : 'out'
@@ -1482,8 +1481,8 @@ export class Visitor {
     // 记录谓词签名（name/arity → 参数类型/mode；谓词无返回类型）
     private recordPredInfo(pred: Term, determinism?: string) {
         const argRefs = pred.args.map(a => this.argModeRefOf(a))
-        const key = keyOf(pred.name, pred.semanticArity)
         const info: FuncInfo = {
+            kind: 'pred',
             name: pred.name, arity: pred.semanticArity, module: this.localModuleName(),
             argTypes: this.shareTypeParams(pred.args.map(a => this.toMerType(a))),
             argModes: argModesOf(pred.args),
@@ -1493,7 +1492,7 @@ export class Visitor {
                 ? [{ argModeRefs: argRefs, det: determinism }]
                 : [],
         }
-        this.pushAlt(this.predAlts, key, info)
+        this.pushAlt(this.sigAlts, pred.name, info)
         const modes = pred.args.map(modeOfArg).map(m => m ?? 'in')
         const det = determinism ? ` is ${determinism}` : ''
         this.pushModeSig(keyOf(pred.name, pred.semanticArity), `${this.qualDisplayName(pred.name)}(${modes.join(', ')})${det}`)
@@ -2065,7 +2064,7 @@ export class Visitor {
         // 不触发"限定名直取目标模块"的 qualPick 捷径，走常规消歧规则
         const selfQ = this.isSelfQualified(term.qualified)
         const hasOwnFunc = (!term.qualified || selfQ)
-            && this.altsOf(this.funcAlts, name, term.semanticArity, term.arity).length > 0
+            && sigCandidates(this.sigAlts, name, term.semanticArity, term.arity, 'func').length > 0
         let fComputed = false
         let fCache: { sig: FuncInfo; verified: boolean } | undefined
         const pickFunc = () => {
@@ -2257,15 +2256,16 @@ export class Visitor {
         if (['::/2', '>>/2'].includes(argTerm.nameArity)) return argTerm.args[0]
         return argTerm
     }
-    // 重载候选收集：同一 name/arity 的每条声明都保留（签名不同才算不同候选，
-    // 重复声明同一签名去重——如 interface/implementation 两段都声明时）
-    private pushAlt(map: Map<string, FuncInfo[]>, key: string, info: FuncInfo) {
-        const sig = JSON.stringify({ a: info.argTypes, r: info.resultType })
-        const arr = map.get(key)
+    // 重载候选收集：同一 name 的每条声明都保留（签名不同才算不同候选，
+    // 重复声明同一签名去重——如 interface/implementation 两段都声明时；
+    // kind+arity 进签名键，func/pred 同签名与不同元数都不误去重）
+    private pushAlt(map: Map<string, FuncInfo[]>, name: string, info: FuncInfo) {
+        const sig = JSON.stringify({ k: info.kind, a: info.arity, t: info.argTypes, r: info.resultType })
+        const arr = map.get(name)
         if (arr) {
-            if (!arr.some(f => JSON.stringify({ a: f.argTypes, r: f.resultType }) === sig)) arr.push(info)
+            if (!arr.some(f => JSON.stringify({ k: f.kind, a: f.arity, t: f.argTypes, r: f.resultType }) === sig)) arr.push(info)
         } else {
-            map.set(key, [info])
+            map.set(name, [info])
         }
     }
     // 实参的「已知类型」：变量查 varTypes（经 subst 解析），字面量给构造子类型；
@@ -2416,10 +2416,6 @@ export class Visitor {
     private hasCrossConstrs(name: string, arity: number): boolean {
         return this.exportManager.hasCtor(name, arity)
     }
-    // alts 表按语义元数优先、arity 兜底取候选（与 signatureOf 的双键查询一致）
-    private altsOf(map: Map<string, FuncInfo[]>, name: string, sem: number, alt: number): FuncInfo[] {
-        return map.get(keyOf(name, sem)) ?? map.get(keyOf(name, alt)) ?? []
-    }
     // 限定名是否指向当前模块自身（如 array.m 里的 array.size）：
     // 模块要等 visit 完才注册进 moduleManager，自限定调用必须按本模块符号解析，
     // 否则在自身 visit 期间永远查不到（首遍推断失败 → 重建后表现为类型回退）
@@ -2440,16 +2436,17 @@ export class Visitor {
     // 本模块没有时回退全局导出索引（偏宽，由 pickSig 的实参类型消歧兜底）
     private callCandidates(term: Term): FuncInfo[] {
         const name = term.name, sem = term.semanticArity, alt = term.arity
+        const own = (map: Map<string, FuncInfo[]>) => [
+            ...sigCandidates(map, name, sem, alt, 'func'),
+            ...sigCandidates(map, name, sem, alt, 'pred'),
+        ]
         if (term.qualified) {
-            if (this.isSelfQualified(term.qualified)) {
-                return [...this.altsOf(this.funcAlts, name, sem, alt), ...this.altsOf(this.predAlts, name, sem, alt)]
-            }
+            if (this.isSelfQualified(term.qualified)) return own(this.sigAlts)
             const vr = this.qualifiedModuleDoc(term.qualified)?.visitResult
-            if (!vr) return []
-            return [...this.altsOf(vr.funcAlts, name, sem, alt), ...this.altsOf(vr.predAlts, name, sem, alt)]
+            return vr ? own(vr.sigAlts) : []
         }
-        const own = [...this.altsOf(this.funcAlts, name, sem, alt), ...this.altsOf(this.predAlts, name, sem, alt)]
-        if (own.length) return own
+        const local = own(this.sigAlts)
+        if (local.length) return local
         return this.exportManager.lookupSigAlts(name, sem, alt)
     }
     // 数据位置 functor 的函数候选（构造子另行收集；pred 不进入项位置）
@@ -2458,12 +2455,12 @@ export class Visitor {
         if (term.qualified) {
             if (this.isSelfQualified(term.qualified)) {
                 // 自限定：只看本模块声明，不回退导出索引（限定名不该看到 import 的符号）
-                return this.altsOf(this.funcAlts, name, sem, alt)
+                return sigCandidates(this.sigAlts, name, sem, alt, 'func')
             }
             const vr = this.qualifiedModuleDoc(term.qualified)?.visitResult
-            return vr ? this.altsOf(vr.funcAlts, name, sem, alt) : []
+            return vr ? sigCandidates(vr.sigAlts, name, sem, alt, 'func') : []
         }
-        const own = this.altsOf(this.funcAlts, name, sem, alt)
+        const own = sigCandidates(this.sigAlts, name, sem, alt, 'func')
         if (own.length) return own
         return this.exportManager.lookupFuncAlts(name, sem, alt)
     }
@@ -2520,23 +2517,26 @@ export class Visitor {
         // 状态变量 !X 在语义元数上按两个参数（!.X / !:X）计，但声明处常按单个逻辑参数计（如
         // `:- pred p(list(T)::out)` 配 `p(!List)`）。两种元数都查一次，兼容这种写法。
         const aAlt = typeof termOrName === 'string' ? a : termOrName.arity
-        // 单值查找 = 同 key 候选里最后一个（pushAlt 追加序即声明序，末位与旧
-        // funcs/preds 单值 Map 的后写覆盖语义一致）；优先级 func→pred、sem→alt 不变
-        const lastOf = (map: Map<string, FuncInfo[]>, k: string) => map.get(k)?.at(-1)
-        const local = (fa: Map<string, FuncInfo[]>, pa: Map<string, FuncInfo[]>) =>
-            lastOf(fa, keyOf(name, a)) ?? lastOf(fa, keyOf(name, aAlt))
-            ?? lastOf(pa, keyOf(name, a)) ?? lastOf(pa, keyOf(name, aAlt))
+        // 单值查找 = 同 (kind, arity) 候选里最后一个（pushAlt 追加序即声明序，
+        // 末位与旧单值 Map 的后写覆盖语义一致）；优先级 func→pred、sem→alt 不变
+        const local = (map: Map<string, FuncInfo[]>) => {
+            const arr = map.get(name)
+            const lastOf = (kind: 'func' | 'pred', ar: number) =>
+                arr?.filter(f => f.kind === kind && f.arity === ar).at(-1)
+            return lastOf('func', a) ?? lastOf('func', aAlt)
+                ?? lastOf('pred', a) ?? lastOf('pred', aAlt)
+        }
         if (typeof termOrName !== 'string' && termOrName.qualified) {
             // 自限定名（本模块里的 M.f）：模块尚未注册进 moduleManager，
             // 只查本模块声明，不回退导出索引（限定名不该看到 import 的符号）
             if (this.isSelfQualified(termOrName.qualified)) {
-                return local(this.funcAlts, this.predAlts)
+                return local(this.sigAlts)
             }
             const vr = this.qualifiedModuleDoc(termOrName.qualified)?.visitResult
-            const sig = vr && local(vr.funcAlts, vr.predAlts)
+            const sig = vr && local(vr.sigAlts)
             if (sig) return sig
         }
-        return local(this.funcAlts, this.predAlts)
+        return local(this.sigAlts)
             ?? this.exportManager.lookupFunc(name, a) ?? this.exportManager.lookupFunc(name, aAlt)
     }
     private varKey(term: Term): string {

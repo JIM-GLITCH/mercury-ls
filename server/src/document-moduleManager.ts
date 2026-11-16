@@ -2,7 +2,7 @@ import { MercuryDocument } from './document-manager'
 // import { moduleMap } from './globalSpace'
 import { MultiMap } from './multimap'
 import { Term, moduleQualifiedName } from './term'
-import { FuncInfo, TypeCtor, TypeInfo, keyOf, keyOfTypeCtor } from './document-type'
+import { FuncInfo, TypeCtor, TypeInfo, keyOf, keyOfTypeCtor, sigCandidates } from './document-type'
 
 // 限定名工具统一收敛在 term.ts（对 './2' 原始链与 .qualified 规范化形态都正确）；
 // 此处 re-export 保持既有 import 路径不变
@@ -59,11 +59,11 @@ export class ExportManager {
     // 类型构造子键 → 声明它的文档：typeMap 收全部类型（含未导出的），
     // 供 goto-type-def 定位非导出类型的定义位置
     private typeDocMap = new Map<string, MercuryDocument>()
-    // 同名同元数的全部声明签名（重载候选；单值查询经 lookupFunc 取末位派生）
-    private funcAltsMap = new Map<string, FuncInfo[]>()
-    private predAltsMap = new Map<string, FuncInfo[]>()
+    // 同名的全部签名声明（func/pred 同命名空间；key 为裸 name，元数在
+    // FuncInfo.arity 上过滤，查询走 sigCandidates 的 sem→alt 遮蔽语义）
+    private sigAltsMap = new Map<string, FuncInfo[]>()
     private byDocTypes = new Map<MercuryDocument, { typeKeys: string[]; typeInfos: TypeInfo[]; consKeys: string[] }>()
-    private byDocAlts = new Map<MercuryDocument, { map: 'f' | 'p'; key: string; fi: FuncInfo }[]>()
+    private byDocAlts = new Map<MercuryDocument, { key: string; fi: FuncInfo }[]>()
     // 构造子名/元数 → 出现次数：hasCtor 查询 O(1)，避免每个歧义 functor 全扫 typeMap
     private ctorIndex = new Map<string, number>()
     set(doc: MercuryDocument) {
@@ -94,14 +94,13 @@ export class ExportManager {
                 consKeys.push(ck)
             }
         }
-        const altEntries: { map: 'f' | 'p'; key: string; fi: FuncInfo }[] = []
-        const regFunc = (fi: FuncInfo, map: 'f' | 'p', alts: Map<string, FuncInfo[]>) => {
-            const k = keyOf(fi.name, fi.arity)
-            pushAlt(alts, k, fi)
-            altEntries.push({ map, key: k, fi })
+        const altEntries: { key: string; fi: FuncInfo }[] = []
+        for (const arr of vr.sigAlts.values()) {
+            for (const fi of arr) {
+                pushAlt(this.sigAltsMap, fi.name, fi)
+                altEntries.push({ key: fi.name, fi })
+            }
         }
-        for (const arr of vr.funcAlts.values()) for (const fi of arr) regFunc(fi, 'f', this.funcAltsMap)
-        for (const arr of vr.predAlts.values()) for (const fi of arr) regFunc(fi, 'p', this.predAltsMap)
         this.byDocTypes.set(doc, { typeKeys, typeInfos, consKeys })
         this.byDocAlts.set(doc, altEntries)
     }
@@ -136,12 +135,11 @@ export class ExportManager {
         const oldAlts = this.byDocAlts.get(doc)
         if (oldAlts) {
             for (const e of oldAlts) {
-                const map = e.map === 'f' ? this.funcAltsMap : this.predAltsMap
-                const arr = map.get(e.key)
+                const arr = this.sigAltsMap.get(e.key)
                 if (arr) {
                     const i = arr.indexOf(e.fi)
                     if (i >= 0) arr.splice(i, 1)
-                    if (arr.length === 0) map.delete(e.key)
+                    if (arr.length === 0) this.sigAltsMap.delete(e.key)
                 }
             }
             this.byDocAlts.delete(doc)
@@ -187,24 +185,23 @@ export class ExportManager {
         }
         return docs
     }
-    // 单值签名查询：func/pred 候选末位（与旧 funcMap 后写覆盖语义一致；
-    // func 与 pred 同 key 撞名时 func 优先——原 funcMap 里 pred 后注册会覆盖，
-    // 但该撞名本身是歧义场景，取 func 与 lookupSigAlts 的优先级一致）
+    // 单值签名查询：func/pred 候选末位（func 优先——与 lookupSigAlts 的
+    // func→pred 拼接顺序一致；同 kind 同元数多声明取最后注册的）
     lookupFunc(name: string, arity: number): FuncInfo | undefined {
-        const k = keyOf(name, arity)
-        return this.funcAltsMap.get(k)?.at(-1) ?? this.predAltsMap.get(k)?.at(-1)
+        const arr = this.sigAltsMap.get(name)
+        return arr?.filter(f => f.kind === 'func' && f.arity === arity).at(-1)
+            ?? arr?.filter(f => f.kind === 'pred' && f.arity === arity).at(-1)
     }
-    // 重载候选查询：func / pred / 合并（调用位置两者皆可）
+    // 重载候选查询：func / pred / 合并（调用位置两者皆可；
+    // 各 kind 内部仍是 sem→alt 遮蔽，func 候选排在 pred 前）
     lookupFuncAlts(name: string, sem: number, alt: number): FuncInfo[] {
-        return this.funcAltsMap.get(keyOf(name, sem)) ?? this.funcAltsMap.get(keyOf(name, alt)) ?? []
+        return sigCandidates(this.sigAltsMap, name, sem, alt, 'func')
     }
     lookupPredAlts(name: string, sem: number, alt: number): FuncInfo[] {
-        return this.predAltsMap.get(keyOf(name, sem)) ?? this.predAltsMap.get(keyOf(name, alt)) ?? []
+        return sigCandidates(this.sigAltsMap, name, sem, alt, 'pred')
     }
     lookupSigAlts(name: string, sem: number, alt: number): FuncInfo[] {
-        const f = this.lookupFuncAlts(name, sem, alt)
-        const p = this.lookupPredAlts(name, sem, alt)
-        return f.length ? (p.length ? [...f, ...p] : f) : p
+        return [...this.lookupFuncAlts(name, sem, alt), ...this.lookupPredAlts(name, sem, alt)]
     }
     allTypeInfos(): Iterable<TypeInfo> {
         return this.typeMap.values()
@@ -215,13 +212,14 @@ export class ExportManager {
     }
 }
 
-// 重载候选收集：同一 name/arity 的每条声明都保留；签名完全相同的重复声明去重
-function pushAlt(map: Map<string, FuncInfo[]>, key: string, fi: FuncInfo) {
-    const sig = JSON.stringify({ a: fi.argTypes, r: fi.resultType })
-    const arr = map.get(key)
+// 重载候选收集：同一 name 的每条声明都保留；签名完全相同的重复声明去重
+//（kind+arity 进签名键，func/pred 同签名与不同元数都不误去重）
+function pushAlt(map: Map<string, FuncInfo[]>, name: string, fi: FuncInfo) {
+    const sig = JSON.stringify({ k: fi.kind, a: fi.arity, t: fi.argTypes, r: fi.resultType })
+    const arr = map.get(name)
     if (arr) {
-        if (!arr.some(f => JSON.stringify({ a: f.argTypes, r: f.resultType }) === sig)) arr.push(fi)
+        if (!arr.some(f => JSON.stringify({ k: f.kind, a: f.arity, t: f.argTypes, r: f.resultType }) === sig)) arr.push(fi)
     } else {
-        map.set(key, [fi])
+        map.set(name, [fi])
     }
 }

@@ -37,10 +37,12 @@ export interface ProcMode {
     det?: string
 }
 
-// 函数/谓词签名信息（对应 FuncInfo / PredInfo）
+// 函数/谓词签名信息（对应 FuncInfo / PredInfo）；func 与 pred 同命名空间，
+// 统一存 sigAlts（name → FuncInfo[]），kind 区分；数据位置只认 func
 export interface FuncInfo {
+    kind: 'func' | 'pred'
     name: string
-    arity: number
+    arity: number           // 语义元数（!X 按两个参数计；调用点另有语法元数 alt 兜底）
     module?: string       // 定义模块点分名（hover 显示 module.name；跨模块签名经导出索引带出）
     argTypes: MerType[]
     argModes?: (string | undefined)[] // 各参数的 mode（::/>> 显式声明时收集；hover 显示用）
@@ -92,6 +94,22 @@ export function keyOfTypeCtor(tc: TypeCtor): string {
 }
 export function keyOf(name: string, arity: number): string {
     return name + '/' + arity
+}
+
+// 签名候选查询：sigAlts 按裸 name 存全部声明（func/pred 同命名空间），
+// 元数过滤走 FuncInfo.arity（语义元数）；sem 有候选优先、无候选退 alt
+//（复刻旧 name/arity 双键查询 `get(semKey) ?? get(altKey)` 的遮蔽语义——
+// sem 命中时 alt 元数的声明不参与，避免 !X 调用把两种元数写法的声明混进候选）
+export function sigCandidates(
+    map: Map<string, FuncInfo[]>, name: string,
+    sem: number, alt: number, kind?: 'func' | 'pred',
+): FuncInfo[] {
+    const arr = map.get(name)
+    if (!arr?.length) return []
+    const hit = (ar: number) => arr.filter(f =>
+        (kind === undefined || f.kind === kind) && f.arity === ar)
+    const bySem = hit(sem)
+    return bySem.length ? bySem : hit(alt)
 }
 
 // 类型名项拆解：./2 是左结合链（a.b.c = '.''('.'(a,b),c)），最内层元素

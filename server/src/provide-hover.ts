@@ -17,8 +17,10 @@ export async function HoverProvider(services: MercuryServices, params:HoverParam
     // func/pred 的签名（含跨模块导出索引兜底）：头部限定名与 type 行共用
     const sigFi = (term.semanticType === 'func' || term.semanticType === 'pred')
         ? doc.visitResult?.inferred.get(term)?.sig
-            ?? doc.visitResult?.funcAlts.get(keyOf(term.name, term.semanticArity))?.at(-1)
-            ?? doc.visitResult?.predAlts.get(keyOf(term.name, term.semanticArity))?.at(-1)
+            ?? doc.visitResult?.sigAlts.get(term.name)
+                ?.filter(f => f.kind === 'func' && f.arity === term.semanticArity).at(-1)
+            ?? doc.visitResult?.sigAlts.get(term.name)
+                ?.filter(f => f.kind === 'pred' && f.arity === term.semanticArity).at(-1)
             ?? services.exportManager.lookupFunc(term.name, term.semanticArity)
         : undefined
 

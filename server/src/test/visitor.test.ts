@@ -9,7 +9,7 @@ import { termRange } from '../term'
 import { uriTermToLocation } from '../provide-definition'
 import { createMercuryServices, type MercuryServices } from '../services'
 import { orderByImports, scanHeader } from '../document-order'
-import { merTypeToString } from '../document-type'
+import { merTypeToString, sigCandidates } from '../document-type'
 import { modeRefToInsts } from '../document-mode'
 import { semanticTokensForDocument } from '../provide-semantic-tokens'
 
@@ -1074,13 +1074,13 @@ describe('goto definition / find references for insts (providers)', () => {
     expect(list.constructors.find((c: any) => c.ctor === '[|]')).toBeTruthy()
 
     // func 签名：参数类型 + 返回类型
-    const f = (v as any).funcAlts.get('f/2')?.at(-1) as any
+    const f = sigCandidates((v as any).sigAlts, 'f', 2, 2, 'func').at(-1) as any
     expect(f).toBeTruthy()
     expect(f.argTypes.length).toBe(2)
     expect(f.resultType.ctor.name).toBe('va')
 
     // pred 签名：参数类型，无返回类型
-    const p = (v as any).predAlts.get('p/2')?.at(-1) as any
+    const p = sigCandidates((v as any).sigAlts, 'p', 2, 2, 'pred').at(-1) as any
     expect(p).toBeTruthy()
     expect(p.argTypes.length).toBe(2)
     expect(p.resultType).toBeUndefined()
@@ -1584,17 +1584,17 @@ describe('hover shows inferred types', () => {
       params: [], initial: { kind: 'ground' }, final: { kind: 'ground' },
     })
     // 声明参数 → 结构化 mode 引用（未注解默认 in / 返回默认 out）
-    expect(doc.visitResult.predAlts.get('q/1')?.[0]?.argModeRefs).toEqual([
+    expect(sigCandidates(doc.visitResult.sigAlts, 'q', 1, 1, 'pred')[0]?.argModeRefs).toEqual([
       { kind: 'builtin', name: 'in', args: [] },
     ])
-    expect(doc.visitResult.funcAlts.get('f/1')?.[0]?.argModeRefs).toEqual([
+    expect(sigCandidates(doc.visitResult.sigAlts, 'f', 1, 1, 'func')[0]?.argModeRefs).toEqual([
       { kind: 'builtin', name: 'in', args: [] },
     ])
-    expect(doc.visitResult.funcAlts.get('f/1')?.[0]?.resultModeRef).toEqual({
+    expect(sigCandidates(doc.visitResult.sigAlts, 'f', 1, 1, 'func')[0]?.resultModeRef).toEqual({
       kind: 'builtin', name: 'out', args: [],
     })
     // 用户 mode 解析（形参替换在 modeRefToInsts）
-    const ref = doc.visitResult.predAlts.get('q/1')?.[0]?.argModeRefs?.[0]
+    const ref = sigCandidates(doc.visitResult.sigAlts, 'q', 1, 1, 'pred')[0]?.argModeRefs?.[0]
     const insts = ref && modeRefToInsts(ref, doc.visitResult.modeDefs)
     expect(insts).toEqual({ initial: { kind: 'ground' }, final: { kind: 'ground' } })
   })
@@ -1767,7 +1767,7 @@ describe('hover shows inferred types', () => {
     const sigs = vr.modeSigs.get('lookup/3') ?? []
     expect(sigs).toEqual(['m.lookup(in, in, out) is det'])
     // 签名 argModeRefs 覆盖为声明值（mode checker 调用检查随之使用 in,in,out）
-    expect(vr.predAlts.get('lookup/3')?.[0]?.argModeRefs).toEqual([
+    expect(sigCandidates(vr.sigAlts, 'lookup', 3, 3, 'pred')[0]?.argModeRefs).toEqual([
       { kind: 'builtin', name: 'in', args: [] },
       { kind: 'builtin', name: 'in', args: [] },
       { kind: 'builtin', name: 'out', args: [] },
