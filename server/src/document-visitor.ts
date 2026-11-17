@@ -2642,7 +2642,12 @@ export class Visitor {
         // progress()（int16.m from_bytes_le/2：头签名给 RHS 绑定 int16 后
         // freeze 重试仍看到未绑定的旧链尾，永远判歧义）
         const prevEntry = this.pendingInferred.get(term)
-        const resultType = instResultType ?? prevEntry?.ltype ?? this.freshLogical() as LType
+        // 复用旧 ltype 后还要把新实例化的结果类型合一回去——调用方/freeze
+        // goal 持有的是旧变量，不桥接的话消歧成功后旧引用永远悬空
+        const resultType = prevEntry?.ltype ?? instResultType ?? this.freshLogical() as LType
+        if (instResultType !== undefined && prevEntry?.ltype !== undefined) {
+            this.unifyTypes(resultType, instResultType)
+        }
         const category = chosenCI ? 'constructor' as const : chosenFunc ? 'func' as const : undefined
 
         // 提交：实参类型与被选中项形参类型合一（cons/func 同规则；
