@@ -43,6 +43,10 @@ export type VisitResult = {
     // import/include/use 的模块点分名（'io.stream_ops'）；include_module 的
     // 相对名已在 visit 侧补成绝对名。需要源码位置时从 reference 索引找模块项
     imports: string[]
+    // 仅 include_module 声明的子模块名：include 只声明子模块存在，不把它的
+    // 导出引入父模块作用域——祖先可见性扩展时必须与 import 区分，否则
+    // bit_buffer.read 会把兄弟模块 bit_buffer.write 的导出也算进来
+    includeModules?: string[]
     // 类型推断基础数据（阶段 0+1 收集，尚未用于 link 消歧）
     types: Map<string, TypeInfo[]>        // 类型名 → 定义候选（同 name 不同 arity/限定模块共存）
     // 同名的全部签名声明（func/pred 同命名空间；key 为裸 name，元数在
@@ -71,6 +75,7 @@ export class Visitor {
     }
     module?: Term
     imports = [] as string[]
+    includeModules = new Set<string>()
     section?: string
     currentClause!: Clause
     errors: Diagnostic[] = []
@@ -162,6 +167,7 @@ export class Visitor {
             modeReference: this.modeReference,
             exports: this.exports,
             imports: this.imports,
+            includeModules: [...this.includeModules],
             types: this.types,
             sigAlts: this.sigAlts,
             modeSigs: this.modeSigs,
@@ -1111,6 +1117,7 @@ export class Visitor {
             }
             this.addReference(module)
             this.addImport(module)
+            this.includeModules.add(moduleQualifiedName(module))
         }
     }
 
@@ -3043,8 +3050,17 @@ export class Visitor {
             for (let i = parts.length - 1; i >= 1; i--) {
                 const anc = parts.slice(0, i).join('.')
                 s.add(anc)
-                const ancImports = this.moduleManager.get(anc)?.visitResult?.imports
-                if (ancImports) for (const m of ancImports) s.add(m)
+                const ancVr = this.moduleManager.get(anc)?.visitResult
+                const ancIncludes = ancVr?.includeModules
+                if (ancVr?.imports) {
+                    for (const m of ancVr.imports) {
+                        // include_module 只声明子模块存在，不等于 import——
+                        // 祖先 include 的目标是本模块的兄弟/自身子模块，
+                        // 其导出对本模块不可见
+                        if (ancIncludes?.includes(m)) continue
+                        s.add(m)
+                    }
+                }
             }
         }
         return s
