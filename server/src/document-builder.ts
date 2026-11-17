@@ -4,8 +4,8 @@ import { interruptAndCheck } from './promise-util'
 import { MultiMap } from './multimap'
 import { URI } from 'vscode-uri'
 import { Visitor } from './document-visitor'
-import { stream } from './stream'
 import { orderByImports, scanHeader } from './document-order'
+import { moduleQualifiedName } from './term'
 import type { MercuryServices } from './services'
 
 export type DocumentBuildListener = (built: MercuryDocument[], cancelToken: CancellationToken) => void | Promise<void>
@@ -131,18 +131,52 @@ export class DefaultDocumentBuilder{
         await this.buildDocuments(affectedDocuments,cancelToken,new Set(changedDocuments))
     }
     collectDocuments(changedDocuments: MercuryDocument[], deletedDocuments:MercuryDocument[]) {
-        let docSet = stream(changedDocuments,deletedDocuments)
-        .map(doc=>doc.importedByDocs)
-        .flat()
-        .concat(changedDocuments)
-        .concat(this.services.documents.all.filter(doc =>doc.state<DocumentState.Validated ))
-        .map(doc =>{
-            doc.state = Math.min(doc.state,DocumentState.Visited)
+        const all = this.services.documents.all
+        // 模块名/imports：visitResult 可能已被 invalidate 清掉，统一从
+        // parse 头扫描（scanHeader 不依赖 visit）；已 visit 的文档优先用
+        // visitResult（含 include_module 解析结果，与 visit 口径一致）。
+        // 结果按文档缓存——BFS 每轮全表扫描时不能重复走 parse 树
+        const headers = new Map<MercuryDocument, { module?: string; imports: string[] }>()
+        const headerOf = (doc: MercuryDocument) => {
+            let h = headers.get(doc)
+            if (!h) { h = headerOfRaw(doc); headers.set(doc, h) }
+            return h
+        }
+        const headerOfRaw = (doc: MercuryDocument): { module?: string; imports: string[] } => {
+            const m = doc.visitResult?.module
+            if (m) return { module: moduleQualifiedName(m), imports: doc.visitResult?.imports ?? [] }
+            return doc.parseResult?.value ? scanHeader(doc.parseResult.value) : { imports: [] }
+        }
+        const affectedModules = new Set<string>()
+        for (const doc of [...changedDocuments, ...deletedDocuments]) {
+            const m = headerOf(doc).module
+            if (m) affectedModules.add(m)
+        }
+        // 反向依赖传递闭包：imports 命中受影响模块的文档逐层纳入。
+        // 注：推断的候选集来自全局导出索引（不限 import），理论上任何模块
+        // 的签名变化都可能影响任意已推断文档——下面再把所有 inferred
+        // 非空的文档一并纳入重推，保证消歧结果不陈旧
+        const docSet = new Set<MercuryDocument>([...changedDocuments, ...deletedDocuments])
+        const queue = [...affectedModules]
+        while (queue.length) {
+            const m = queue.pop()!
+            for (const doc of all) {
+                if (docSet.has(doc)) continue
+                if (headerOf(doc).imports.includes(m)) {
+                    docSet.add(doc)
+                    const dm = headerOf(doc).module
+                    if (dm) queue.push(dm)
+                }
+            }
+        }
+        for (const doc of all) {
+            if ((doc.visitResult?.inferred?.size ?? 0) > 0) docSet.add(doc)
+            if (doc.state < DocumentState.Validated) docSet.add(doc)
+        }
+        return Array.from(docSet).map(doc => {
+            doc.state = Math.min(doc.state, DocumentState.Visited)
             return doc
         })
-        .toSet()
-
-        return Array.from(docSet)
     }
 
     async validate(document:MercuryDocument,cancelToken:CancellationToken){
