@@ -99,8 +99,6 @@ export class Visitor {
     private trail: Trail = []
     private varTypes = new Map<string, LType>()
     private varNames = new WeakMap<LogicVar, string>()
-    // 提交性合一失败计数：trialSig 试解重载候选时统计（探测性失败不计）
-    private unifyFailed = 0
     // 变量子句级 mode 近似（head 形参声明 mode / 绑定变量 out / 调用 in 实参；类型推断步骤填充，供 hover 显示）
     private varMode = new Map<string, string>()
     private varCounter = 0
@@ -110,23 +108,16 @@ export class Visitor {
     // LS 容错语义：goal 恒返回 true（不回滚外层绑定），内部自行判定
     // 「信息够了就重试消歧，还不够就继续等其它变量绑定」
     // 推迟写入的推断结果：推断期间只记活逻辑项（ltype），子句末统一
-    // solidify 成 MerType 落 inferred——绑定此时已全部落定，不需要
-    // refreshVarTypes 刷新，也不需要 pickSig 的 saved/rollback（trialSig
-    // 对本表做克隆回滚，败者候选的条目不留残渣）
+    // solidify 成 MerType 落 inferred——绑定此时已全部落定
     private pendingInferred = new Map<Term, {
         ltype: LType
         category?: 'constructor' | 'func'
         sig?: FuncInfo
         mode?: string
     }>()
-    // 同一 Term 只挂一次冻结（trialSig 试解会重复遍历实参，无去重会无限堆积）
+    // 同一 Term 只挂一次冻结（frozen goal 重试/嵌套推断会重复走到，
+    // 无去重会无限堆积）
     private frozenTerms = new Set<Term>()
-    // trialSig 试解期间变量绑定会被 trail undo，但 freeze goal 仍会被同步
-    // 唤醒——goal 检测 inTrialDepth>0 直接返回（队列由 trail undo 恢复，
-    // 等真实绑定再唤醒）；同时禁止新挂 freeze（否则 frozenTerms 标记与
-    // 被回滚的 attr 不一致）。pickSig 多候选时也直接判歧义，防止
-    // trialSig→inferTerm→inferFunctor→pickSig 无限递归
-    private inTrialDepth = 0
     // 推断开关：批量索引阶段可关闭子句级类型推断（inferred 仅供打开中文档的
     // hover/definition/linker 消歧消费，未打开文档跳过可显著降低全库 analyzing 耗时）
     private inferEnabled = true
@@ -1697,15 +1688,20 @@ export class Visitor {
             // 推断异常不向外抛，保持索引稳定
         }
         // 子句末统一 resolve 落 inferred：此时绑定已全部落定（含 frozen
-        // goal 重试的结果），活逻辑项一次展开成 MerType 快照
-        for (const [term, p] of this.pendingInferred) {
-            this.inferred.set(term, {
-                type: this.solidify(p.ltype),
-                category: p.category,
-                sig: p.sig,
-                mode: p.mode,
-                ltype: p.ltype,
-            })
+        // goal 重试的结果），活逻辑项一次展开成 MerType 快照。
+        // 与推断主体同样不向外抛——固化失败只丢该子句的推断结果
+        try {
+            for (const [term, p] of this.pendingInferred) {
+                this.inferred.set(term, {
+                    type: this.solidify(p.ltype),
+                    category: p.category,
+                    sig: p.sig,
+                    mode: p.mode,
+                    ltype: p.ltype,
+                })
+            }
+        } catch {
+            // 推断异常不向外抛，保持索引稳定
         }
         this.pendingInferred.clear()
     }
@@ -1956,10 +1952,11 @@ export class Visitor {
                 this.inferCall(term)
         }
     }
-    // 调用：按签名对齐实参类型；同名重载候选经 trialSig 试解消歧，
-    // 选中签名记入 inferred.sig 供 hover 显示
+    // 调用：bottom-up 先推实参自然类型，pickSig 用纯合一筛候选消歧，
+    // 胜出后 alignArgs 提交形参合一；选中签名记入 inferred.sig 供 hover 显示
     private inferCall(term: Term) {
-        const picked = this.pickSig(this.callCandidates(term), term.args)
+        const argTypes = term.args.map(a => this.inferTerm(a))
+        const picked = this.pickSig(this.callCandidates(term), term.args, argTypes)
         if (!picked) {
             // 高阶变量调用：形如 (P, V0, V) 的应用节点（(f, a1, a2, ...) 中 f 是持有谓词/函数值的变量），
             // 解析树里表现为 nameArity = "(/N)" 且 args[0] 是变量。
@@ -2000,19 +1997,16 @@ export class Visitor {
         }
         const sig0 = picked.sig
         const inst = this.instantiateSignature(sig0)
-        this.inferSignatureArgs(term.args, inst)
+        this.alignArgs(term.args, argTypes, inst.args, inst.sig.argModes)
         const resultType = inst.result ?? this.freshLogical() as LType
         this.pendingInferred.set(term, { ltype: resultType, sig: sig0 })
     }
-    // 试探性合一：在 subst 副本上运行，成功才提交；失败不留半成品绑定。
-    // unify 本身就地修改 subst，中途失败会留下已绑定的变量，污染后续推断
-    //（如 inferFunctor 逐个试探构造子候选时，失败的候选不应留下绑定）。
-    // probe=true 表示「试探性合一」（构造子/闭包候选消歧），失败属正常不计入
-    // unifyFailed；提交性合一（inferUnify、变量 expected）失败计入，供 trialSig 判定。
+    // 试探性合一：失败把本次产生的绑定整体 undo 回 trail mark，不留半成品
+    //（inferFunctor 逐个试探构造子/重载候选时，失败的候选不应留下绑定）。
     // 无参同义词展开（io→state 这类）：存储端的类型可能是未展开形式（变量早前
     // 绑的是 io），而签名形参侧经 resolveSynonym 展开成 state——不对称会让
-    // unify(io, state) 误失败、整条签名试解被拒。只展开 body 无类型变量的
-    // 同义词：带参数的（assoc_list）展开要 freshen 类型变量、破坏共享，
+    // unify(io, state) 误失败。只展开 body 无类型变量的
+    // 同义词：带参数的（assoc_list）展开要代入调用点实参、破坏共享，
     // 那类仍由调用方显式 resolveSynonym 处理
     private resolveGroundSynonym(t: LType): LType {
         let cur = t
@@ -2027,12 +2021,8 @@ export class Visitor {
         }
         return cur
     }
-    private tryUnify(a: LType, b: LType, probe = false): boolean {
-        if (!this.unifyTypes(this.resolveGroundSynonym(a), this.resolveGroundSynonym(b))) {
-            if (!probe) this.unifyFailed++
-            return false
-        }
-        return true
+    private tryUnify(a: LType, b: LType): boolean {
+        return this.unifyTypes(this.resolveGroundSynonym(a), this.resolveGroundSynonym(b))
     }
     // 统一目标：rhs 类型需与 lhs 一致；lhs 若已有具体类型（来自头签名）则约束 rhs。
     // 首次出现在绑定位置的变量记子句级 mode out（head 形参已在 inferHead 标记，不会被覆盖）
@@ -2173,6 +2163,10 @@ export class Visitor {
     private inferFunctor(term: Term, expected?: LType, allowFreeze = true): LType {
         const name = term.name
         const arity = term.arity
+        // bottom-up：先推实参拿真实类型——消歧建立在实测类型上（不再靠
+        // quickArgType 猜测）；实参内部消歧不足由各自项的 freeze goal
+        // 在绑定后唤醒补齐
+        const argTypes = term.args.map(a => this.inferTerm(a))
         const expNode = this.concreteNode(expected)
         const expCtor = expNode && expNode.kind === 'ctor' ? expNode.ctor : undefined
         const constrs: ConsInfo[] = []
@@ -2201,7 +2195,7 @@ export class Visitor {
         let fComputed = false
         let fCache: { sig: FuncInfo; verified: boolean } | undefined
         const pickFunc = () => {
-            if (!fComputed) { fCache = this.pickSig(funcCands, term.args); fComputed = true }
+            if (!fComputed) { fCache = this.pickSig(funcCands, term.args, argTypes); fComputed = true }
             return fCache
         }
 
@@ -2237,7 +2231,7 @@ export class Visitor {
             // 提交其合一结果
             for (const ci of constrs) {
                 const inst = this.instantiateCons(ci)
-                if (this.tryUnify(inst.result, expected!, true)) {
+                if (this.tryUnify(inst.result, expected!)) {
                     chosenCI = ci
                     instArgTypes = inst.args
                     instResultType = inst.result
@@ -2276,31 +2270,24 @@ export class Visitor {
         const resultType = instResultType ?? this.freshLogical() as LType
         const category = chosenCI ? 'constructor' as const : chosenFunc ? 'func' as const : undefined
 
-        // 对齐参数类型
-        const argTypes = instArgTypes
-            ?? term.args.map(() => this.freshLogical() as LType)
-        for (let i = 0; i < term.args.length; i++) {
-            this.inferTerm(term.args[i], argTypes[i])
-        }
+        // 提交：实参类型与被选中项形参类型合一（cons/func 同规则；
+        // 无候选时 instArgTypes 为空、跳过——等价旧 fresh 变量 expected）
+        this.alignArgs(term.args, argTypes, instArgTypes)
         this.pendingInferred.set(term, { ltype: resultType, category, sig: chosenFunc })
         // freeze：信息不足导致的消歧失败（如 stream/4 双构造子、重载 func 实参未知），
         // 把重试 goal 挂到消歧依赖的活逻辑变量上——等结果类型被后续 goal 绑定
         //（或实参类型有新进展）时由 wakeGoals 同步唤醒，等价于 Mercury freeze/2。
         // 注意跨模块构造子在无类型上下文时不进 constrs（见上方 expCtor 收集条件），
-        // 必须用 hasCrossConstrs 补上——否则构造子全在导入模块里时根本不挂起
-        // inTrialDepth>0 时处于 trialSig 投机试解：attr 写入虽会被 trail undo，
-        // 但唤醒是同步的、goal 副作用（pendingInferred/嵌套推断）不可控 → 禁止推送；
-        // frozenTerms 去重：同一项重试/嵌套试解不重复登记
-        if (allowFreeze && this.inTrialDepth === 0 && !this.frozenTerms.has(term)
+        // 必须用 hasCrossConstrs 补上——否则构造子全在导入模块里时根本不挂起；
+        // frozenTerms 去重：goal 重试/嵌套推断重复走到同一项时不重复登记
+        if (allowFreeze && !this.frozenTerms.has(term)
             && !chosenCI && !chosenFunc
             && (constrs.length > 0 || funcCands.length > 0 || this.hasCrossConstrs(name, arity))) {
             this.frozenTerms.add(term)
             let lastScore = -1
             let done = false
-            // watch：结果类型变量 + 直接变量实参的类型变量（取链尾自由变量）。
-            // 复合实参的内部变量不挂——它们的进展由各自项的推断承担。
-            // goal 挂到每个 watch 变量上：任一绑定到具体值即唤醒重试；
-            // 变量间链接（var→var）不触发唤醒，等链尾落地才醒
+            // watch：结果类型变量 + 每个实参推断类型的链尾自由变量——
+            // 实参是活逻辑项，其内部变量的进展会传导到 argTypes[i] 的形态
             const watchVars = new Set<LogicVar>()
             const addWatch = (t: LType | undefined) => {
                 if (t === undefined) return
@@ -2308,23 +2295,14 @@ export class Visitor {
                 if (isUnboundLogicalVar(d as object)) watchVars.add(d as LogicVar)
             }
             addWatch(resultType)
-            for (const a of term.args) {
-                if (isVariable(a) || ['!/1', '!./1', '!:/1'].includes(a.nameArity)) {
-                    addWatch(this.varTypes.get(this.varKey(a)))
-                }
-            }
+            for (const t of argTypes) addWatch(t)
             const goal = (): boolean => {
-                // LS 容错：恒返回 true（不视合一失败回滚外层绑定）。
-                // 试解期间被唤醒直接返回——绑定即将被 undo，attr 队列由
-                // trail 恢复，等真实绑定再唤醒
-                if (done || this.inTrialDepth > 0) return true
+                // LS 容错：恒返回 true（不视合一失败回滚外层绑定）
+                if (done) return true
                 try {
                     const rn = this.concreteNode(resultType)
                     const expectedT = rn?.kind === 'ctor' ? this.resolveSynonym(resultType) : undefined
-                    const knownArgs = term.args.reduce((n, a) => {
-                        const t = this.quickArgType(a)
-                        return n + (this.isKnownType(t) ? 1 : 0)
-                    }, 0)
+                    const knownArgs = argTypes.reduce((n, t) => n + (this.isKnownType(t) ? 1 : 0), 0)
                     // 进展分：结果类型落地权重最高；实参已知类型数次之。
                     // 分数不变说明自上次重试没有新信息，跳过昂贵的重载试解
                     const score = (expectedT ? 1 << 20 : 0) + knownArgs
@@ -2417,131 +2395,73 @@ export class Visitor {
             map.set(name, [info])
         }
     }
-    // 实参的「已知类型」：变量查 varTypes（活逻辑项，derefTerm 取当前形态），
-    // 字面量给构造子类型；复合项读 inferred.ltype（推理返回的活逻辑项，
-    // 绑定随 trail 演进）；其余返回 undefined——中性，不参与消歧打分
-    private quickArgType(term: Term): LType | undefined {
-        if (isVariable(term) || ['!/1', '!./1', '!:/1'].includes(term.nameArity)) {
-            const t = this.varTypes.get(this.varKey(term))
-            return t ? derefTerm(t) as LType : undefined
-        }
-        const st = term.syntaxType
-        const mk = (name: string): LType => ({ kind: 'ctor', ctor: { name, arity: 0 }, args: [] })
-        if (st === 'integer') return mk('int')
-        if (st === 'float') return mk('float')
-        if (st === 'string') return mk('string')
-        const ltype = this.pendingInferred.get(term)?.ltype ?? this.inferred.get(term)?.ltype
-        return ltype ? derefTerm(ltype) as LType : undefined
-    }
     private countTypeVars(t: MerType): number {
         if (t.kind === 'var') return 1
         if (t.kind === 'ctor') return t.args.reduce((s, a) => s + this.countTypeVars(a), 0)
         return t.args.reduce((s, a) => s + this.countTypeVars(a), 0) + (t.result ? this.countTypeVars(t.result) : 0)
     }
-    // 重载候选消歧（试解）：对每个候选签名在克隆的推断状态上完整推一遍实参，
-    // 提交性合一全部成功才算可行——这是真正的合一判定，复合实参、共享类型变量、
-    // 结果类型约束都自然覆盖，不是启发式打分。多个候选都成功时取类型变量最少者
-    //（最具体的签名）；仍并列或全失败则返回 undefined（不猜，保持无类别）。
-    // 返回 verified=true 表示该签名经过完整试解且唯一胜出（实参类型确实支持它）；
+    // 实参对齐：markVarMode（call 签名 argModes）+ 实参类型与形参类型合一。
+    // 实参已由调用方 bottom-up 预推断（inferTerm 无 expected），这里只做合一
+    // 不重推——实参内部消歧不足由其自身 freeze goal 在绑定后唤醒补齐。
+    // 变量实参的 pendingInferred 在预推时 mode 尚未标记，末尾补写一次带
+    // mode 的条目（pushVarType 覆盖同 key，occurrences 同步）
+    private alignArgs(args: Term[], argTypes: LType[], params: LType[] | undefined, modes?: (string | undefined)[]) {
+        let ti = 0
+        for (let i = 0; i < args.length; i++) {
+            if (modes) this.markVarMode(args[i], modes[ti] ?? 'in')
+            const param = params?.[ti]
+            ti += this.argWidth(args[i])
+            if (param === undefined) continue
+            // 形参先展开同义词（assoc_list → list(pair(K,V))）：实参侧的
+            // 活逻辑项经 env 直接代入，不展开会 unify(list, assoc_list) 误失败；
+            // 实参侧可能的无参同义词（state/io）由 tryUnify 的 ground 展开兜底
+            this.tryUnify(argTypes[i], this.resolveSynonym(param))
+        }
+        if (modes) {
+            for (let i = 0; i < args.length; i++) {
+                const a = args[i]
+                if (isVariable(a) || ['!/1', '!./1', '!:/1'].includes(a.nameArity)) {
+                    this.pushVarType(a, argTypes[i])
+                }
+            }
+        }
+    }
+    // 重载候选消歧（bottom-up 纯合一）：实参已预推断成 LType，对每个候选
+    // 实例化签名、把实参类型与形参类型逐对合一（trail mark/undo 试探，
+    // 失败不留绑定）——这是真正的合一判定，复合实参、共享类型变量都自然
+    // 覆盖，不是启发式打分。多个候选都成功时取类型变量最少者（最具体的
+    // 签名）；仍并列或全失败则返回 undefined（不猜，保持无类别）。
+    // 返回 verified=true 表示该签名合一判定唯一胜出（实参类型确实支持它）；
     // verified=false 仅出现在「单候选 + 实参类型全未知」的弱返回——调用方在
     // func/构造子歧义场景应据此保持无类别，而不是直接采信
-    private pickSig(cands: FuncInfo[], args: Term[]): { sig: FuncInfo; verified: boolean } | undefined {
+    private pickSig(cands: FuncInfo[], args: Term[], argTypes: LType[]): { sig: FuncInfo; verified: boolean } | undefined {
         if (cands.length === 0) return undefined
-        // 试解内部不再嵌套试解：trialSig 推实参时遇到多候选重载，若再对每个
-        // 候选完整试解会组合爆炸（候选数 × 嵌套深度）。投机试解里实参保持
-        // 自由变量即可——变量与任何形参类型都能合一，不影响外层候选的可行性
-        // 判定；胜出后正式推断在 inTrialDepth=0 下会重新做完整消歧
-        if (this.inTrialDepth > 0) {
-            return cands.length === 1 ? { sig: cands[0], verified: false } : undefined
-        }
-        // 没有任何实参带已知类型时，所有候选都会"成功"，试解无意义 → 直接歧义；
-        // 仅单候选时弱返回（不试解），多候选判歧义
-        const hasKnown = args.some(a => this.isKnownType(this.quickArgType(a)))
+        // 没有任何实参带已知类型时，所有候选都会"成功"，合一判定无意义 →
+        // 直接歧义；仅单候选时弱返回，多候选判歧义
+        const hasKnown = argTypes.some(t => this.isKnownType(t))
         if (!hasKnown) {
             return cands.length === 1 ? { sig: cands[0], verified: false } : undefined
         }
-        // 推断结果推迟到子句末 resolve 落盘（pendingInferred 记活逻辑项），
-        // 试解写入由 trialSig 的克隆回滚丢弃——不需要逐项快照 inferred
         const successes: { sig: FuncInfo; vars: number }[] = []
         for (const c of cands) {
-            // 廉价预过滤：已知类型的变量实参与候选参数先在草稿 trail 上合一，
-            // 失败的候选必然过不了完整试解（inferTerm 对变量实参做的就是同样
-            // 的 unify），省掉重推实参的开销（+/-/* 等十余个重载时显著）
-            if (!this.precheckSig(c, args)) continue
-            if (this.trialSig(c, args)) {
-                successes.push({ sig: c, vars: c.argTypes.reduce((s, a) => s + this.countTypeVars(a), 0) })
+            const inst = this.instantiateSignature(c)
+            const mark = this.trail.length
+            let ok = true
+            let ti = 0
+            for (let i = 0; i < args.length; i++) {
+                const param = inst.args[ti]
+                ti += this.argWidth(args[i])
+                if (param === undefined) continue
+                if (!this.tryUnify(argTypes[i], this.resolveSynonym(param))) { ok = false; break }
             }
+            // 试探绑定一律 undo：胜者由 alignArgs 在正式路径重新合一提交
+            undo(this.trail, mark)
+            if (ok) successes.push({ sig: c, vars: c.argTypes.reduce((s, a) => s + this.countTypeVars(a), 0) })
         }
         if (successes.length === 0) return undefined
         successes.sort((a, b) => a.vars - b.vars)
         if (successes.length > 1 && successes[1].vars === successes[0].vars) return undefined
         return { sig: successes[0].sig, verified: true }
-    }
-    // pickSig 的廉价预检：只对「变量/状态变量且类型已知」的实参做 unify 试探
-    // （inferTerm 对这类实参的失败条件与此相同）；字面量实参在 inferTerm 里
-    // 不与形参类型合一、复合项类型未知，都跳过不判。全部在草稿 subst 上进行，
-    // 不提交任何绑定；任一已知实参合一失败 → 该候选不可能成功。
-    private precheckSig(sig: FuncInfo, args: Term[]): boolean {
-        const inst = this.instantiateSignature(sig)
-        const mark = this.trail.length
-        try {
-            let ti = 0
-            for (const arg of args) {
-                const param = inst.args[ti]
-                if (param !== undefined
-                    && (isVariable(arg) || ['!/1', '!./1', '!:/1'].includes(arg.nameArity))) {
-                    const known = this.quickArgType(arg)
-                    // 与 tryUnify 一致做 ground 同义词展开：known 可能是 state（io 展开后），
-                    // param 是声明里的 io，不展开会 unify(state, io) 误失败
-                    if (this.isKnownType(known)
-                        && !this.unifyTypes(this.resolveGroundSynonym(known!), this.resolveGroundSynonym(param))) return false
-                }
-                ti += this.argWidth(arg)
-            }
-            return true
-        } finally {
-            undo(this.trail, mark)
-        }
-    }
-    // 候选签名试解：varTypes/varMode 换克隆（丢弃试解新增的键），变量绑定走
-    // 共享 trail 的 mark/undo（试解期间对既有逻辑变量的绑定整体还原）；
-    // 由胜出候选在正式路径重跑一次提交结果。
-    // 注意 inferTerm 只对「变量实参」做 expected 合一：字面量直接返回固定类型、
-    // 复合项/functor 的结果类型不与形参强制合一——所以这里逐个实参补一次
-    // 「推出类型 vs 形参类型」的合一，否则 uint8.+ 对 `int_expr + 1` 也"成功"，
-    // 所有重载并列 → 判歧义 → hover 回退 funcMap 的任意签名
-    private trialSig(sig: FuncInfo, args: Term[]): boolean {
-        const sVarTypes = this.varTypes, sVarMode = this.varMode, sFail = this.unifyFailed
-        const sPending = this.pendingInferred
-        this.varTypes = new Map(sVarTypes)
-        this.varMode = new Map(sVarMode)
-        this.pendingInferred = new Map(sPending)
-        this.unifyFailed = 0
-        const mark = this.trail.length
-        this.inTrialDepth++
-        try {
-            const inst = this.instantiateSignature(sig)
-            let ti = 0
-            for (const arg of args) {
-                // 形参类型先展开同义词：inferTerm 内部对变量实参的合一与
-                // 下面的返回类型检查必须用同一展开结果，否则 assoc_list 这类
-                // 同义词形参会被误判不合一
-                const param = inst.args[ti]
-                const expected = param !== undefined ? this.resolveSynonym(param) : undefined
-                this.markVarMode(arg, inst.sig.argModes?.[ti] ?? 'in')
-                const t = this.inferTerm(arg, expected)
-                ti += this.argWidth(arg)
-                if (expected && !this.tryUnify(t, expected)) return false
-            }
-            return this.unifyFailed === 0
-        } finally {
-            undo(this.trail, mark)
-            this.varTypes = sVarTypes
-            this.varMode = sVarMode
-            this.pendingInferred = sPending
-            this.unifyFailed = sFail
-            this.inTrialDepth--
-        }
     }
     // 是否存在同名同元数的跨模块类型构造子（导出索引内）；
     // 用于无类型上下文时判断 func/构造子是否歧义
@@ -2584,11 +2504,15 @@ export class Visitor {
             const map = scope === 'self' ? this.sigAlts : scope
             return map ? both(map) : []
         }
+        // 无限定名：本模块声明 ∪ 全局导出索引——Mercury 语义里本地声明不硬
+        // 遮蔽导入，同名候选全部可见，由 pickSig 按实参类型消歧
+        //（string.m 里 list(int) 实参的 `++` 要能选中 list.++ 而非本模块
+        // 的 string.++）
         const local = both(this.sigAlts)
-        if (local.length) return local
-        return this.exportManager.lookupSigAlts(name, sem, alt)
+        return this.mergeSigCandidates(local, this.exportManager.lookupSigAlts(name, sem, alt))
     }
-    // 数据位置 functor 的函数候选（构造子另行收集；pred 不进入项位置）
+    // 数据位置 functor 的函数候选（构造子另行收集；pred 不进入项位置）。
+    // 同 callCandidates：本地 ∪ 导出索引，类型消歧决定胜者
     private funcCandidates(term: Term): FuncInfo[] {
         const name = term.name, sem = term.semanticArity, alt = term.arity
         const scope = this.qualifiedSigScope(term)
@@ -2597,8 +2521,16 @@ export class Visitor {
             return map ? sigCandidates(map, name, sem, alt, 'func') : []
         }
         const own = sigCandidates(this.sigAlts, name, sem, alt, 'func')
-        if (own.length) return own
-        return this.exportManager.lookupFuncAlts(name, sem, alt)
+        return this.mergeSigCandidates(own, this.exportManager.lookupFuncAlts(name, sem, alt))
+    }
+    // 本地候选 ∪ 全局候选：同一声明可能两边都出现（本模块导出符号也进
+    // 导出索引），按 完整签名+模块 去重；不同模块的同签名声明保留
+    private mergeSigCandidates(local: FuncInfo[], global: FuncInfo[]): FuncInfo[] {
+        if (!local.length) return global
+        if (!global.length) return local
+        const key = (f: FuncInfo) => JSON.stringify({ k: f.kind, a: f.arity, m: f.module, t: f.argTypes, r: f.resultType })
+        const seen = new Set(local.map(key))
+        return [...local, ...global.filter(f => !seen.has(key(f)))]
     }
     // 头位置签名：收集候选后按头实参已知类型消歧（pickSig 试解，与调用点同一
     // 套机制）；唯一/弱单候选返回实例化签名，歧义 → undefined（不猜）
@@ -2606,7 +2538,9 @@ export class Visitor {
         const cands = this.signatureCandidates(termOrName)
         if (cands.length === 0) return undefined
         const argTerms = args ?? (typeof termOrName === 'string' ? [] : termOrName.args ?? [])
-        const picked = this.pickSig(cands, argTerms)
+        // 头实参此刻尚未推断（inferSignatureArgs 在选中签名后才跑），
+        // 类型全未知 → pickSig 走弱返回/歧义，与旧 quickArgType 口径一致
+        const picked = this.pickSig(cands, argTerms, argTerms.map(() => this.freshLogical() as LType))
         return picked?.sig ?? undefined
     }
     // 声明里的签名是纯 MerType 模板（只读）；每个使用点经 instantiateSignature
@@ -2633,9 +2567,9 @@ export class Visitor {
             if (cands.length) return cands
             // 外部限定未命中 → 继续走无限定兜底（与旧 signatureOf 语义一致）
         }
+        // 与 callCandidates 同规则：本地 ∪ 导出索引（本地不硬遮蔽导入）
         const local = both(this.sigAlts)
-        if (local.length) return local
-        return this.exportManager.lookupSigAlts(name, a, aAlt)
+        return this.mergeSigCandidates(local, this.exportManager.lookupSigAlts(name, a, aAlt))
     }
     private varKey(term: Term): string {
         if (['!/1', '!./1', '!:/1'].includes(term.nameArity)) {

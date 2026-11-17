@@ -14,12 +14,16 @@ export async function HoverProvider(services: MercuryServices, params:HoverParam
     if(!term)
         return
 
-    // func/pred 的签名（含跨模块导出索引兜底）：头部限定名与 type 行共用
+    // func/pred 的签名：推断过的项只信 inferred.sig——消歧失败（sig 缺失）
+    // 时不回退本地/导出索引首个匹配，否则 ++ 这类多模块重名符号会把
+    // list.++ 误显成 string.++。未推断的项（声明处、未打开文档）才走兜底
+    const inferredInfo = doc.visitResult?.inferred.get(term)
     const sigFi = (term.semanticType === 'func' || term.semanticType === 'pred')
-        ? doc.visitResult?.inferred.get(term)?.sig
-            ?? uniqSig(doc.visitResult?.sigAlts.get(term.name)
+        ? inferredInfo
+            ? inferredInfo.sig
+            : uniqSig(doc.visitResult?.sigAlts.get(term.name)
                 ?.filter(f => f.arity === term.semanticArity))
-            ?? uniqSig(services.exportManager.lookupSigAlts(term.name, term.semanticArity, term.semanticArity))
+                ?? uniqSig(services.exportManager.lookupSigAlts(term.name, term.semanticArity, term.semanticArity))
         : undefined
 
     // 符号的限定显示名：能解析出定义模块就带 module 前缀（m.add / io.error）
