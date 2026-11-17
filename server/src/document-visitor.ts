@@ -1930,6 +1930,54 @@ export class Visitor {
         if (!spec || isVariable(spec)) return undefined
         return { spec, args: [call.args[0], ...(spec.args ?? [])] }
     }
+    // 字段访问表达式推断：spec 项已带 semanticArity = spec 元数 + 1
+    //（visitFieldSpecifier 设置），funcCandidates(spec) 直接命中字段
+    // 访问函数签名；实参表是 [Data, ...SpecArgs] 的展平形式
+    private inferFieldAccess(term: Term, expected?: LType): LType | undefined {
+        const caret = this.caretFuncParts(term)
+        if (!caret) return undefined
+        const { spec, args } = caret
+        const argTypes = args.map(a => this.inferTerm(a))
+        const cands = this.funcCandidates(spec)
+        const expNode = expected ? this.concreteNode(expected) : undefined
+        const expectedT = expNode && expNode.kind === 'ctor' ? this.resolveSynonym(expected!) : undefined
+        const resultType = this.freshLogical() as LType
+        const commit = (sig: FuncInfo) => {
+            const inst = this.instantiateSignature(sig)
+            this.alignArgs(args, argTypes, inst.args, inst.sig.argModes)
+            const rt = inst.result ?? resultType
+            this.pendingInferred.set(term, { ltype: rt })
+            this.pendingInferred.set(spec, { ltype: rt, sig })
+            return rt
+        }
+        if (!cands.length) {
+            this.pendingInferred.set(term, { ltype: resultType })
+            this.pendingInferred.set(spec, { ltype: resultType })
+            return resultType
+        }
+        const st = { successes: 0, unknownInfo: false }
+        const picked = this.pickSig(cands, args, argTypes, expectedT, st)
+        if (picked) return commit(picked.sig)
+        // 消歧失败：挂 freeze 等实参/结果类型进展后重试 pickSig
+        let lastStats = st
+        this.freezeDisambig(spec, this.frozenTerms, [...argTypes, resultType],
+            () => argTypes.reduce((n, t) => n + (this.isKnownType(t) ? 1 : 0), 0)
+                + (this.isKnownType(resultType) ? 1 << 20 : 0),
+            (force = false) => {
+                const done = this.pendingInferred.get(spec)
+                if (done?.sig) { lastStats = { successes: 1, unknownInfo: false }; return true }
+                const st2 = { successes: 0, unknownInfo: false }
+                const p = this.pickSig(cands, args, argTypes, expectedT, st2, force)
+                lastStats = st2
+                if (!p) return false
+                commit(p.sig)
+                return true
+            },
+            () => lastStats)
+        this.pendingInferred.set(term, { ltype: resultType })
+        this.pendingInferred.set(spec, { ltype: resultType })
+        return resultType
+    }
     private inferHead(head: Term) {
         // 带体的函数子句 `f(A1..An) = R :- Body`：头是 =(f(A1..An), R)，
         // 参数按签名推断，结果变量 R 按返回类型推断
@@ -2316,6 +2364,12 @@ export class Visitor {
             const t = this.inferTerm(target, expected)
             this.pendingInferred.set(term, { ltype: t })
             return t
+        }
+        // 字段访问表达式 Data ^ Spec(Args)：等价于字段访问函数
+        // SpecFunc(Data, Args...) 的调用（链式 ^/2 由实参递归处理）
+        if (term.nameArity === '^/2') {
+            const t = this.inferFieldAccess(term, expected)
+            if (t) return t
         }
         // 一般 functor（atom 或复合项）：构造子 或 数据位置函数调用
         return this.inferFunctor(term, expected)

@@ -458,3 +458,25 @@ describe('submodule implicit parent visibility', () => {
     expect(errs.filter(m => m.includes('cannot resolve unique signature'))).toEqual([])
   })
 })
+
+describe('field access expressions Data ^ Spec', () => {
+  it('B ^ val infers via the field access function signature', async () => {
+    const doc = await mk(
+      `:- module fm.
+      :- interface.
+      :- type ft.
+      :- func ft ^ val = int.
+      :- end_module fm.
+      :- implementation.
+      f(B) = B ^ val.
+      :- end_module fm.`,
+      'fm',
+    )
+    const inf = doc.visitResult!.inferred
+    const spec = [...inf.entries()].find(([t]) => t.name === 'val')?.[1] as any
+    expect(spec?.sig?.name).toBe('val')
+    expect(merTypeToString(spec?.ltype)).toBe('int')
+    const errs = (doc.visitResult!.errors ?? []).map(d => d.message)
+    expect(errs.filter(m => m.includes('cannot resolve unique signature'))).toEqual([])
+  })
+})
