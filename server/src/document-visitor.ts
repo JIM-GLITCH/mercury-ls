@@ -2636,7 +2636,13 @@ export class Visitor {
             if (pa) { instResultType = pa.ho; instArgTypes = pa.args; partialSig = pa.sig }
         }
 
-        const resultType = instResultType ?? this.freshLogical() as LType
+        // 消歧失败重试（allowFreeze=false）会整函数重跑：结果类型变量
+        // 必须复用 pendingInferred 里的旧值——freeze goal 盯的是注册时的
+        // 那个变量，每次重跑换新变量会让已绑定的 expected 永远传不进
+        // progress()（int16.m from_bytes_le/2：头签名给 RHS 绑定 int16 后
+        // freeze 重试仍看到未绑定的旧链尾，永远判歧义）
+        const prevEntry = this.pendingInferred.get(term)
+        const resultType = instResultType ?? prevEntry?.ltype ?? this.freshLogical() as LType
         const category = chosenCI ? 'constructor' as const : chosenFunc ? 'func' as const : undefined
 
         // 提交：实参类型与被选中项形参类型合一（cons/func 同规则；
