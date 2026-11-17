@@ -2686,7 +2686,10 @@ export class Visitor {
             if (t.nameArity === '[|]/2') {
                 // [|]/2 恒为 list 的 cons 构造子（Mer 无法重定义）
                 this.setPI(t, { ltype: listType(), category: 'constructor' })
-                this.inferTerm(t.args[0], elemType)
+                // 元素推断类型与 elemType 合一：歧义元素（如 [no]）的
+                // resultType 是独立新变量，不合一则 elemType 后续绑定
+                // 传不到它的 freeze goal（term_to_xml.m MaybeFunctors=[no]）
+                this.tryUnify(this.inferTerm(t.args[0], elemType), elemType)
                 walk(t.args[1])
                 return
             }
