@@ -2247,7 +2247,17 @@ export class Visitor {
 
         const st = term.syntaxType
         const lit = (name: string): LType => ({ kind: 'ctor', ctor: { name, arity: 0 }, args: [] })
-        if (st === 'integer') { const t = lit('int'); this.pendingInferred.set(term, { ltype: t }); return t }
+        if (st === 'integer') {
+            // 整数字面量后缀决定类型：1u=uint、1u8=uint8、1i16=int16 等；无后缀默认 int
+            const suffix = /(?:u8|u16|u32|u64|u|i8|i16|i32|i64|i)$/.exec(term.name)?.[0]
+            const intTypes: Record<string, string> = {
+                u: 'uint', u8: 'uint8', u16: 'uint16', u32: 'uint32', u64: 'uint64',
+                i: 'int', i8: 'int8', i16: 'int16', i32: 'int32', i64: 'int64',
+            }
+            const t = lit(intTypes[suffix ?? ''] ?? 'int')
+            this.pendingInferred.set(term, { ltype: t })
+            return t
+        }
         if (st === 'float') { const t = lit('float'); this.pendingInferred.set(term, { ltype: t }); return t }
         if (st === 'string') { const t = lit('string'); this.pendingInferred.set(term, { ltype: t }); return t }
         // 列表语法：[]/0 与 [|]/2 恒为 list 构造子，交由 inferList（含同义词展开与构造子标注）

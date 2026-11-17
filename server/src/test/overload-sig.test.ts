@@ -358,3 +358,40 @@ describe('func-fact rhs disambiguation via declared result type', () => {
   })
 })
 })
+
+describe('integer literal suffix typing', () => {
+  it('1u infers uint so unchecked_left_ushift resolves to uint', async () => {
+    await mk(
+      `:- module uint.
+      :- interface.
+      :- type uint.
+      :- func unchecked_left_ushift(uint, uint) = uint.
+      :- end_module uint.`,
+      'uint',
+    )
+    await mk(
+      `:- module int.
+      :- interface.
+      :- type int.
+      :- func unchecked_left_ushift(int, uint) = int.
+      :- end_module int.`,
+      'int',
+    )
+    const doc = await mk(
+      `:- module ulit.
+      :- interface.
+      :- import_module uint.
+      :- import_module int.
+      :- end_module ulit.
+      :- implementation.
+      f(X) = unchecked_left_ushift(1u, X).
+      :- end_module ulit.`,
+      'ulit',
+    )
+    const inf = doc.visitResult!.inferred
+    const byNa = (na: string) => [...inf.entries()].find(([t]) => t.nameArity === na)?.[1] as any
+    expect(byNa('unchecked_left_ushift/2')?.sig?.module).toBe('uint')
+    const lit = [...inf.entries()].find(([t]) => t.nameArity === '1u/0')?.[1] as any
+    expect(merTypeToString(lit?.ltype ?? lit?.type)).toContain('uint')
+  })
+})
