@@ -12,7 +12,7 @@ import {
     keyOf, keyOfTypeCtor, modeOfArg, argModesOf, termToMerType, typeHeadParts, sigCandidates,
 } from './document-type'
 import {
-    createLogicalVar, createTrail, derefTerm, freeze, isUnboundLogicalVar, resolve, undo, unify,
+    createLogicalVar, createTrail, derefTerm, freeze, getAttr, isUnboundLogicalVar, putAttr, resolve, undo, unify,
     type LogicVar, type Trail,
 } from './logical-var'
 import {
@@ -59,6 +59,9 @@ export type VisitResult = {
     modeDefs: Map<string, ModeDef>
     // 阶段 2 推断结果：项 → 推断类型/类别（供 linker 精确消歧 functor/func）
     inferred: Map<Term, InferredInfo>
+    // 本模块收集的类型类实例：类名 → 实例类型头名集合（instance doc(doc) →
+    // doc→{doc}）。供 <= 类型类约束的候选过滤判断「某具体类型是否为某类实例」
+    typeclassInstances: Map<string, Set<string>>
 }
 // determinism 项 → 字符串（det/semidet/cc_multi... 均为原子；缺省 undefined）
 function detOf(term: Term | undefined): string | undefined {
@@ -137,6 +140,10 @@ export class Visitor {
     // 推断开关：批量索引阶段可关闭子句级类型推断（inferred 仅供打开中文档的
     // hover/definition/linker 消歧消费，未打开文档跳过可显著降低全库 analyzing 耗时）
     private inferEnabled = true
+    // 类型类实例索引：本模块 visitInstanceDecl 收集；跨模块惰性并入
+    // moduleManager 全部已访文档的 typeclassInstances（pickSig 过滤用）
+    private tcInstances = new Map<string, Set<string>>()
+    private tcInstCache?: Map<string, Set<string>>
     // visit() 前置声明收集已处理的 :-/1 声明项（Clause 对象引用去重）
     private declsSeen = new Set<Clause>()
     async visit(doc: MercuryDocument, cancelToken: CancellationToken, infer = true) {
@@ -173,7 +180,8 @@ export class Visitor {
             modeSigs: this.modeSigs,
             instDefs: this.instDefs,
             modeDefs: this.modeDefs,
-            inferred: this.inferred
+            inferred: this.inferred,
+            typeclassInstances: this.tcInstances
         }
     }
     visitClause(clause: Clause) {
@@ -795,6 +803,33 @@ export class Visitor {
     }
 
 
+    // <= 约束项 → 类型变量名到类型类名集合：,/2 递归展平，叶子 C(Args) 的
+    // 每个变量实参都记为「被类 C 约束」（doc(T1) → T1∈doc；foo(A,B) → A,B∈foo）
+    private tcClassMap(term: Term): Map<string, Set<string>> | undefined {
+        const out = new Map<string, Set<string>>()
+        const add = (cls: string, v: string) => {
+            let s = out.get(v)
+            if (!s) { s = new Set(); out.set(v, s) }
+            s.add(cls)
+        }
+        const walk = (t: Term) => {
+            if (nameArity(t, ",/2")) { walk(t.args[0]); walk(t.args[1]); return }
+            if (nameArity(t, "[|]/2")) { walk(t.args[0]); walk(t.args[1]); return }
+            if (nameArity(t, "[]/0")) return
+            const cls = this.typeNameOf(t)
+            if (!cls) return
+            for (const a of t.args ?? []) {
+                if (isVariable(a)) add(cls, a.name)
+            }
+        }
+        walk(term)
+        return out.size ? out : undefined
+    }
+    // 类型项的未限定头名：list(T)→list、mod.foo→foo、原子→自身
+    private typeNameOf(t: Term): string | undefined {
+        if (nameArity(t, "./2")) return this.typeNameOf(t.args[1])
+        return t.name
+    }
     visitDecl(term: Term) {
 
         switch (term.nameArity) {
@@ -804,10 +839,16 @@ export class Visitor {
             case "func/1":
                 this.visitFuncDecl(term.args[0])
                 break
-            case "<=/2":
-                // 带类型类约束的声明：decl <= Constraint（如 pred ... is det <= diet_element(T)）
-                this.visitDecl(term.args[0])
+            case "<=/2": {
+                // 带类型类约束的声明：decl <= Constraint（如 func T1++T2 = doc <= (doc(T1),doc(T2))）。
+                // 约束里的类型变量 → 类型类映射随签名记录，供 pickSig 候选过滤
+                const inner = term.args[0]
+                const cls = this.tcClassMap(term.args[1])
+                if (nameArity(inner, "func/1")) this.visitFuncDecl(inner.args[0], undefined, cls)
+                else if (nameArity(inner, "pred/1")) this.visitPredDecl(inner.args[0], undefined, cls)
+                else this.visitDecl(inner)
                 break
+            }
             case "impure/1":
             case "semipure/1":
             case "pure/1":
@@ -1308,6 +1349,16 @@ export class Visitor {
         const unwrapped = this.visitQualifiedTerm(head) ?? head
         label(unwrapped, "instance")
         this.addDefinition(unwrapped)
+        // 类型类实例索引：instance C(T) → 类 C 的实例类型头名（T 的头名；
+        // 参数化实例 list(T) 记 list——按头名近似，供 <= 约束过滤用）
+        const clsName = this.typeNameOf(unwrapped)
+        const instArg = unwrapped.args?.[0]
+        const instHead = instArg ? this.typeNameOf(instArg) : undefined
+        if (clsName && instHead && !isVariable(instArg)) {
+            let set = this.tcInstances.get(clsName)
+            if (!set) { set = new Set(); this.tcInstances.set(clsName, set) }
+            set.add(instHead)
+        }
         // 实例化的类型参数是类型引用位置（类型变量除外）
         for (const arg of unwrapped.args ?? []) {
             if (!isVariable(arg)) this.visitTypeRef(arg)
@@ -1477,10 +1528,10 @@ export class Visitor {
     visitInst(term: Term) {
         label(term, "inst")
     }
-    visitFuncDecl(term: Term, determinism?: string) {
+    visitFuncDecl(term: Term, determinism?: string, tcClasses?: Map<string, Set<string>>) {
         if (nameArity(term, "is/2")) {
             // :- func F(...) = R is det.  →  标 F，确定性记入 mode 行
-            this.visitFuncDecl(term.args[0], detOf(term.args[1]))
+            this.visitFuncDecl(term.args[0], detOf(term.args[1]), tcClasses)
         } else if (nameArity(term, "=/2")) {
             let [func, ret] = term.args
             if (func.nameArity === '^/2') {
@@ -1493,12 +1544,12 @@ export class Visitor {
             this.visitFuncDeclFunc(head)
             this.visitTypeParams(head)
             this.visitFuncReturn(ret)
-            this.recordFuncInfo(head, ret, determinism)
+            this.recordFuncInfo(head, ret, determinism, undefined, tcClasses)
         } else {
             const head = this.visitQualifiedTerm(term) ?? term
             this.visitFuncDeclFunc(head)
             this.visitTypeParams(head)
-            this.recordFuncInfo(head, undefined, determinism)
+            this.recordFuncInfo(head, undefined, determinism, undefined, tcClasses)
         }
     }
 
@@ -1517,7 +1568,7 @@ export class Visitor {
         this.recordFuncInfo(head, ret, determinism, [...(head.args ?? []), selfTerm])
     }
 
-    visitPredDecl(term: Term, determinism?: string) {
+    visitPredDecl(term: Term, determinism?: string, tcClasses?: Map<string, Set<string>>) {
         if (nameArity(term, "is/2")) {
             let [pred, det] = term.args
             const head = this.visitQualifiedTerm(pred) ?? pred
@@ -1526,13 +1577,13 @@ export class Visitor {
             this.visitDeterminism(det)
 
             this.addDeclaration(head)
-            this.recordPredInfo(head, detOf(det))
+            this.recordPredInfo(head, detOf(det), tcClasses)
         } else {
             const head = this.visitQualifiedTerm(term) ?? term
             label(head, "pred")
             this.visitTypeParams(head)
             this.addDeclaration(head)
-            this.recordPredInfo(head, determinism)
+            this.recordPredInfo(head, determinism, tcClasses)
         }
     }
     // 声明是否带显式 mode 注解（任一参数 ::/>> 或返回值 ::/>>；Phase D 推断目标判据）
@@ -1563,7 +1614,8 @@ export class Visitor {
         return types.map(norm)
     }
 
-    private recordFuncInfo(func: Term, ret: Term | undefined, determinism?: string, argTerms?: Term[]) {
+    private recordFuncInfo(func: Term, ret: Term | undefined, determinism?: string, argTerms?: Term[],
+        tcClasses?: Map<string, Set<string>>) {
         const fargs = argTerms ?? func.args
         const argRefs = fargs.map(a => this.argModeRefOf(a))
         const retRef = ret ? this.retModeRefOf(ret) : undefined
@@ -1581,6 +1633,8 @@ export class Visitor {
             modes: this.hasExplicitModes(fargs, ret)
                 ? [{ argModeRefs: argRefs, resultModeRef: retRef, det: determinism }]
                 : [],
+            typeVarClasses: tcClasses ? Object.fromEntries(
+                [...tcClasses].map(([k, v]) => [k, [...v]])) : undefined,
         }
         this.pushAlt(this.sigAlts, func.name, info)
         // 每个 mode 声明一行（Mercury 默认 mode：参数 in，函数结果 out）；带确定性后缀
@@ -1590,7 +1644,7 @@ export class Visitor {
         this.pushModeSig(keyOf(func.name, func.semanticArity), `${this.qualDisplayName(func.name)}(${modes.join(', ')}) = (${rm})${det}`)
     }
     // 记录谓词签名（name/arity → 参数类型/mode；谓词无返回类型）
-    private recordPredInfo(pred: Term, determinism?: string) {
+    private recordPredInfo(pred: Term, determinism?: string, tcClasses?: Map<string, Set<string>>) {
         const argRefs = pred.args.map(a => this.argModeRefOf(a))
         const info: FuncInfo = {
             kind: 'pred',
@@ -1602,6 +1656,8 @@ export class Visitor {
             modes: this.hasExplicitModes(pred.args)
                 ? [{ argModeRefs: argRefs, det: determinism }]
                 : [],
+            typeVarClasses: tcClasses ? Object.fromEntries(
+                [...tcClasses].map(([k, v]) => [k, [...v]])) : undefined,
         }
         this.pushAlt(this.sigAlts, pred.name, info)
         const modes = pred.args.map(modeOfArg).map(m => m ?? 'in')
@@ -1813,12 +1869,18 @@ export class Visitor {
     // 代入调用点实参用）；缺省时每个变量 freshLogical。声明变量带 #n 唯一名——
     // 不同实例化互不撞名（显示名/冻结唤醒都唯一），unifyTypes 的 fresh/具名
     // 偏好判定也靠它区分 ?N 与 T#n
-    private instantiate(t: MerType, env: Map<string, LType> = new Map()): LType {
+    // <= 类型类约束打在逻辑变量上的属性键：值为 Set<className>
+    //（instantiate 时按签名 typeVarClasses 写入；属性随变量链合并、随 trail 回滚）
+    private static readonly TC_CLASS_ATTR = Symbol('tcClasses')
+    private instantiate(t: MerType, env: Map<string, LType> = new Map(),
+        varClasses?: Record<string, string[]>): LType {
         const go = (x: MerType): LType => {
             if (x.kind === 'var') {
                 let v = env.get(x.name)
                 if (!v) {
                     v = this.freshLogical(`${x.name}#${this.varCounter++}`)
+                    const cls = varClasses?.[x.name]
+                    if (cls?.length) putAttr(v, Visitor.TC_CLASS_ATTR, new Set(cls))
                     env.set(x.name, v)
                 }
                 return v
@@ -1836,10 +1898,11 @@ export class Visitor {
     }
     private instantiateSignature(sig: FuncInfo) {
         const env = new Map<string, LType>()
+        const vc = sig.typeVarClasses
         return {
             sig,
-            args: sig.argTypes.map(a => this.instantiate(a, env)),
-            result: sig.resultType ? this.instantiate(sig.resultType, env) : undefined,
+            args: sig.argTypes.map(a => this.instantiate(a, env, vc)),
+            result: sig.resultType ? this.instantiate(sig.resultType, env, vc) : undefined,
         }
     }
     private instantiateCons(ci: ConsInfo) {
@@ -2057,8 +2120,9 @@ export class Visitor {
             const rn = rt ? this.concreteNode(rt) : undefined
             const expT = rn?.kind === 'ctor' ? this.resolveSynonym(rt!) : undefined
             const knownArgs = argTypes.reduce((n, t) => n + (this.isKnownType(t) ? 1 : 0), 0)
-            // 进展分：返回类型落地权重最高；实参已知类型数次之
-            return { expT, score: (expT ? 1 << 20 : 0) + knownArgs }
+            // 进展分：返回类型落地权重最高；实参已知类型数次之；
+            // 类型类约束标签同样是可用证据（见 tcTaggedArgs）
+            return { expT, score: (expT ? 1 << 20 : 0) + knownArgs + this.tcTaggedArgs(argTypes) }
         }
         let lastStats = { successes: 0, unknownInfo: true }
         this.freezeDisambig(head, this.frozenHeadTerms, rt ? [...argTypes, rt] : argTypes,
@@ -2260,6 +2324,7 @@ export class Visitor {
     // goal 位置调用的延迟消歧：watch 各实参类型链尾变量，绑定进展后重试 pickSig
     private freezeCall(term: Term, argTypes: LType[], cands: FuncInfo[]) {
         const knownArgs = () => argTypes.reduce((n, t) => n + (this.isKnownType(t) ? 1 : 0), 0)
+            + this.tcTaggedArgs(argTypes)
         let lastStats = { successes: 0, unknownInfo: true }
         this.freezeDisambig(term, this.frozenCallTerms, argTypes, knownArgs,
             (force = false) => {
@@ -2392,6 +2457,16 @@ export class Visitor {
             const t = this.inferTerm(target, expected)
             this.pendingInferred.set(term, { ltype: t })
             return t
+        }
+        // 显式类型限定 Term : Type / with_type(Term, Type)：类型部分是类型
+        // 引用不是项——不能走 inferFunctor（map(K,V) 会被当 map/2 调用判歧义）。
+        // 推断项本体，把类型项实例化成 LType 合一（同时把约束传给该项）
+        if (term.nameArity === ':/2' || term.nameArity === 'with_type/2') {
+            const lt = this.inferTerm(term.args[0], expected)
+            const tt = this.instantiate(this.toMerType(term.args[1]))
+            this.tryUnify(lt, tt)
+            this.pendingInferred.set(term, { ltype: lt })
+            return lt
         }
         // 字段访问表达式 Data ^ Spec(Args)：等价于字段访问函数
         // SpecFunc(Data, Args...) 的调用（链式 ^/2 由实参递归处理）
@@ -2684,9 +2759,10 @@ export class Visitor {
                 const rn = this.concreteNode(resultType)
                 const expectedT = rn?.kind === 'ctor' ? this.resolveSynonym(resultType) : undefined
                 const knownArgs = argTypes.reduce((n, t) => n + (this.isKnownType(t) ? 1 : 0), 0)
-                // 进展分：结果类型落地权重最高；实参已知类型数次之。
+                // 进展分：结果类型落地权重最高；实参已知类型数次之；
+                // 类型类约束标签同样是可用证据（见 tcTaggedArgs）。
                 // 分数不变说明自上次重试没有新信息，跳过昂贵的重载试解
-                return { expectedT, score: (expectedT ? 1 << 20 : 0) + knownArgs }
+                return { expectedT, score: (expectedT ? 1 << 20 : 0) + knownArgs + this.tcTaggedArgs(argTypes) }
             }
             let lastStats = { successes: 0, unknownInfo: true }
             this.freezeDisambig(term, this.frozenTerms, [resultType, ...argTypes],
@@ -2815,6 +2891,81 @@ export class Visitor {
     // 返回 verified=true 表示该签名合一判定唯一胜出（实参类型确实支持它）；
     // verified=false 仅出现在「单候选 + 实参类型全未知」的弱返回——调用方在
     // func/构造子歧义场景应据此保持无类别，而不是直接采信
+    // 带 <= 类型类约束标签的活变量也算消歧信息：刚性变量不接受具体构造子
+    // 参数、具体实参需匹配已知实例——sigConstraintsOk 据此过滤，约束标签
+    // 提供的证据不亚于已知具体类型（freeze 的 score===0 门槛要算上它，
+    // 否则标签经 var-var 链接到达后 goal 永远判「无进展」不再重试）
+    private tcTaggedArgs(argTypes: (LType | undefined)[]): number {
+        let n = 0
+        for (const t of argTypes) {
+            if (t === undefined) continue
+            const d = derefTerm(t)
+            if (isUnboundLogicalVar(d as object)
+                && (getAttr(d as LogicVar, Visitor.TC_CLASS_ATTR) as Set<string> | undefined)?.size) n++
+        }
+        return n
+    }
+    // <= 类型类约束候选过滤：签名声明类型变量带类型类约束（typeVarClasses）时，
+    // 逐实参对齐检查——实参已具体而参数是约束变量时，实参类型头必须是该类已知
+    // 实例（无实例数据的类放行，避免索引不全误杀）；实参是带约束的刚性变量而
+    // 参数是具体构造子时拒绝（抽象类型变量不能承诺成具体类型）
+    private sigConstraintsOk(sig: FuncInfo, args: Term[], argTypes: LType[]): boolean {
+        const vc = sig.typeVarClasses
+        let ti = 0
+        for (let i = 0; i < args.length; i++) {
+            const w = this.argWidth(args[i])
+            const at = derefTerm(argTypes[i])
+            const aVar = isUnboundLogicalVar(at as object)
+            for (let j = 0; j < w; j++) {
+                const tmpl = sig.argTypes[ti + j]
+                if (tmpl === undefined) continue
+                if (aVar) {
+                    // 实参是带类型类约束的刚性变量（声明参数实例化而来）：
+                    // 它是抽象类型，不能承诺成具体构造子——参数为具体类型时拒绝。
+                    // 对所有候选生效（不只带约束的签名），否则 list.++/string.++
+                    // 会拿 doc 约束变量去试合 list(T)/string 而误存活
+                    const cls = getAttr(at as LogicVar, Visitor.TC_CLASS_ATTR) as Set<string> | undefined
+                    if (cls?.size && tmpl.kind !== 'var') return false
+                } else if (tmpl.kind === 'var' && vc) {
+                    // 候选参数是声明约束变量：具体实参的类型头必须是已知实例
+                    const cls = vc[tmpl.name]
+                    if (!cls?.length) continue
+                    const head = this.ltypeHeadName(at)
+                    if (!head) continue
+                    for (const c of cls) {
+                        const insts = this.classInstances().get(c)
+                        if (insts && !insts.has(head)) return false
+                    }
+                }
+            }
+            ti += w
+        }
+        return true
+    }
+    // LType 顶层构造子头名（ctor → name；ho/其它 → undefined 不约束）
+    private ltypeHeadName(t: unknown): string | undefined {
+        const n = t as { kind?: string; ctor?: { name?: string } }
+        return n?.kind === 'ctor' ? n.ctor?.name : undefined
+    }
+    // 类型类 → 实例类型头名集合：本模块 + moduleManager 全部已访文档合并，
+    // 每次 visit 惰性建一次（推断期间模块集合稳定）
+    private classInstances(): Map<string, Set<string>> {
+        if (this.tcInstCache) return this.tcInstCache
+        const m = this.tcInstCache = new Map<string, Set<string>>()
+        const addAll = (src: Map<string, Set<string>>) => {
+            for (const [k, v] of src) {
+                let set = m.get(k)
+                if (!set) { set = new Set(); m.set(k, set) }
+                for (const x of v) set.add(x)
+            }
+        }
+        addAll(this.tcInstances)
+        for (const [, doc] of this.moduleManager.moduleMap.entries().toArray()) {
+            const ti = doc.visitResult?.typeclassInstances
+            if (ti) addAll(ti)
+        }
+        return m
+    }
     private pickSig(cands: FuncInfo[], args: Term[], argTypes: LType[], expected?: LType,
         stats?: { successes: number; unknownInfo: boolean }, preferGeneral = false): { sig: FuncInfo; verified: boolean } | undefined {
         if (stats) { stats.successes = 0; stats.unknownInfo = false }
@@ -2827,6 +2978,10 @@ export class Visitor {
         const width = args.reduce((s, a) => s + this.argWidth(a), 0)
         const widthOk = cands.filter(c => c.kind !== 'func' || c.argTypes.length === width)
         if (widthOk.length > 0 && widthOk.length < cands.length) cands = widthOk
+        // <= 类型类约束预筛：实参侧带约束的刚性变量不接受具体构造子参数，
+        // 候选参数侧的约束变量只接受已知实例类型——剪掉必然不成立的候选
+        const consOk = cands.filter(c => this.sigConstraintsOk(c, args, argTypes))
+        if (consOk.length > 0 && consOk.length < cands.length) cands = consOk
         // 没有任何实参带已知类型时，所有候选都会"成功"，合一判定无意义 →
         // 直接歧义；仅单候选时弱返回，多候选判歧义（preferGeneral 时例外，见下）
         const hasKnown = argTypes.some(t => this.isKnownType(t))

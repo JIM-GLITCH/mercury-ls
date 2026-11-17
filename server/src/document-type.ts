@@ -57,6 +57,10 @@ export interface FuncInfo {
     resultModeRef?: MerModeRef  // 函数返回值结构化 mode（未注解默认 out）
     hasExplicitModes?: boolean  // 声明带 ::/>> 显式 mode 注解（Phase D：false 时可被 infer_modes 推断）
     modes?: ProcMode[]      // 全部过程 mode（多 mode：调用点任一匹配即合法；子句侧逐个检查）
+    // <= 类型类约束：声明类型变量名 → 类型类名集合（如 T1 → {doc}）。
+    // 实例化时给对应逻辑变量打属性，pickSig 据此过滤候选（刚性变量不吃具体
+    // 构造子参数；具体实参的类型头必须是该类已知实例）
+    typeVarClasses?: Record<string, string[]>
 }
 
 // mode 项 → 字符串：原子（in/out/ground...）或复合（in(i_node)）；>>/2 用中缀形式

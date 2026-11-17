@@ -506,3 +506,72 @@ describe('auto field access functions from named ctor fields', () => {
     expect(errs.filter(m => m.includes('cannot resolve unique signature'))).toEqual([])
   })
 })
+
+describe('typeclass-constrained signature vars (<= decl)', () => {
+  it('doc(T)-constrained params reject list/string overloads of ++', async () => {
+    await mk(
+      ':- module lst.\n:- interface.\n:- func list(T) ++ list(T) = list(T).\n:- end_module lst.\n',
+      'lst',
+    )
+    await mk(
+      ':- module str.\n:- interface.\n:- func string ++ string = string.\n:- end_module str.\n',
+      'str',
+    )
+    const doc = await mk(
+      ':- module m.\n' +
+      ':- interface.\n' +
+      ':- import_module lst.\n' +
+      ':- import_module str.\n' +
+      ':- type doc.\n' +
+      ':- typeclass doc(T) where [func doc(int, T) = doc].\n' +
+      ':- instance doc(doc).\n' +
+      ':- instance doc(string).\n' +
+      ':- func T1 ++ T2 = doc <= (doc(T1), doc(T2)).\n' +
+      ':- func wrap(T1, T2, T3) = doc <= (doc(T1), doc(T2), doc(T3)).\n' +
+      ':- end_module m.\n' +
+      ':- implementation.\n' +
+      'wrap(L, R, D) = L ++ D ++ R.\n' +
+      ':- end_module m.\n',
+      'm',
+    )
+    const errs = (doc.visitResult!.errors ?? []).map(d => d.message)
+    expect(errs.filter(m => m.includes('cannot resolve unique signature'))).toEqual([])
+    const inf = doc.visitResult!.inferred
+    const plus = [...inf.entries()].filter(([t]) => t.nameArity === '++/2').map(([, v]) => v?.sig?.module)
+    expect(plus.length).toBeGreaterThan(0)
+    expect(plus.every(m2 => m2 === 'm')).toBe(true)
+  })
+
+  it('explicit type annotation Term : Type is not inferred as a call', async () => {
+    // map/2 同时是类型与两个模块的 func——标注里的 map(K,V) 是类型引用，
+    // 不能当 map/2 项调用参与消歧（pprint.m dynamic_cast 的真实场景）
+    await mk(
+      ':- module ta.\n:- interface.\n:- type tmap(K, V).\n:- end_module ta.\n',
+      'ta',
+    )
+    await mk(
+      ':- module fa.\n:- interface.\n:- func map(int, int) = int.\n:- end_module fa.\n',
+      'fa',
+    )
+    await mk(
+      ':- module fb.\n:- interface.\n:- func map(string, string) = string.\n:- end_module fb.\n',
+      'fb',
+    )
+    const doc = await mk(
+      ':- module m2.\n' +
+      ':- interface.\n' +
+      ':- import_module ta.\n' +
+      ':- import_module fa.\n' +
+      ':- import_module fb.\n' +
+      ':- type tmap(K, V) == ta.tmap(K, V).\n' +
+      ':- pred dyn(T::in, tmap(K, V)::out) is semidet.\n' +
+      ':- end_module m2.\n' +
+      ':- implementation.\n' +
+      'dyn(X, M : tmap(K, V)) :- M = X.\n' +
+      ':- end_module m2.\n',
+      'm2',
+    )
+    const errs = (doc.visitResult!.errors ?? []).map(d => d.message)
+    expect(errs.filter(m => m.includes('cannot resolve unique signature'))).toEqual([])
+  })
+})
