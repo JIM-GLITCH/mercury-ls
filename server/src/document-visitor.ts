@@ -118,6 +118,14 @@ export class Visitor {
     // 同一 Term 只挂一次冻结（frozen goal 重试/嵌套推断会重复走到，
     // 无去重会无限堆积）
     private frozenTerms = new Set<Term>()
+    // goal 位置调用 / 头签名的独立去重集（与数据位置 functor 的 frozenTerms
+    // 分开——同一 Term 可能同时是调用点和头点，各自消歧互不阻塞）
+    private frozenCallTerms = new Set<Term>()
+    private frozenHeadTerms = new Set<Term>()
+    // 本子句登记的全部重试 goal（solvePending 统一跑到不动点）与
+    // 仍未消歧的项（遍历+求解后仍不确定的统一报错）
+    private pendingRetries: Array<() => boolean> = []
+    private ambiguousTerms = new Set<Term>()
     // 推断开关：批量索引阶段可关闭子句级类型推断（inferred 仅供打开中文档的
     // hover/definition/linker 消歧消费，未打开文档跳过可显著降低全库 analyzing 耗时）
     private inferEnabled = true
@@ -1670,6 +1678,10 @@ export class Visitor {
         this.varMode = new Map()
         this.varCounter = 0
         this.frozenTerms = new Set()
+        this.frozenCallTerms = new Set()
+        this.frozenHeadTerms = new Set()
+        this.pendingRetries = []
+        this.ambiguousTerms = new Set()
         this.pendingInferred = new Map()
         try {
             if (top.nameArity === ':-/2') {
@@ -1687,6 +1699,9 @@ export class Visitor {
         } catch {
             // 推断异常不向外抛，保持索引稳定
         }
+        // 遍历完一遍后的求解 pass：freeze goal 平时只在变量绑定时触发，
+        // 这里主动把本子句登记的消歧重试跑到不动点；仍不确定的记歧义错误
+        try { this.solvePending() } catch { /* 求解失败不影响推断落盘 */ }
         // 子句末统一 resolve 落 inferred：此时绑定已全部落定（含 frozen
         // goal 重试的结果），活逻辑项一次展开成 MerType 快照。
         // 与推断主体同样不向外抛——固化失败只丢该子句的推断结果
@@ -1856,21 +1871,74 @@ export class Visitor {
         // 参数按签名推断，结果变量 R 按返回类型推断
         if (head.nameArity === '=/2') {
             const call = head.args[0]
-            const sig = this.headSig(call, call.args)
+            const cargs = call.args ?? []
+            // bottom-up 预推断头实参与返回项：此刻拿到的就是真实推断类型，
+            // 头签名消歧（headSig→pickSig）直接用它们；选中签名后
+            // inferSignatureArgs 会带 expected 重推一次补 mode/形参合一
+            const argTypes = cargs.map(a => this.inferTerm(a))
+            const rt = this.inferTerm(head.args[1])
+            const expT = this.concreteNode(rt)?.kind === 'ctor' ? this.resolveSynonym(rt) : undefined
+            const sig = this.headSig(call, cargs, argTypes, expT)
             if (sig) {
                 const inst = this.instantiateSignature(sig)
-                this.inferSignatureArgs(call.args, inst)
+                this.inferSignatureArgs(cargs, inst)
                 this.markVarMode(head.args[1], inst.sig.resultMode ?? 'out')
                 if (inst.result) this.inferTerm(head.args[1], inst.result)
                 return
             }
+            this.maybeFreezeHeadSig(head)
             // `X = Expr` 形式的头（少见）：两侧按统一推断
             this.inferUnify(head.args[0], head.args[1])
             return
         }
-        const sig = this.headSig(head, head.args)
-        if (!sig) return
+        const argTypes = head.args.map(a => this.inferTerm(a))
+        const sig = this.headSig(head, head.args, argTypes)
+        if (!sig) {
+            this.maybeFreezeHeadSig(head)
+            return
+        }
         this.inferSignatureArgs(head.args, this.instantiateSignature(sig))
+    }
+    // 头签名多候选消歧失败：把重试 goal 挂到头实参/返回项的类型变量上——
+    // 签名未定时头参数是 fresh 变量，子句体推断会给它们绑定具体类型，
+    // 绑定后重跑 inferHead 即可用真实实参类型选出签名（等价 freeze/2）
+    private maybeFreezeHeadSig(head: Term) {
+        const isFuncFact = head.nameArity === '=/2'
+        const nameTerm = isFuncFact ? head.args[0] : head
+        const args = nameTerm.args ?? []
+        if (this.frozenHeadTerms.has(head) || args.length === 0) return
+        const cands = this.signatureCandidates(nameTerm)
+        if (cands.length < 2) return
+        const argTypes = args.map(a => this.inferTerm(a))
+        const rt = isFuncFact ? this.inferTerm(head.args[1]) : undefined
+        this.frozenHeadTerms.add(head)
+        this.ambiguousTerms.add(head)
+        let lastScore = -1
+        const goal = (): boolean => {
+            try {
+                const rn = rt ? this.concreteNode(rt) : undefined
+                const expT = rn?.kind === 'ctor' ? this.resolveSynonym(rt!) : undefined
+                const knownArgs = argTypes.reduce((n, t) => n + (this.isKnownType(t) ? 1 : 0), 0)
+                const score = (expT ? 1 << 20 : 0) + knownArgs
+                if (score === lastScore) return true
+                lastScore = score
+                if (!expT && knownArgs === 0) return true
+                // 重跑头推断：实参/返回类型已有真实绑定，headSig 能选出签名
+                this.inferHead(head)
+                const argTypesNow = args.map(a => this.inferTerm(a))
+                const p = this.pickSig(cands, args, argTypesNow, expT)
+                if (p) {
+                    this.ambiguousTerms.delete(head)
+                    this.frozenHeadTerms.delete(head)
+                }
+            } catch { /* LS 容错：goal 内部异常不影响合一主流程 */ }
+            return true
+        }
+        for (const t of rt ? [...argTypes, rt] : argTypes) {
+            const d = derefTerm(t)
+            if (isUnboundLogicalVar(d as object)) freeze(d as LogicVar, goal, this.trail)
+        }
+        this.pendingRetries.push(goal)
     }
     // 目标遍历（goal 位置：调用 p(args) / 统一 X = rhs）
     private inferGoal(term: Term) {
@@ -1956,7 +2024,8 @@ export class Visitor {
     // 胜出后 alignArgs 提交形参合一；选中签名记入 inferred.sig 供 hover 显示
     private inferCall(term: Term) {
         const argTypes = term.args.map(a => this.inferTerm(a))
-        const picked = this.pickSig(this.callCandidates(term), term.args, argTypes)
+        const callCands = this.callCandidates(term)
+        const picked = this.pickSig(callCands, term.args, argTypes)
         if (!picked) {
             // 高阶变量调用：形如 (P, V0, V) 的应用节点（(f, a1, a2, ...) 中 f 是持有谓词/函数值的变量），
             // 解析树里表现为 nameArity = "(/N)" 且 args[0] 是变量。
@@ -1991,6 +2060,9 @@ export class Visitor {
                 }
                 return
             }
+            // 多候选消歧失败：挂 freeze 等实参类型进展后重试 pickSig；
+            // 随后仍走 inferFunctor 兜底拿结果类型变量
+            if (callCands.length > 0) this.freezeCall(term, argTypes, callCands)
             // 非 pred/func（未知标识符）：兜底当数据 functor，安全不抛
             this.inferFunctor(term)
             return
@@ -2000,6 +2072,57 @@ export class Visitor {
         this.alignArgs(term.args, argTypes, inst.args, inst.sig.argModes)
         const resultType = inst.result ?? this.freshLogical() as LType
         this.pendingInferred.set(term, { ltype: resultType, sig: sig0 })
+    }
+    // goal 位置调用的延迟消歧：与 inferFunctor 的 freeze 同一模式——
+    // watch 各实参类型链尾变量，绑定进展后重试 pickSig，成功则提交签名
+    private freezeCall(term: Term, argTypes: LType[], cands: FuncInfo[]) {
+        if (this.frozenCallTerms.has(term)) return
+        this.frozenCallTerms.add(term)
+        this.ambiguousTerms.add(term)
+        let lastScore = -1
+        const goal = (): boolean => {
+            try {
+                const knownArgs = argTypes.reduce((n, t) => n + (this.isKnownType(t) ? 1 : 0), 0)
+                if (knownArgs === lastScore) return true
+                lastScore = knownArgs
+                if (knownArgs === 0) return true
+                const p = this.pickSig(cands, term.args, argTypes)
+                if (!p) return true
+                const inst = this.instantiateSignature(p.sig)
+                this.alignArgs(term.args, argTypes, inst.args, inst.sig.argModes)
+                const prev = this.pendingInferred.get(term)
+                this.pendingInferred.set(term, {
+                    ltype: prev?.ltype ?? inst.result ?? this.freshLogical() as LType,
+                    sig: p.sig,
+                })
+                this.ambiguousTerms.delete(term)
+                this.frozenCallTerms.delete(term)
+            } catch { /* LS 容错 */ }
+            return true
+        }
+        for (const t of argTypes) {
+            const d = derefTerm(t)
+            if (isUnboundLogicalVar(d as object)) freeze(d as LogicVar, goal, this.trail)
+        }
+        this.pendingRetries.push(goal)
+    }
+    // 求解 pass：子句推断遍历完后，主动把本子句登记的全部重试 goal
+    // 跑到不动点（freeze goal 平时只在变量绑定时触发，这里兜底一轮）；
+    // 仍未消歧的项统一报歧义错误
+    private solvePending() {
+        for (let round = 0; round < 8; round++) {
+            const sizeBefore = this.ambiguousTerms.size
+            const retriesBefore = this.pendingRetries.length
+            for (const retry of [...this.pendingRetries]) {
+                try { retry() } catch { /* 单个 goal 失败不影响其它 */ }
+            }
+            if (this.ambiguousTerms.size === sizeBefore && this.pendingRetries.length === retriesBefore) break
+        }
+        for (const t of this.ambiguousTerms) {
+            this.addError(`cannot resolve unique signature for ${t.name}/${t.semanticArity ?? t.arity}`, t)
+        }
+        this.ambiguousTerms.clear()
+        this.pendingRetries = []
     }
     // 试探性合一：失败把本次产生的绑定整体 undo 回 trail mark，不留半成品
     //（inferFunctor 逐个试探构造子/重载候选时，失败的候选不应留下绑定）。
@@ -2287,6 +2410,7 @@ export class Visitor {
             && !chosenCI && !chosenFunc
             && (constrs.length > 0 || funcCands.length > 0 || this.hasCrossConstrs(name, arity))) {
             this.frozenTerms.add(term)
+            this.ambiguousTerms.add(term)
             let lastScore = -1
             let done = false
             // watch：结果类型变量 + 每个实参推断类型的链尾自由变量——
@@ -2317,6 +2441,7 @@ export class Visitor {
                             if (after?.category ?? after?.sig) {
                                 done = true
                                 this.frozenTerms.delete(term)
+                                this.ambiguousTerms.delete(term)
                             }
                         }
                     }
@@ -2326,6 +2451,7 @@ export class Visitor {
                 return true
             }
             for (const v of watchVars) freeze(v, goal, this.trail)
+            this.pendingRetries.push(goal)
         }
         return resultType
     }
@@ -2541,13 +2667,13 @@ export class Visitor {
     }
     // 头位置签名：收集候选后按头实参已知类型消歧（pickSig 试解，与调用点同一
     // 套机制）；唯一/弱单候选返回实例化签名，歧义 → undefined（不猜）
-    private headSig(termOrName: Term | string, args?: Term[]): FuncInfo | undefined {
+    private headSig(termOrName: Term | string, args?: Term[], argTypes?: LType[], expected?: LType): FuncInfo | undefined {
         const cands = this.signatureCandidates(termOrName)
         if (cands.length === 0) return undefined
         const argTerms = args ?? (typeof termOrName === 'string' ? [] : termOrName.args ?? [])
-        // 头实参此刻尚未推断（inferSignatureArgs 在选中签名后才跑），
-        // 类型全未知 → pickSig 走弱返回/歧义，与旧 quickArgType 口径一致
-        const picked = this.pickSig(cands, argTerms, argTerms.map(() => this.freshLogical() as LType))
+        // argTypes 由调用方 bottom-up 预推断传入；缺省退回全新变量（弱返回口径）
+        const types = argTypes ?? argTerms.map(() => this.freshLogical() as LType)
+        const picked = this.pickSig(cands, argTerms, types, expected)
         return picked?.sig ?? undefined
     }
     // 声明里的签名是纯 MerType 模板（只读）；每个使用点经 instantiateSignature
