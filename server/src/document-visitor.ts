@@ -2169,6 +2169,9 @@ export class Visitor {
         const argTypes = term.args.map(a => this.inferTerm(a))
         const expNode = this.concreteNode(expected)
         const expCtor = expNode && expNode.kind === 'ctor' ? expNode.ctor : undefined
+        // expected 已是具体类型时作为结果约束传给 pickSig：全多态签名
+        //（如 pprint 的 T1++T2 = doc）实参合一虽过，结果类型不匹配即淘汰
+        const expectedT = expCtor ? this.resolveSynonym(expected!) : undefined
         const constrs: ConsInfo[] = []
         for (const ci of this.consByName(name)) {
             if (ci.arity === arity) constrs.push(ci)
@@ -2195,7 +2198,7 @@ export class Visitor {
         let fComputed = false
         let fCache: { sig: FuncInfo; verified: boolean } | undefined
         const pickFunc = () => {
-            if (!fComputed) { fCache = this.pickSig(funcCands, term.args, argTypes); fComputed = true }
+            if (!fComputed) { fCache = this.pickSig(funcCands, term.args, argTypes, expectedT); fComputed = true }
             return fCache
         }
 
@@ -2434,7 +2437,7 @@ export class Visitor {
     // 返回 verified=true 表示该签名合一判定唯一胜出（实参类型确实支持它）；
     // verified=false 仅出现在「单候选 + 实参类型全未知」的弱返回——调用方在
     // func/构造子歧义场景应据此保持无类别，而不是直接采信
-    private pickSig(cands: FuncInfo[], args: Term[], argTypes: LType[]): { sig: FuncInfo; verified: boolean } | undefined {
+    private pickSig(cands: FuncInfo[], args: Term[], argTypes: LType[], expected?: LType): { sig: FuncInfo; verified: boolean } | undefined {
         if (cands.length === 0) return undefined
         // 没有任何实参带已知类型时，所有候选都会"成功"，合一判定无意义 →
         // 直接歧义；仅单候选时弱返回，多候选判歧义
@@ -2454,6 +2457,10 @@ export class Visitor {
                 if (param === undefined) continue
                 if (!this.tryUnify(argTypes[i], this.resolveSynonym(param))) { ok = false; break }
             }
+            // 结果类型约束：expected 为具体类型时，候选结果必须与之合一——
+            // 否则全多态签名（结果含独立类型变量）会与具体签名并列胜出判歧义
+            if (ok && expected !== undefined && inst.result !== undefined
+                && !this.tryUnify(inst.result, expected)) ok = false
             // 试探绑定一律 undo：胜者由 alignArgs 在正式路径重新合一提交
             undo(this.trail, mark)
             if (ok) successes.push({ sig: c, vars: c.argTypes.reduce((s, a) => s + this.countTypeVars(a), 0) })
