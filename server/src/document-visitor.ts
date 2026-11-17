@@ -2038,7 +2038,7 @@ export class Visitor {
     private inferCall(term: Term) {
         const argTypes = term.args.map(a => this.inferTerm(a))
         const callCands = this.callCandidates(term)
-        const picked = this.pickSig(callCands, term.args, argTypes)
+        const picked = this.pickSig(callCands, term.args, argTypes, undefined, undefined, true)
         if (!picked) {
             // 高阶变量调用：形如 (P, V0, V) 的应用节点（(f, a1, a2, ...) 中 f 是持有谓词/函数值的变量），
             // 解析树里表现为 nameArity = "(/N)" 且 args[0] 是变量。
@@ -2144,7 +2144,7 @@ export class Visitor {
                 if (done?.sig ?? done?.category) { lastStats = { successes: 1, unknownInfo: false }; return true }
                 if (knownArgs() === 0) { lastStats = { successes: 0, unknownInfo: true }; return false }
                 const st = { successes: 0, unknownInfo: false }
-                const p = this.pickSig(cands, term.args, argTypes, undefined, st)
+                const p = this.pickSig(cands, term.args, argTypes, undefined, st, true)
                 lastStats = st
                 if (!p) return false
                 const inst = this.instantiateSignature(p.sig)
@@ -2635,15 +2635,59 @@ export class Visitor {
     // verified=false 仅出现在「单候选 + 实参类型全未知」的弱返回——调用方在
     // func/构造子歧义场景应据此保持无类别，而不是直接采信
     private pickSig(cands: FuncInfo[], args: Term[], argTypes: LType[], expected?: LType,
-        stats?: { successes: number; unknownInfo: boolean }): { sig: FuncInfo; verified: boolean } | undefined {
+        stats?: { successes: number; unknownInfo: boolean }, preferGeneral = false): { sig: FuncInfo; verified: boolean } | undefined {
         if (stats) { stats.successes = 0; stats.unknownInfo = false }
         if (cands.length === 0) return undefined
         // 没有任何实参带已知类型时，所有候选都会"成功"，合一判定无意义 →
-        // 直接歧义；仅单候选时弱返回，多候选判歧义
+        // 直接歧义；仅单候选时弱返回，多候选判歧义（preferGeneral 时例外，见下）
         const hasKnown = argTypes.some(t => this.isKnownType(t))
         if (!hasKnown) {
-            if (stats) stats.unknownInfo = cands.length > 1
-            return cands.length === 1 ? { sig: cands[0], verified: false } : undefined
+            if (cands.length === 1) return { sig: cands[0], verified: false }
+            if (expected !== undefined) {
+                // 结果类型约束前置：逐候选实例化试探 result ≟ expected，
+                // 只留存活者再走下面的通用/歧义判定
+                const byResult: FuncInfo[] = []
+                for (const c of cands) {
+                    const inst = this.instantiateSignature(c)
+                    if (inst.result === undefined) continue
+                    const mark = this.trail.length
+                    const ok = this.tryUnify(inst.result, expected)
+                    undo(this.trail, mark)
+                    if (ok) byResult.push(c)
+                }
+                if (byResult.length === 1) return { sig: byResult[0], verified: false }
+                if (byResult.length > 1) {
+                    // 过滤后仍多候选：按过滤集继续 preferGeneral/歧义判定
+                    let best = byResult[0], bestVars = -1
+                    for (const c of byResult) {
+                        const v = c.argTypes.reduce((s2, a) => s2 + this.countTypeVars(a), 0)
+                        if (v > bestVars) { bestVars = v; best = c }
+                    }
+                    if (preferGeneral) {
+                        if (stats) stats.successes = 1
+                        return { sig: best, verified: false }
+                    }
+                    if (stats) stats.unknownInfo = true
+                    return undefined
+                }
+                // byResult 为空：expected 与所有候选结果都不合 → 真实不匹配，
+                // 落回原候选集的歧义判定（不报"无匹配"，LS 静默容忍）
+            }
+            if (preferGeneral) {
+                // goal 位置调用（pred 无返回类型）：实参全未知时选类型变量最多
+                //（最通用）的候选弱提交——它对后续类型绑定保持合法（如 diet 的
+                // <(T,T) 经 less_than 实例分发覆盖 int/uint 实参），比报歧义更有用。
+                // 数据位置 functor 不启用：func/构造子的结果类型会被错误承诺
+                let best = cands[0], bestVars = -1
+                for (const c of cands) {
+                    const v = c.argTypes.reduce((s, a) => s + this.countTypeVars(a), 0)
+                    if (v > bestVars) { bestVars = v; best = c }
+                }
+                if (stats) stats.successes = 1
+                return { sig: best, verified: false }
+            }
+            if (stats) stats.unknownInfo = true
+            return undefined
         }
         const successes: { sig: FuncInfo; vars: number }[] = []
         for (const c of cands) {
