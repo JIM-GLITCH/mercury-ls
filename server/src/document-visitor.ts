@@ -1898,8 +1898,15 @@ export class Visitor {
         const bb = b as unknown as { ctor?: TypeCtor; pf?: string; args: LType[]; result?: LType }
         if (a.kind === 'ctor') {
             const ca = aa.ctor!, cb = bb.ctor!
-            if (ca.name !== cb.name || ca.arity !== cb.arity) return false
-            if (ca.module && cb.module && ca.module !== cb.module) return false
+            if (ca.name !== cb.name || ca.arity !== cb.arity
+                || (ca.module && cb.module && ca.module !== cb.module)) {
+                // 嵌套位置的 == 同义词（digit == int）不经 resolveSynonym 展开，
+                // ctor 名直接判等会误判失败——展开两侧再合一一次
+                const sa = this.resolveSynonym(a as unknown as LType)
+                const sb = this.resolveSynonym(b as unknown as LType)
+                if (sa === a && sb === b) return false
+                return this.unifyTypes(sa, sb)
+            }
         } else if (a.kind === 'ho') {
             if (aa.pf !== bb.pf) return false
         } else {
