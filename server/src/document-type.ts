@@ -112,6 +112,11 @@ export function sigCandidates(
     return bySem.length ? bySem : hit(alt)
 }
 
+// 展示场景的唯一签名：候选恰好一个才返回（>1 即歧义，不猜）
+export function uniqSig(cands: FuncInfo[] | undefined): FuncInfo | undefined {
+    return cands?.length === 1 ? cands[0] : undefined
+}
+
 // 类型名项拆解：./2 是左结合链（a.b.c = '.''('.'(a,b),c)），最内层元素
 // 是类型头（原子或 error(T) 应用项），args[0] 一侧是限定符——既可是模块名
 // （msi.stream_info 引用 msi 模块的 stream_info），也可是类型名的命名空间

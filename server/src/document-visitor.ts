@@ -1706,7 +1706,7 @@ export class Visitor {
         // 参数按签名推断，结果变量 R 按返回类型推断
         if (head.nameArity === '=/2') {
             const call = head.args[0]
-            const sig = this.sigAt(call)
+            const sig = this.headSig(call, call.args)
             if (sig) {
                 this.inferSignatureArgs(call.args, sig)
                 this.markVarMode(head.args[1], sig.resultMode ?? 'out')
@@ -1717,7 +1717,7 @@ export class Visitor {
             this.inferUnify(head.args[0], head.args[1])
             return
         }
-        const sig = this.sigAt(head)
+        const sig = this.headSig(head, head.args)
         if (!sig) return
         this.inferSignatureArgs(head.args, sig)
     }
@@ -1899,7 +1899,7 @@ export class Visitor {
         if (this.drainingFrozen) return
         this.drainingFrozen = true
         try {
-            for (;;) {
+            for (; ;) {
                 let ran = false
                 for (let i = this.frozen.length - 1; i >= 0; i--) {
                     const f = this.frozen[i]
@@ -2505,11 +2505,14 @@ export class Visitor {
         if (own.length) return own
         return this.exportManager.lookupFuncAlts(name, sem, alt)
     }
-    // 签名/构造子类型的实例化入口：查签名后立即 freshen，保证 argTypes 与
-    // resultType 共享同一组重命名后的类型变量
-    private sigAt(termOrName: Term | string, arity?: number): FuncInfo | undefined {
-        const sig = this.signatureOf(termOrName, arity)
-        return sig && this.freshenSig(sig)
+    // 头位置签名：收集候选后按头实参已知类型消歧（pickSig 试解，与调用点同一
+    // 套机制）；唯一/弱单候选返回实例化签名，歧义 → undefined（不猜）
+    private headSig(termOrName: Term | string, args?: Term[]): FuncInfo | undefined {
+        const cands = this.signatureCandidates(termOrName)
+        if (cands.length === 0) return undefined
+        const argTerms = args ?? (typeof termOrName === 'string' ? [] : termOrName.args ?? [])
+        const picked = this.pickSig(cands, argTerms)
+        return picked ? this.freshenSig(picked.sig) : undefined
     }
     // 声明/构造子类型的实例化：把签名里所有具名类型变量（T/K/V...）重命名为
     // 子句内唯一名（`T#3`）。每次使用（每次调用、每个构造子）都是独立实例——
@@ -2552,27 +2555,30 @@ export class Visitor {
             resultType: this.freshenType(ci.resultType, map),
         }
     }
-    private signatureOf(termOrName: Term | string, arity?: number): FuncInfo | undefined {
+    // 头位置签名候选：与 callCandidates 同一套 scope 规则（自限定硬作用域 /
+    // 外部限定目标模块 / 本模块优先回退导出索引），返回 func+pred 全部候选，
+    // 由 headSig 的 pickSig 按实参类型消歧——不在此层做单值取舍
+    private signatureCandidates(termOrName: Term | string, arity?: number): FuncInfo[] {
         const name = typeof termOrName === 'string' ? termOrName : termOrName.name
         const a = typeof termOrName === 'string' ? arity! : termOrName.semanticArity
         // 状态变量 !X 在语义元数上按两个参数（!.X / !:X）计，但声明处常按单个逻辑参数计（如
         // `:- pred p(list(T)::out)` 配 `p(!List)`）。两种元数都查一次，兼容这种写法。
         const aAlt = typeof termOrName === 'string' ? a : termOrName.arity
-        // 单值查找 = sigCandidates 末位（sem→alt 遮蔽与旧 name/arity 双键查询
-        // 等价；func→pred 优先级不变）
-        const local = (map: Map<string, FuncInfo[]>) =>
-            sigCandidates(map, name, a, aAlt, 'func').at(-1)
-            ?? sigCandidates(map, name, a, aAlt, 'pred').at(-1)
+        const both = (map: Map<string, FuncInfo[]>) => [
+            ...sigCandidates(map, name, a, aAlt, 'func'),
+            ...sigCandidates(map, name, a, aAlt, 'pred'),
+        ]
         if (typeof termOrName !== 'string' && termOrName.qualified) {
             const scope = this.qualifiedSigScope(termOrName)
             // 自限定：硬作用域，只看本模块（不回退导出索引）
-            if (scope === 'self') return local(this.sigAlts)
-            const sig = scope && local(scope)
-            if (sig) return sig
+            if (scope === 'self') return both(this.sigAlts)
+            const cands = scope ? both(scope) : []
+            if (cands.length) return cands
             // 外部限定未命中 → 继续走无限定兜底（与旧 signatureOf 语义一致）
         }
-        return local(this.sigAlts)
-            ?? this.exportManager.lookupFunc(name, a) ?? this.exportManager.lookupFunc(name, aAlt)
+        const local = both(this.sigAlts)
+        if (local.length) return local
+        return this.exportManager.lookupSigAlts(name, a, aAlt)
     }
     private varKey(term: Term): string {
         if (['!/1', '!./1', '!:/1'].includes(term.nameArity)) {

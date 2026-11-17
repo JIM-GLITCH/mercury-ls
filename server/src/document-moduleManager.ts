@@ -180,13 +180,6 @@ export class ExportManager {
         }
         return docs
     }
-    // 单值签名查询：func/pred 候选末位（func 优先——与 lookupSigAlts 的
-    // func→pred 拼接顺序一致；同 kind 同元数多声明取最后注册的）
-    lookupFunc(name: string, arity: number): FuncInfo | undefined {
-        const arr = this.sigAltsMap.get(name)
-        return arr?.filter(f => f.kind === 'func' && f.arity === arity).at(-1)
-            ?? arr?.filter(f => f.kind === 'pred' && f.arity === arity).at(-1)
-    }
     // 重载候选查询：func / pred / 合并（调用位置两者皆可；
     // 各 kind 内部仍是 sem→alt 遮蔽，func 候选排在 pred 前）
     lookupFuncAlts(name: string, sem: number, alt: number): FuncInfo[] {

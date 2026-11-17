@@ -5,7 +5,7 @@ import {
 import { TextDocument } from 'vscode-languageserver-textdocument'
 import { URI } from 'vscode-uri'
 import { moduleQualifiedName } from './document-moduleManager'
-import { merTypeToString } from './document-type'
+import { merTypeToString, uniqSig } from './document-type'
 import type { MercuryServices } from './services'
 import type { Term } from './term'
 import { semanticArityOf } from './utils'
@@ -68,7 +68,7 @@ function completionKind(term: Term): CompletionItemKind {
 
 /** 用已收集的 func/pred 签名给出补全项的 detail */
 function signatureOf(services: MercuryServices, name: string, arity: number): string | undefined {
-    const fi = services.exportManager.lookupFunc(name, arity)
+    const fi = uniqSig(services.exportManager.lookupSigAlts(name, arity, arity))
     if (!fi) return undefined
     const args = fi.argTypes.map(merTypeToString).join(', ')
     return fi.resultType

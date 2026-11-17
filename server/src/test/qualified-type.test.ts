@@ -249,7 +249,7 @@ describe('module-qualified type constructors', () => {
   it('goto def falls back to exportManager when imports lack the module', async () => {
     // 调用方未 import 目标模块（或 imports 未收录）时，exportManager 的
     // interface 导出项带 module 限定名，仍能定位定义模块——与 hover 的
-    // lookupFunc 全局兜底同源
+    // lookupSigAlts 全局兜底同源
     const dep = await mk(
       ':- module io.stream_ops.\n' +
       ':- interface.\n' +

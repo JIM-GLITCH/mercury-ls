@@ -169,7 +169,7 @@ function findDefTermInOtherDocument(services: MercuryServices, term: Term, docum
 
     // exportManager 兜底：interface 导出的 func/pred 带 module 限定名，
     // 覆盖 imports 缺失/推断未跑（非 priority 文档 inferred 为空）的场景；
-    // 与 hover 的 lookupFunc 全局兜底同源
+    // 与 hover 的 lookupSigAlts 全局兜底同源
     const exports = services.exportManager.get(term.name)
     const fromExports = exports
         ? stream(exports)

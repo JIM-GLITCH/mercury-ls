@@ -2,7 +2,7 @@ import { Hover, HoverParams, MarkupContent } from 'vscode-languageserver'
 import { semanticArityOf } from './utils'
 import { search, termRange } from './term'
 import { URI } from 'vscode-uri'
-import { merTypeToString, keyOf, type FuncInfo, type MerType } from './document-type'
+import { merTypeToString, uniqSig, keyOf, type FuncInfo, type MerType } from './document-type'
 
 import type { MercuryServices } from './services'
 
@@ -17,11 +17,9 @@ export async function HoverProvider(services: MercuryServices, params:HoverParam
     // func/pred 的签名（含跨模块导出索引兜底）：头部限定名与 type 行共用
     const sigFi = (term.semanticType === 'func' || term.semanticType === 'pred')
         ? doc.visitResult?.inferred.get(term)?.sig
-            ?? doc.visitResult?.sigAlts.get(term.name)
-                ?.filter(f => f.kind === 'func' && f.arity === term.semanticArity).at(-1)
-            ?? doc.visitResult?.sigAlts.get(term.name)
-                ?.filter(f => f.kind === 'pred' && f.arity === term.semanticArity).at(-1)
-            ?? services.exportManager.lookupFunc(term.name, term.semanticArity)
+            ?? uniqSig(doc.visitResult?.sigAlts.get(term.name)
+                ?.filter(f => f.arity === term.semanticArity))
+            ?? uniqSig(services.exportManager.lookupSigAlts(term.name, term.semanticArity, term.semanticArity))
         : undefined
 
     // 符号的限定显示名：能解析出定义模块就带 module 前缀（m.add / io.error）
