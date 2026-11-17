@@ -21,8 +21,9 @@ parse → visit(索引+可选推断) → link → validate
 
 - `MerType = var{name} | ctor{TypeCtor{name,arity,module?}, args[]} | ho{pf,args,result}`
   —— TypeCtor 带 module/限定名（`io.error`→module 'io'）；hover 显示 `module.name`
-- `subst: Map<string, MerType>` 名字代入；**不用 LogicVar**（迁移成本太高，
-  `51b26d6`/`84a7aa1` 历史已证明；`logical-var.ts` 目前是死代码）
+- 推断期类型项已迁移为 `LType = Logical<MerType>`（见文末 LogicVar 迁移
+  计划）；`subst`/`applySubst`/MerType `unify` 已从推断路径移除
+  （document-type.ts 中 unify/applySubst 暂保留未删）
 - `tryUnify` 克隆 subst 试合一，成功才提交 → 天然事务性
 - `freshenType/freshenSig/freshenCons` 实例化多态签名/构造子（`T`→`T#3`，
   `merTypeToString` 显示时剥 `#n`）
@@ -109,3 +110,55 @@ cd . && bun run node esbuild.js       # 构建（server/out + client/out）
 真实文件复现套路：临时 test 加载 `C:/Users/junyao/codespace/mercury/library/*.m`,
 `documentFactory.fromString` + `Visitor.visit(doc, token, infer)` +
 `exportManager.set(doc)`，分阶段计时定位。
+
+## LogicVar 迁移计划（分支 infer-by-logicvar，2026-11-17 起）
+
+> 已确认方向：逻辑变量 + freeze/2，**不要 CHR**。`8205a13` 版 logical-var.ts
+> 已恢复（freeze/attrs/trail/runWithTrail/conj/disj 齐全，occurs check 保留，
+> merTypeToString 已加 path-set 去环兜底）。前置重构已完成：sigAlts/typeIndex
+> 均为 name-key 候选数组；签名消歧只剩 pickSig/trialSig；consByName O(1)。
+
+### 目标架构
+
+- 推断期类型项 = `Logical<MerType>`（下称 LType）；签名（FuncInfo/ConsInfo）
+  保持纯 MerType 模板，每个使用点实例化成 LType（freshen → freshLogical）
+- `varTypes` 值换 LType；`subst`/`tryUnify` 换 trail mark/undo（零克隆）
+- frozen 队列 → freeze goal 挂变量 attr（消歧依赖的类型变量绑定时唤醒）；
+  中期可先保留现有 frozen 机制跑通，再换 freeze
+- 子句末 `resolve()` 一次落 MerType 写 `inferred`；inferred 的
+  saved/rollback 快照机制整体删除（推迟写入即无回滚问题）
+- wake goal 失败**不**回滚外层绑定（LS 容错），内部 try/catch 后重新 freeze
+  或放弃——与求解器语义不同，刻意为之
+
+### 分步
+
+1. ~~**只换表示**~~ **已完成**：推断期类型项 = `LType = Logical<MerType>`
+   （document-type.ts 导出）；签名/构造子/类型体模板每个使用点
+   `instantiateSignature/instantiateCons/instantiate` 成活逻辑项
+   （声明类型变量命名 `T#n`，fresh 变量 `?N`，varNames WeakMap 记显示名）；
+   `subst`/`applySubst`/`unify`(MerType) 全部移除，合一走
+   `unifyTypes`（自由变量→logical-var `unify` 绑 trail；具体节点→
+   `unifyNodes` 按 MerType 语义递归：ctor name/arity+module 通配、
+   ho pf/result 宽松），失败自动 undo trail。
+2. ~~**换消歧**~~ **已完成**：trialSig/precheckSig 改 trail mark/undo +
+   varTypes/varMode/pendingInferred 克隆回滚；`inferred` 推迟到子句末
+   `solidify`（resolve）一次落盘——`refreshVarTypes`、pickSig 的
+   saved/rollback、`collectArgTerms` 全部删除。推断期间内部读
+   `pendingInferred`（活 ltype），`InferredInfo.ltype` 保留活引用。
+3. ~~**换 freeze**~~ **已完成**：frozen {term,watches,goal} 队列删除，
+   改 `freeze(v, goal, trail)` 把重试 goal 挂到消歧依赖的链尾自由变量
+   （结果类型 + 直接变量实参）；goal 恒返回 true（LS 容错，不回滚），
+   inTrialDepth>0 时被唤醒直接返回（队列由 trail undo 恢复）。
+   `derefTerm`/`freeze` 已加进 logical-var.ts 导出。
+   验证：165 测试全过；psqueue/io/assoc_list/list/array.m 单文件
+   推断无异常。
+4. **（可选）AC-lite**：共享变量的两个歧义项做联合过滤（arc consistency），
+   不做 labeling/搜索。
+
+### 关键文件
+
+- `server/src/logical-var.ts`（已恢复，勿动 CHR）
+- `server/src/document-visitor.ts` 推断段 ~L1650-2600
+- `server/src/document-type.ts` unify/applySubst 被 unifyTypes/resolve 取代
+- 参考：`git show 51b26d6:server/src/document-visitor.ts`（LType 用法）、
+  `git show 837d03a:server/src/document-typeinfer.ts`（独立 pass 雏形）

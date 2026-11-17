@@ -1,5 +1,10 @@
 import { Term, moduleQualifiedName } from './term'
 import type { MerModeRef } from './document-mode'
+import type { Logical } from './logical-var'
+
+// 推断期类型项：MerType 结构里变量位置可为逻辑变量（见 logical-var.ts）；
+// 声明里的签名/构造子信息仍是纯 MerType 模板，使用点经 instantiate 展开成 LType
+export type LType = Logical<MerType>
 
 // 类型构造子（对应编译器 type_ctor(sym_name, arity)）
 // module 是点分限定名（io.error 的 io、msi.stream_info 的 msi；嵌套模块 a.b.c
@@ -83,6 +88,9 @@ export function argModesOf(args: Term[]): (string | undefined)[] | undefined {
 // mode 为变量的子句级模式近似（head 形参的声明 mode / 局部绑定变量 out / 调用 in 实参）
 export interface InferredInfo {
     type: MerType
+    // 推断期活逻辑项（type 是它在写入时刻的 resolve 快照；ltype 供推断内部
+    // 回读「当前绑定状态」，如 quickArgType 的已推断类型参与重载消歧）
+    ltype?: LType
     category?: 'constructor' | 'func'
     mode?: string           // 变量出现点的 inst 字符串（Phase C 逐出现点记录，hover 标 inst；
                             //  无记录时为子句级近似 in/out，hover 标 mode）
@@ -190,7 +198,14 @@ export function termToMerType(term: Term): MerType {
 // 推断引擎为未受约束位置生成的内部类型变量（freshVar 的 ?0/?1/...）意味着「未推断出类型」，
 // 显示为 unknown；源码里声明的类型变量（如 pair(K,V) 的 K/V、func f(T)=T 的 T）保持原名。
 export function merTypeToString(t: MerType): string {
+    // 循环类型项兜底：unify 的 occurs check 理论上已拦截，防御性截断防栈溢出
+    const path = new Set<MerType>()
     const render = (ty: MerType): string => {
+        if (path.has(ty)) return '…'
+        path.add(ty)
+        try { return renderInner(ty) } finally { path.delete(ty) }
+    }
+    const renderInner = (ty: MerType): string => {
         switch (ty.kind) {
             case 'var':
                 // ?N 是推断 fresh 变量 → unknown；T#n 是实例化后的声明类型变量，

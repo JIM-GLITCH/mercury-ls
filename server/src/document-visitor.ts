@@ -8,9 +8,13 @@ import { interruptAndCheck } from './promise-util'
 import { ExportManager, ModuleManager, moduleQualifiedName } from './document-moduleManager'
 import type { MercuryServices } from './services'
 import {
-    applySubst, ConsInfo, FuncInfo, InferredInfo, MerType, TypeCtor, TypeInfo,
-    keyOf, keyOfTypeCtor, modeOfArg, argModesOf, termToMerType, typeHeadParts, unify, sigCandidates,
+    ConsInfo, FuncInfo, InferredInfo, LType, MerType, TypeCtor, TypeInfo,
+    keyOf, keyOfTypeCtor, modeOfArg, argModesOf, termToMerType, typeHeadParts, sigCandidates,
 } from './document-type'
+import {
+    createLogicalVar, createTrail, derefTerm, freeze, isUnboundLogicalVar, resolve, undo, unify,
+    type LogicVar, type Trail,
+} from './logical-var'
 import {
     instTermToMerInst, instFunctorAlts, modeTermToRef, instDefHead,
     type MerInst, type InstDef, type ModeDef, type MerModeRef,
@@ -88,25 +92,40 @@ export class Visitor {
     inferred = new Map<Term, InferredInfo>()
     // 正在收集的类型定义（visitTypeConstrutor 往里追加构造子）
     private currentType?: TypeInfo
-    // 类型推断工作态（每个子句重置）
-    private subst = new Map<string, MerType>()
-    private varTypes = new Map<string, MerType>()
+    // 类型推断工作态（每个子句重置）：varTypes 的值是活逻辑项 LType，
+    // 变量绑定/回滚走 trail（试解失败 undo 即还原，零克隆）；varNames 记录
+    // 每个逻辑变量的显示名（?N = 推断 fresh 变量 → hover 显示 unknown；
+    // T#n = 声明类型变量的本次实例 → merTypeToString 剥 #n 显示 T）
+    private trail: Trail = []
+    private varTypes = new Map<string, LType>()
+    private varNames = new WeakMap<LogicVar, string>()
     // 提交性合一失败计数：trialSig 试解重载候选时统计（探测性失败不计）
     private unifyFailed = 0
     // 变量子句级 mode 近似（head 形参声明 mode / 绑定变量 out / 调用 in 实参；类型推断步骤填充，供 hover 显示）
     private varMode = new Map<string, string>()
     private varCounter = 0
-    // freeze 式延迟约束：消歧失败（信息不足）的 functor 项登记 goal + watch
-    // 列表（结果类型变量 + 直接变量实参的类型变量），每次 tryUnify 提交后
-    // drain——只对 watch 解析结果发生变化的 goal 做评分/重试（等价于 Mercury
-    // freeze/2 的「变量绑定时唤醒」，但按名解析变化检测，兼容 subst 别名链）。
-    // goal 返回 true 表示已解决/放弃（移除），false 继续等下一次变化
-    private frozen: { term: Term; watches: { t: MerType; last: string }[]; goal: () => boolean }[] = []
+    // freeze 式延迟约束：消歧失败（信息不足）的 functor 项把重试 goal 经
+    // freeze/2 挂到消歧依赖的活逻辑变量上（结果类型变量 + 直接变量实参的
+    // 类型变量），变量绑定到具体值时同步唤醒——等价于 Mercury freeze/2。
+    // LS 容错语义：goal 恒返回 true（不回滚外层绑定），内部自行判定
+    // 「信息够了就重试消歧，还不够就继续等其它变量绑定」
+    // 推迟写入的推断结果：推断期间只记活逻辑项（ltype），子句末统一
+    // solidify 成 MerType 落 inferred——绑定此时已全部落定，不需要
+    // refreshVarTypes 刷新，也不需要 pickSig 的 saved/rollback（trialSig
+    // 对本表做克隆回滚，败者候选的条目不留残渣）
+    private pendingInferred = new Map<Term, {
+        ltype: LType
+        category?: 'constructor' | 'func'
+        sig?: FuncInfo
+        mode?: string
+    }>()
     // 同一 Term 只挂一次冻结（trialSig 试解会重复遍历实参，无去重会无限堆积）
     private frozenTerms = new Set<Term>()
-    private drainingFrozen = false
-    // trialSig 试解期间克隆了 subst/varTypes，tryUnify 的提交不代表真实进展，
-    // 期间不触发 drain（否则 goal 会在克隆状态上误判/误写）
+    // trialSig 试解期间变量绑定会被 trail undo，但 freeze goal 仍会被同步
+    // 唤醒——goal 检测 inTrialDepth>0 直接返回（队列由 trail undo 恢复，
+    // 等真实绑定再唤醒）；同时禁止新挂 freeze（否则 frozenTerms 标记与
+    // 被回滚的 attr 不一致）。pickSig 多候选时也直接判歧义，防止
+    // trialSig→inferTerm→inferFunctor→pickSig 无限递归
     private inTrialDepth = 0
     // 推断开关：批量索引阶段可关闭子句级类型推断（inferred 仅供打开中文档的
     // hover/definition/linker 消歧消费，未打开文档跳过可显著降低全库 analyzing 耗时）
@@ -1654,12 +1673,13 @@ export class Visitor {
         // 声明（:-/1）与 DCG（-->/2）不做子句级推断
         if (top.nameArity === ':-/1' || top.nameArity === '-->/2') return
         if (!clause.callee) return
-        this.subst = new Map()
+        this.trail = createTrail()
         this.varTypes = new Map()
+        this.varNames = new WeakMap()
         this.varMode = new Map()
         this.varCounter = 0
-        this.frozen = []
         this.frozenTerms = new Set()
+        this.pendingInferred = new Map()
         try {
             if (top.nameArity === ':-/2') {
                 this.inferHead(top.args[0])
@@ -1676,6 +1696,141 @@ export class Visitor {
         } catch {
             // 推断异常不向外抛，保持索引稳定
         }
+        // 子句末统一 resolve 落 inferred：此时绑定已全部落定（含 frozen
+        // goal 重试的结果），活逻辑项一次展开成 MerType 快照
+        for (const [term, p] of this.pendingInferred) {
+            this.inferred.set(term, {
+                type: this.solidify(p.ltype),
+                category: p.category,
+                sig: p.sig,
+                mode: p.mode,
+                ltype: p.ltype,
+            })
+        }
+        this.pendingInferred.clear()
+    }
+    // ===== LType 基础设施 =====
+    // 推断期类型项 = Logical<MerType>：签名/构造子/类型体等 MerType 模板每个
+    // 使用点 instantiate 成一组逻辑变量；变量绑定记入 trail，试解失败 undo
+    // 即整体还原（替代旧 subst 克隆试合一）。inferred.type 仍是写入时刻的
+    // MerType 快照，推迟到子句末统一 resolve 是后续步骤的事。
+    private freshLogical(name?: string): LogicVar<MerType> {
+        const v = createLogicalVar<MerType>()
+        this.varNames.set(v, name ?? this.freshVar())
+        return v
+    }
+    // 变量显示名：取链尾变量查 varNames（?N → unknown；T#n → T）
+    private varNameOf(v: LogicVar): string {
+        return this.varNames.get(derefTerm(v) as LogicVar) ?? this.freshVar()
+    }
+    // MerType 模板 → LType：env 把模板类型变量名映射到既有逻辑项（resolveSynonym
+    // 代入调用点实参用）；缺省时每个变量 freshLogical。声明变量带 #n 唯一名——
+    // 不同实例化互不撞名（显示名/冻结唤醒都唯一），unifyTypes 的 fresh/具名
+    // 偏好判定也靠它区分 ?N 与 T#n
+    private instantiate(t: MerType, env: Map<string, LType> = new Map()): LType {
+        const go = (x: MerType): LType => {
+            if (x.kind === 'var') {
+                let v = env.get(x.name)
+                if (!v) {
+                    v = this.freshLogical(`${x.name}#${this.varCounter++}`)
+                    env.set(x.name, v)
+                }
+                return v
+            }
+            if (x.kind === 'ctor') {
+                return { kind: 'ctor', ctor: x.ctor, args: x.args.map(go) } as LType
+            }
+            return {
+                kind: 'ho', pf: x.pf, args: x.args.map(go),
+                // ho 恒带 result（pred 用自由变量占位），保证两侧结构形状一致
+                result: x.result ? go(x.result) : this.freshLogical(),
+            } as LType
+        }
+        return go(t)
+    }
+    private instantiateSignature(sig: FuncInfo) {
+        const env = new Map<string, LType>()
+        return {
+            sig,
+            args: sig.argTypes.map(a => this.instantiate(a, env)),
+            result: sig.resultType ? this.instantiate(sig.resultType, env) : undefined,
+        }
+    }
+    private instantiateCons(ci: ConsInfo) {
+        const env = new Map<string, LType>()
+        return {
+            ci,
+            args: ci.argTypes.map(a => this.instantiate(a, env)),
+            result: this.instantiate(ci.resultType, env),
+        }
+    }
+    // derefTerm 后的当前形态：自由变量返回 undefined（无结构信息可用），
+    // 否则返回 MerType 节点（节点内部 args/result 位置仍是活 LType）
+    private concreteNode(t: LType | undefined): MerType | undefined {
+        if (t === undefined) return undefined
+        const d = derefTerm(t)
+        if (isUnboundLogicalVar(d as object)) return undefined
+        const n = d as MerType
+        return n.kind === 'var' ? undefined : n
+    }
+    // 「已知类型」判定：能解出具体结构才算 known（参与消歧打分/预检）
+    private isKnownType(t: LType | undefined): boolean {
+        return this.concreteNode(t) !== undefined
+    }
+    // LType 合一：事务性——失败把本次产生的绑定整体 undo 回 trail mark。
+    // 自由变量相遇时 fresh（?N）链到具名（T#n），否则 hover 上声明类型变量
+    // 会被推断变量冲成 unknown（沿用旧 subst 的绑定方向偏好）
+    private unifyTypes(a: LType, b: LType): boolean {
+        const mark = this.trail.length
+        const ok = this.unifyTypesGo(a, b)
+        if (!ok) undo(this.trail, mark)
+        return ok
+    }
+    private unifyTypesGo(a: LType, b: LType): boolean {
+        const da = derefTerm(a), db = derefTerm(b)
+        const aVar = isUnboundLogicalVar(da as object)
+        const bVar = isUnboundLogicalVar(db as object)
+        if (aVar || bVar) {
+            let x: LType = a, y: LType = b
+            if (aVar && bVar) {
+                const fresh = (n: string) => /^\?\d+$/.test(n)
+                if (!fresh(this.varNameOf(da as LogicVar)) && fresh(this.varNameOf(db as LogicVar))) {
+                    x = b; y = a
+                }
+            }
+            return unify(x, y, this.trail, true)
+        }
+        return this.unifyNodes(da as MerType, db as MerType)
+    }
+    // 两侧都已是具体节点：按 MerType 语义递归合一——ctor 要求 name/arity
+    // 相同且 module 两侧都有值时才判等（缺省侧通配）；ho 要求 pf 相同，
+    // result 只在两侧都存在时合一（与旧 unify 的宽松语义一致）
+    private unifyNodes(a: MerType, b: MerType): boolean {
+        if (a === b) return true
+        if (a.kind !== b.kind) return false
+        const aa = a as unknown as { ctor?: TypeCtor; pf?: string; args: LType[]; result?: LType }
+        const bb = b as unknown as { ctor?: TypeCtor; pf?: string; args: LType[]; result?: LType }
+        if (a.kind === 'ctor') {
+            const ca = aa.ctor!, cb = bb.ctor!
+            if (ca.name !== cb.name || ca.arity !== cb.arity) return false
+            if (ca.module && cb.module && ca.module !== cb.module) return false
+        } else if (a.kind === 'ho') {
+            if (aa.pf !== bb.pf) return false
+        } else {
+            // 防御：模板里的 {kind:'var'} 不应进入推断（instantiate 已转逻辑变量）
+            return (a as { name: string }).name === (b as { name: string }).name
+        }
+        if (aa.args.length !== bb.args.length) return false
+        for (let i = 0; i < aa.args.length; i++) {
+            if (!this.unifyTypes(aa.args[i], bb.args[i])) return false
+        }
+        if (aa.result && bb.result && !this.unifyTypes(aa.result, bb.result)) return false
+        return true
+    }
+    // LType → MerType 快照（写 inferred/hover）：自由变量按链尾显示名还原
+    //（?N 由 merTypeToString 显示为 unknown；T#n 剥后缀显示 T）
+    private solidify(t: LType): MerType {
+        return resolve<MerType>(t, (v) => ({ kind: 'var', name: this.varNameOf(v) }))
     }
     // 变量子句级 mode 标记（只记首次；head 形参优先于后续绑定处推断）
     private markVarMode(term: Term, mode: string) {
@@ -1691,12 +1846,11 @@ export class Visitor {
         return term.nameArity === '!/1' ? 2 : 1
     }
     // 按签名字段对齐实参：!X 吃掉两个字段但只推断一次（两个字段类型相同）
-    private inferSignatureArgs(args: Term[], sig: FuncInfo) {
-        const argTypes = sig.argTypes.map(a => applySubst(a, this.subst))
+    private inferSignatureArgs(args: Term[], inst: { sig: FuncInfo; args: LType[]; result?: LType }) {
         let ti = 0
         for (const arg of args) {
-            this.markVarMode(arg, sig.argModes?.[ti] ?? 'in')
-            this.inferTerm(arg, argTypes[ti])
+            this.markVarMode(arg, inst.sig.argModes?.[ti] ?? 'in')
+            this.inferTerm(arg, inst.args[ti])
             ti += this.argWidth(arg)
         }
     }
@@ -1708,9 +1862,10 @@ export class Visitor {
             const call = head.args[0]
             const sig = this.headSig(call, call.args)
             if (sig) {
-                this.inferSignatureArgs(call.args, sig)
-                this.markVarMode(head.args[1], sig.resultMode ?? 'out')
-                if (sig.resultType) this.inferTerm(head.args[1], sig.resultType)
+                const inst = this.instantiateSignature(sig)
+                this.inferSignatureArgs(call.args, inst)
+                this.markVarMode(head.args[1], inst.sig.resultMode ?? 'out')
+                if (inst.result) this.inferTerm(head.args[1], inst.result)
                 return
             }
             // `X = Expr` 形式的头（少见）：两侧按统一推断
@@ -1719,7 +1874,7 @@ export class Visitor {
         }
         const sig = this.headSig(head, head.args)
         if (!sig) return
-        this.inferSignatureArgs(head.args, sig)
+        this.inferSignatureArgs(head.args, this.instantiateSignature(sig))
     }
     // 目标遍历（goal 位置：调用 p(args) / 统一 X = rhs）
     private inferGoal(term: Term) {
@@ -1736,8 +1891,6 @@ export class Visitor {
                 const lt = this.inferTerm(term.args[0])
                 const rt = this.inferTerm(term.args[1], lt)
                 this.tryUnify(lt, rt)
-                this.refreshVarTypes(term.args[0])
-                this.refreshVarTypes(term.args[1])
                 break
             }
             case './2':
@@ -1822,15 +1975,17 @@ export class Visitor {
                 const n = widths.reduce((s, w) => s + w, 0)
                 const calleeKey = this.varKey(calleeTerm)
                 const calleeType = this.varTypes.get(calleeKey)
-                const resolved = calleeType ? applySubst(calleeType, this.subst) : undefined
-                let hoArgs: MerType[]
+                const resolved = calleeType ? this.concreteNode(calleeType) : undefined
+                let hoArgs: LType[]
                 if (resolved && resolved.kind === 'ho' && resolved.args.length === n) {
-                    hoArgs = resolved.args
+                    hoArgs = resolved.args as unknown as LType[]
                 } else {
-                    hoArgs = Array.from({ length: n }, () => ({ kind: 'var', name: this.freshVar() } as MerType))
-                    const freshHo: MerType = { kind: 'ho', pf: 'pred', args: hoArgs }
-                    if (calleeType) this.tryUnify(calleeType, freshHo, true)
-                    else { const v: MerType = { kind: 'var', name: this.freshVar() }; this.varTypes.set(calleeKey, v); this.tryUnify(v, freshHo, true) }
+                    hoArgs = Array.from({ length: n }, () => this.freshLogical() as LType)
+                    const freshHo = {
+                        kind: 'ho', pf: 'pred', args: hoArgs, result: this.freshLogical(),
+                    } as LType
+                    if (calleeType) this.unifyTypes(calleeType, freshHo)
+                    else { const v = this.freshLogical() as LType; this.varTypes.set(calleeKey, v); this.unifyTypes(v, freshHo) }
                 }
                 let ti = 0
                 for (let i = 0; i < callArgs.length; i++) {
@@ -1844,12 +1999,10 @@ export class Visitor {
             return
         }
         const sig0 = picked.sig
-        const sig = this.freshenSig(sig0)
-        this.inferSignatureArgs(term.args, sig)
-        this.inferred.set(term, {
-            type: sig.resultType ? applySubst(sig.resultType, this.subst) : { kind: 'var', name: this.freshVar() },
-            sig: sig0,
-        })
+        const inst = this.instantiateSignature(sig0)
+        this.inferSignatureArgs(term.args, inst)
+        const resultType = inst.result ?? this.freshLogical() as LType
+        this.pendingInferred.set(term, { ltype: resultType, sig: sig0 })
     }
     // 试探性合一：在 subst 副本上运行，成功才提交；失败不留半成品绑定。
     // unify 本身就地修改 subst，中途失败会留下已绑定的变量，污染后续推断
@@ -1861,68 +2014,25 @@ export class Visitor {
     // unify(io, state) 误失败、整条签名试解被拒。只展开 body 无类型变量的
     // 同义词：带参数的（assoc_list）展开要 freshen 类型变量、破坏共享，
     // 那类仍由调用方显式 resolveSynonym 处理
-    private resolveGroundSynonym(t: MerType): MerType {
+    private resolveGroundSynonym(t: LType): LType {
         let cur = t
         for (let i = 0; i < 8; i++) {
-            if (cur.kind !== 'ctor') return cur
-            const ti = this.localTypeInfo(cur.ctor)
-                ?? this.exportManager.lookupType(cur.ctor)
+            const p = this.concreteNode(cur)
+            if (!p || p.kind !== 'ctor') return cur
+            const ti = this.localTypeInfo(p.ctor)
+                ?? this.exportManager.lookupType(p.ctor)
             if (!ti?.body || ti.params.length > 0 || this.countTypeVars(ti.body) > 0) return cur
-            cur = ti.body
+            // body 无类型变量：instantiate 产出无变量的等价逻辑项
+            cur = this.instantiate(ti.body)
         }
         return cur
     }
-    private tryUnify(a: MerType, b: MerType, probe = false): boolean {
-        const trial = new Map(this.subst)
-        if (!unify(this.resolveGroundSynonym(a), this.resolveGroundSynonym(b), trial)) {
+    private tryUnify(a: LType, b: LType, probe = false): boolean {
+        if (!this.unifyTypes(this.resolveGroundSynonym(a), this.resolveGroundSynonym(b))) {
             if (!probe) this.unifyFailed++
             return false
         }
-        this.subst = trial
-        // 提交成功 = 类型变量有新绑定 → 唤醒 frozen 队列里的延迟消歧目标；
-        // 试解（trialSig）期间状态是克隆的，不算真实进展，不触发
-        if (this.inTrialDepth === 0) this.drainFrozen()
         return true
-    }
-    // watch 解析键：变量跟随别名链取终端名（?N→?S→ctor 时依次变化，
-    // 每次变化都能被检测到）；ctor 按名字+元数
-    private watchKey(t: MerType): string {
-        const r = applySubst(t, this.subst)
-        if (r.kind === 'var') return `v:${r.name}`
-        if (r.kind === 'ctor') return `c:${keyOfTypeCtor(r.ctor)}`
-        return 'ho'
-    }
-    // drain frozen 队列：只对 watch 解析键发生变化的 goal 调用 goal()；
-    // goal 返回 true 移除，false 保留。循环到无变化为止（一个 goal 的重试
-    // 可能绑定新变量、级联唤醒其它 goal）；goal 内部抛错视为放弃该项
-    private drainFrozen() {
-        if (this.drainingFrozen) return
-        this.drainingFrozen = true
-        try {
-            for (; ;) {
-                let ran = false
-                for (let i = this.frozen.length - 1; i >= 0; i--) {
-                    const f = this.frozen[i]
-                    let changed = false
-                    for (const w of f.watches) {
-                        const k = this.watchKey(w.t)
-                        if (k !== w.last) { w.last = k; changed = true }
-                    }
-                    if (!changed) continue
-                    ran = true
-                    let done: boolean
-                    try {
-                        done = f.goal()
-                    } catch {
-                        done = true
-                    }
-                    if (done) { this.frozen.splice(i, 1); this.frozenTerms.delete(f.term) }
-                }
-                if (!ran || this.frozen.length === 0) break
-            }
-        } finally {
-            this.drainingFrozen = false
-        }
     }
     // 统一目标：rhs 类型需与 lhs 一致；lhs 若已有具体类型（来自头签名）则约束 rhs。
     // 首次出现在绑定位置的变量记子句级 mode out（head 形参已在 inferHead 标记，不会被覆盖）
@@ -1932,53 +2042,37 @@ export class Visitor {
         const lt = this.inferTerm(lhs)
         const rt = this.inferTerm(rhs, lt)
         this.tryUnify(lt, rt)
-        // unify 后刷新两侧的推断条目：先推断一侧可能已写入未合一的 stale 类型
-        // （如 `Y = X` 中 Y 先被记为自由变量，合一后才有 X 的具体类型）
-        this.refreshVarTypes(lhs)
-        this.refreshVarTypes(rhs)
     }
-    // 递归刷新 term 下所有变量出现处的推断条目（按当前 varTypes + subst 重新解析）
-    private refreshVarTypes(term: Term) {
-        if (isVariable(term) || ['!/1', '!./1', '!:/1'].includes(term.nameArity)) {
-            const key = this.varKey(term)
-            const t = this.varTypes.get(key)
-            if (t) {
-                const resolved = applySubst(t, this.subst)
-                this.pushVarType(term, resolved)
-            }
-            return
-        }
-        for (const a of term.args ?? []) this.refreshVarTypes(a)
-    }
-    private pushVarType(term: Term, resolved: MerType) {
+    private pushVarType(term: Term, t: LType) {
         const key = this.varKey(term)
         // 状态变量外层节点（!X / !.X / !:X）不在 varMap 里，parser 只收了内层 X；
         // 以前只写外层节点，hover 落在内层 X 上就只看到后续推断覆盖出的 unknown。
         const varMap = term.clause?.varMap ?? this.currentClause?.varMap
         const occurrences = varMap?.get(key) ?? []
-        const info = { type: resolved, mode: this.varMode.get(key) }
-        this.inferred.set(term, info)
-        for (const occ of occurrences) this.inferred.set(occ, info)
+        const mode = this.varMode.get(key)
+        const info = { ltype: t, mode }
+        this.pendingInferred.set(term, info)
+        for (const occ of occurrences) this.pendingInferred.set(occ, info)
     }
     // 项/变量 → 类型（数据位置）；状态变量映射到底层变量名
-    private inferTerm(term: Term, expected?: MerType): MerType {
+    private inferTerm(term: Term, expected?: LType): LType {
         if (isVariable(term) || ['!/1', '!./1', '!:/1'].includes(term.nameArity)) {
             const key = this.varKey(term)
             let t = this.varTypes.get(key)
-            if (!t) { t = { kind: 'var', name: this.freshVar() }; this.varTypes.set(key, t) }
+            if (!t) { t = this.freshLogical() as LType; this.varTypes.set(key, t) }
             if (expected) this.tryUnify(t, expected)
-            const resolved = applySubst(t, this.subst)
-            this.pushVarType(term, resolved)
-            return resolved
+            this.pushVarType(term, t)
+            return t
         }
         // 高阶表达式（func(...) = ... / (pred(...) is det) / 带 :- Body 的闭包）
         const ho = this.inferHigherOrder(term, expected)
         if (ho) return ho
 
         const st = term.syntaxType
-        if (st === 'integer') { const t: MerType = { kind: 'ctor', ctor: { name: 'int', arity: 0 }, args: [] }; this.inferred.set(term, { type: t }); return t }
-        if (st === 'float') { const t: MerType = { kind: 'ctor', ctor: { name: 'float', arity: 0 }, args: [] }; this.inferred.set(term, { type: t }); return t }
-        if (st === 'string') { const t: MerType = { kind: 'ctor', ctor: { name: 'string', arity: 0 }, args: [] }; this.inferred.set(term, { type: t }); return t }
+        const lit = (name: string): LType => ({ kind: 'ctor', ctor: { name, arity: 0 }, args: [] })
+        if (st === 'integer') { const t = lit('int'); this.pendingInferred.set(term, { ltype: t }); return t }
+        if (st === 'float') { const t = lit('float'); this.pendingInferred.set(term, { ltype: t }); return t }
+        if (st === 'string') { const t = lit('string'); this.pendingInferred.set(term, { ltype: t }); return t }
         // 列表语法：[]/0 与 [|]/2 恒为 list 构造子，交由 inferList（含同义词展开与构造子标注）
         if (term.nameArity === '[|]/2' || term.nameArity === '[]/0') {
             return this.inferList(term, expected)
@@ -1989,7 +2083,7 @@ export class Visitor {
             // 否则 ./2 会被当名为 `.` 的普通 functor 查不到而落 unknown
             const target = this.unwrapQualifiedInfer(term)
             const t = this.inferTerm(target, expected)
-            this.inferred.set(term, { type: t })
+            this.pendingInferred.set(term, { ltype: t })
             return t
         }
         // 一般 functor（atom 或复合项）：构造子 或 数据位置函数调用
@@ -2007,53 +2101,54 @@ export class Visitor {
         return t
     }
     // 列表字面量：元素类型由 expected（list(E)）给定，否则新建类型变量
-    private inferList(term: Term, expected?: MerType): MerType {
-        let elemType: MerType = { kind: 'var', name: this.freshVar() }
+    private inferList(term: Term, expected?: LType): LType {
+        let elemType: LType = this.freshLogical() as LType
         // 展开类型同义词：assoc_list(K,V) == list(pair(K,V)) → 取 list 元素类型 pair(K,V)
         if (expected) {
-            const resolved = this.resolveSynonym(expected)
-            if (resolved.kind === 'ctor' && resolved.ctor.name === 'list' && !resolved.ctor.module && resolved.args.length === 1) {
-                elemType = resolved.args[0]
+            const resolved = this.concreteNode(this.resolveSynonym(expected))
+            if (resolved && resolved.kind === 'ctor' && resolved.ctor.name === 'list' && !resolved.ctor.module && resolved.args.length === 1) {
+                elemType = resolved.args[0] as unknown as LType
             }
         }
-        const listType = (): MerType => ({ kind: 'ctor', ctor: { name: 'list', arity: 1 }, args: [applySubst(elemType, this.subst)] })
+        const listType = (): LType => ({ kind: 'ctor', ctor: { name: 'list', arity: 1 }, args: [elemType] })
         const walk = (t: Term) => {
             if (t.nameArity === '[]/0') {
                 // 空表也是 list 的构造子
-                this.inferred.set(t, { type: listType(), category: 'constructor' })
+                this.pendingInferred.set(t, { ltype: listType(), category: 'constructor' })
                 return
             }
             if (t.nameArity === '[|]/2') {
                 // [|]/2 恒为 list 的 cons 构造子（Mer 无法重定义）
-                this.inferred.set(t, { type: listType(), category: 'constructor' })
+                this.pendingInferred.set(t, { ltype: listType(), category: 'constructor' })
                 this.inferTerm(t.args[0], elemType)
                 walk(t.args[1])
                 return
             }
             // 可能直接是变量尾（!.List / Tail）
-            this.inferTerm(t, { kind: 'ctor', ctor: { name: 'list', arity: 1 }, args: [elemType] })
+            this.inferTerm(t, listType())
         }
         walk(term)
         // 整表项（[|]/2 或 []/0）同样标为 list 构造子
         const category = (term.nameArity === '[|]/2' || term.nameArity === '[]/0') ? 'constructor' : undefined
         const result = listType()
-        this.inferred.set(term, { type: result, category })
+        this.pendingInferred.set(term, { ltype: result, category })
         return result
     }
-    // 展开类型同义词（equivalence type，type T == U）：把 T(A,..) 还原为 U（代入类型参数）；
-    // 本地 this.types 与跨模块 exportManager 都查。非同义词原样返回。
-    private resolveSynonym(t: MerType): MerType {
-        if (t.kind !== 'ctor') return t
-        const ti = this.localTypeInfo(t.ctor) ?? this.exportManager.lookupType(t.ctor)
+    // 展开类型同义词（equivalence type，type T == U）：把 T(A,..) 还原为 U（实参
+    // 是活逻辑项，体里的类型参数经 env 直接代入，不再拷贝）；本地 this.types 与
+    // 跨模块 exportManager 都查。非同义词原样返回。
+    private resolveSynonym(t: LType): LType {
+        const p = this.concreteNode(t)
+        if (!p || p.kind !== 'ctor') return t
+        const ti = this.localTypeInfo(p.ctor) ?? this.exportManager.lookupType(p.ctor)
         if (!ti || !ti.body) return t
-        const subst = new Map<string, MerType>()
+        const env = new Map<string, LType>()
         for (let i = 0; i < ti.params.length; i++) {
-            const p = ti.params[i]
-            if (p.kind === 'var' && t.args[i]) subst.set(p.name, t.args[i])
+            const param = ti.params[i]
+            const arg = p.args[i] as unknown as LType | undefined
+            if (param.kind === 'var' && arg !== undefined) env.set(param.name, arg)
         }
-        // 展开结果里残留的具名类型变量（非形参的游离变量）同样按本次使用实例化，
-        // 避免与其它声明的同名类型变量在 subst 里串扰
-        return this.freshenType(applySubst(ti.body, subst), new Map())
+        return this.instantiate(ti.body, env)
     }
     // 构造子名 → ConsInfo 候选（本模块）：typesVersion 变化时惰性重建，
     // 保持「边 visit 边可见」的实时语义（前向声明的类型在 addTypeInfo 后即可查）
@@ -2075,10 +2170,11 @@ export class Visitor {
     }
     // 数据位置 functor：用 expected 类型与签名消歧 构造子/函数；重载且类型无法唯一确定时保持无类别
     // allowFreeze=false 用于 frozen 重试：重试仍失败时不再重复挂起（goal 自己控制重试节奏）
-    private inferFunctor(term: Term, expected?: MerType, allowFreeze = true): MerType {
+    private inferFunctor(term: Term, expected?: LType, allowFreeze = true): LType {
         const name = term.name
         const arity = term.arity
-        const expCtor = expected && expected.kind === 'ctor' ? expected.ctor : undefined
+        const expNode = this.concreteNode(expected)
+        const expCtor = expNode && expNode.kind === 'ctor' ? expNode.ctor : undefined
         const constrs: ConsInfo[] = []
         for (const ci of this.consByName(name)) {
             if (ci.arity === arity) constrs.push(ci)
@@ -2109,19 +2205,20 @@ export class Visitor {
             return fCache
         }
 
-        // 被选中项的实例化类型：类型变量已按本次使用重命名（见 freshenType），
-        // 与 tryUnify/unify 写入 subst 的绑定一致，供参数对齐与结果类型使用
-        let instArgTypes: MerType[] | undefined
-        let instResultType: MerType | undefined
+        // 被选中项的实例化类型：每个候选/签名使用点各 instantiate 一组逻辑
+        // 变量（模板类型变量共享同一逻辑变量），与 unifyTypes 写入 trail 的
+        // 绑定一致，供参数对齐与结果类型使用
+        let instArgTypes: LType[] | undefined
+        let instResultType: LType | undefined
         const useCI = (ci: ConsInfo) => {
-            const inst = this.freshenCons(ci)
-            instArgTypes = inst.argTypes
-            instResultType = inst.resultType
+            const inst = this.instantiateCons(ci)
+            instArgTypes = inst.args
+            instResultType = inst.result
         }
         const useFunc = (f: FuncInfo) => {
-            const s = this.freshenSig(f)
-            instArgTypes = s.argTypes
-            instResultType = s.resultType
+            const s = this.instantiateSignature(f)
+            instArgTypes = s.args
+            instResultType = s.result
         }
 
         let chosenCI: ConsInfo | undefined
@@ -2136,13 +2233,14 @@ export class Visitor {
             // 类型上下文明确：取首个能合一的构造子；否则若 func 结果类型能合一则取 func
             // （跨模块 func 仅在类型上下文明确时参与，避免把无类型上下文的重载项误标）
             // 逐候选实例化+试探合一：每个候选是独立类型实例，失败候选不得留下
-            // subst 绑定（tryUnify 失败自动回滚），且只有命中的构造子提交其合一结果
+            // 绑定（tryUnify/unifyTypes 失败自动 undo trail），且只有命中的构造子
+            // 提交其合一结果
             for (const ci of constrs) {
-                const inst = this.freshenCons(ci)
-                if (this.tryUnify(inst.resultType, expected!, true)) {
+                const inst = this.instantiateCons(ci)
+                if (this.tryUnify(inst.result, expected!, true)) {
                     chosenCI = ci
-                    instArgTypes = inst.argTypes
-                    instResultType = inst.resultType
+                    instArgTypes = inst.args
+                    instResultType = inst.result
                     break
                 }
             }
@@ -2175,73 +2273,84 @@ export class Visitor {
             // 其余（多构造子无 func、func+构造子但参数元数不符）无法消歧 → 留无类别
         }
 
-        const resultType = instResultType
-            ? applySubst(instResultType, this.subst)
-            : { kind: 'var', name: this.freshVar() } as MerType
+        const resultType = instResultType ?? this.freshLogical() as LType
         const category = chosenCI ? 'constructor' as const : chosenFunc ? 'func' as const : undefined
 
         // 对齐参数类型
-        const argTypes = instArgTypes?.map(a => applySubst(a, this.subst))
-            ?? term.args.map(() => ({ kind: 'var', name: this.freshVar() } as MerType))
+        const argTypes = instArgTypes
+            ?? term.args.map(() => this.freshLogical() as LType)
         for (let i = 0; i < term.args.length; i++) {
             this.inferTerm(term.args[i], argTypes[i])
         }
-        this.inferred.set(term, { type: resultType, category, sig: chosenFunc })
+        this.pendingInferred.set(term, { ltype: resultType, category, sig: chosenFunc })
         // freeze：信息不足导致的消歧失败（如 stream/4 双构造子、重载 func 实参未知），
-        // 登记延迟目标——等结果类型被后续 goal 绑定（或实参类型有新进展）时重跑消歧。
-        // 等价于 Mercury freeze/2：变量绑定时唤醒挂起目标。
+        // 把重试 goal 挂到消歧依赖的活逻辑变量上——等结果类型被后续 goal 绑定
+        //（或实参类型有新进展）时由 wakeGoals 同步唤醒，等价于 Mercury freeze/2。
         // 注意跨模块构造子在无类型上下文时不进 constrs（见上方 expCtor 收集条件），
         // 必须用 hasCrossConstrs 补上——否则构造子全在导入模块里时根本不挂起
-        // inTrialDepth>0 时处于 trialSig 投机试解：失败会回滚 subst 但 frozen
-        // 队列不会回滚，投机推断挂起的 goal 会指向已丢弃的状态 → 禁止推送；
+        // inTrialDepth>0 时处于 trialSig 投机试解：attr 写入虽会被 trail undo，
+        // 但唤醒是同步的、goal 副作用（pendingInferred/嵌套推断）不可控 → 禁止推送；
         // frozenTerms 去重：同一项重试/嵌套试解不重复登记
         if (allowFreeze && this.inTrialDepth === 0 && !this.frozenTerms.has(term)
             && !chosenCI && !chosenFunc
             && (constrs.length > 0 || funcCands.length > 0 || this.hasCrossConstrs(name, arity))) {
             this.frozenTerms.add(term)
             let lastScore = -1
-            // watch：结果类型变量 + 直接变量实参的（别名链终端）类型变量。
-            // 复合实参的内部变量不挂——它们的进展由各自项的推断承担
-            const watches: { t: MerType; last: string }[] = []
-            const addWatch = (t: MerType | undefined) => {
-                if (t?.kind === 'var') watches.push({ t, last: this.watchKey(t) })
+            let done = false
+            // watch：结果类型变量 + 直接变量实参的类型变量（取链尾自由变量）。
+            // 复合实参的内部变量不挂——它们的进展由各自项的推断承担。
+            // goal 挂到每个 watch 变量上：任一绑定到具体值即唤醒重试；
+            // 变量间链接（var→var）不触发唤醒，等链尾落地才醒
+            const watchVars = new Set<LogicVar>()
+            const addWatch = (t: LType | undefined) => {
+                if (t === undefined) return
+                const d = derefTerm(t)
+                if (isUnboundLogicalVar(d as object)) watchVars.add(d as LogicVar)
             }
             addWatch(resultType)
             for (const a of term.args) {
                 if (isVariable(a) || ['!/1', '!./1', '!:/1'].includes(a.nameArity)) {
-                    const vt = this.varTypes.get(this.varKey(a))
-                    const rt = vt ? applySubst(vt, this.subst) : undefined
-                    // 存终端变量名：后续别名链延长时 watchKey 仍能跟随解析
-                    if (rt?.kind === 'var') addWatch({ kind: 'var', name: rt.name })
+                    addWatch(this.varTypes.get(this.varKey(a)))
                 }
             }
-            this.frozen.push({
-                term,
-                watches,
-                goal: () => {
-                    const resolved = applySubst(resultType, this.subst)
-                    const expectedT = resolved.kind === 'ctor' ? this.resolveSynonym(resolved) : undefined
+            const goal = (): boolean => {
+                // LS 容错：恒返回 true（不视合一失败回滚外层绑定）。
+                // 试解期间被唤醒直接返回——绑定即将被 undo，attr 队列由
+                // trail 恢复，等真实绑定再唤醒
+                if (done || this.inTrialDepth > 0) return true
+                try {
+                    const rn = this.concreteNode(resultType)
+                    const expectedT = rn?.kind === 'ctor' ? this.resolveSynonym(resultType) : undefined
                     const knownArgs = term.args.reduce((n, a) => {
                         const t = this.quickArgType(a)
-                        return n + (t && t.kind !== 'var' ? 1 : 0)
+                        return n + (this.isKnownType(t) ? 1 : 0)
                     }, 0)
                     // 进展分：结果类型落地权重最高；实参已知类型数次之。
                     // 分数不变说明自上次重试没有新信息，跳过昂贵的重载试解
                     const score = (expectedT ? 1 << 20 : 0) + knownArgs
-                    if (score === lastScore) return false
-                    lastScore = score
-                    if (!expectedT && knownArgs === 0) return false
-                    this.inferFunctor(term, expectedT, false)
-                    const after = this.inferred.get(term)
-                    return !!(after?.category ?? after?.sig)
-                },
-            })
+                    if (score !== lastScore) {
+                        lastScore = score
+                        if (expectedT || knownArgs > 0) {
+                            this.inferFunctor(term, expectedT, false)
+                            const after = this.pendingInferred.get(term)
+                            if (after?.category ?? after?.sig) {
+                                done = true
+                                this.frozenTerms.delete(term)
+                            }
+                        }
+                    }
+                } catch {
+                    // goal 内部异常视为放弃本轮（不影响合一主流程）
+                }
+                return true
+            }
+            for (const v of watchVars) freeze(v, goal, this.trail)
         }
         return resultType
     }
     // 高阶表达式：func(Head) = Result | (pred(Head) is Det) | 带 :- Body 的闭包。
     // 用 expected 的 ho 签名给闭包头绑定变量赋类型，并递归推断闭包头/体。
-    private inferHigherOrder(term: Term, expected?: MerType): MerType | undefined {
+    private inferHigherOrder(term: Term, expected?: LType): LType | undefined {
         let pf: 'pred' | 'func' | undefined
         let headTerm: Term | undefined
         let resultTerm: Term | undefined
@@ -2267,26 +2376,29 @@ export class Visitor {
         const argTypes = headVars.map(v => {
             const key = this.varKey(v)
             let t = this.varTypes.get(key)
-            if (!t) { t = { kind: 'var', name: this.freshVar() }; this.varTypes.set(key, t) }
+            if (!t) { t = this.freshLogical() as LType; this.varTypes.set(key, t) }
             return t
         })
-        const resultType: MerType = { kind: 'var', name: this.freshVar() }
-        if (expected && expected.kind === 'ho') {
+        const resultType = this.freshLogical() as LType
+        const expNode = this.concreteNode(expected)
+        if (expNode && expNode.kind === 'ho') {
             // 期望的高阶签名对闭包头/结果的约束要么整体成立、要么整体放弃：
             // 逐个 unify 会在中途失败时留下部分绑定（如第 2 个参数不匹配但第 1 个已绑定）
-            const ea = expected.args
-            const trial = new Map(this.subst)
+            const ea = expNode.args as unknown as LType[]
+            const er = expNode.result as LType | undefined
+            const mark = this.trail.length
             let ok = true
             for (let i = 0; i < argTypes.length && i < ea.length; i++) {
-                if (!unify(argTypes[i], ea[i], trial)) ok = false
+                if (!this.unifyTypes(argTypes[i], ea[i])) { ok = false; break }
             }
-            if (expected.result && !unify(resultType, expected.result, trial)) ok = false
-            if (ok) this.subst = trial
+            if (ok && er && !this.unifyTypes(resultType, er)) ok = false
+            if (!ok) undo(this.trail, mark)
         }
-        const hoType: MerType = { kind: 'ho', pf, args: argTypes, result: pf === 'func' ? resultType : undefined }
+        // ho 恒带 result（pred 也占位自由变量），保证与其他 ho 逻辑项形状一致
+        const hoType = { kind: 'ho', pf, args: argTypes, result: resultType } as LType
         if (resultTerm) this.inferTerm(resultTerm, resultType)
         if (bodyTerm) this.inferGoal(bodyTerm)
-        this.inferred.set(term, { type: hoType })
+        this.pendingInferred.set(term, { ltype: hoType })
         return hoType
     }
     private hoHeadVar(argTerm: Term): Term {
@@ -2305,25 +2417,21 @@ export class Visitor {
             map.set(name, [info])
         }
     }
-    // 实参的「已知类型」：变量查 varTypes（经 subst 解析），字面量给构造子类型；
-    // 其余（复合项等尚未推断的）返回 undefined——中性，不参与消歧打分
-    private quickArgType(term: Term): MerType | undefined {
+    // 实参的「已知类型」：变量查 varTypes（活逻辑项，derefTerm 取当前形态），
+    // 字面量给构造子类型；复合项读 inferred.ltype（推理返回的活逻辑项，
+    // 绑定随 trail 演进）；其余返回 undefined——中性，不参与消歧打分
+    private quickArgType(term: Term): LType | undefined {
         if (isVariable(term) || ['!/1', '!./1', '!:/1'].includes(term.nameArity)) {
             const t = this.varTypes.get(this.varKey(term))
-            return t ? applySubst(t, this.subst) : undefined
+            return t ? derefTerm(t) as LType : undefined
         }
         const st = term.syntaxType
-        const mk = (name: string): MerType => ({ kind: 'ctor', ctor: { name, arity: 0 }, args: [] })
+        const mk = (name: string): LType => ({ kind: 'ctor', ctor: { name, arity: 0 }, args: [] })
         if (st === 'integer') return mk('int')
         if (st === 'float') return mk('float')
         if (st === 'string') return mk('string')
-        // 复合项/函子：读已推断的类型（真实推断阶段写入），用于 hasKnown 与 frozen 进展检测
-        const inferred = this.inferred.get(term)
-        if (inferred?.type) {
-            const t = applySubst(inferred.type, this.subst)
-            return t.kind === 'var' ? undefined : t
-        }
-        return undefined
+        const ltype = this.pendingInferred.get(term)?.ltype ?? this.inferred.get(term)?.ltype
+        return ltype ? derefTerm(ltype) as LType : undefined
     }
     private countTypeVars(t: MerType): number {
         if (t.kind === 'var') return 1
@@ -2348,102 +2456,89 @@ export class Visitor {
         }
         // 没有任何实参带已知类型时，所有候选都会"成功"，试解无意义 → 直接歧义；
         // 仅单候选时弱返回（不试解），多候选判歧义
-        const hasKnown = args.some(a => {
-            const t = this.quickArgType(a)
-            return !!t && t.kind !== 'var'
-        })
+        const hasKnown = args.some(a => this.isKnownType(this.quickArgType(a)))
         if (!hasKnown) {
             return cands.length === 1 ? { sig: cands[0], verified: false } : undefined
         }
-        // 试算会写 inferred：先快照实参子树的条目，全部试完后回滚，
-        // 由胜出候选在正式推断时重新写入（败者的类别/类型不留残渣）
-        const argTerms = this.collectArgTerms(args)
-        const saved = new Map<Term, InferredInfo | undefined>()
-        for (const t of argTerms) saved.set(t, this.inferred.get(t))
+        // 推断结果推迟到子句末 resolve 落盘（pendingInferred 记活逻辑项），
+        // 试解写入由 trialSig 的克隆回滚丢弃——不需要逐项快照 inferred
         const successes: { sig: FuncInfo; vars: number }[] = []
         for (const c of cands) {
-            // 廉价预过滤：已知类型的变量实参与候选参数先在草稿 subst 上合一，
+            // 廉价预过滤：已知类型的变量实参与候选参数先在草稿 trail 上合一，
             // 失败的候选必然过不了完整试解（inferTerm 对变量实参做的就是同样
-            // 的 unify），省掉克隆状态+重推实参的开销（+/-/* 等十余个重载时显著）
+            // 的 unify），省掉重推实参的开销（+/-/* 等十余个重载时显著）
             if (!this.precheckSig(c, args)) continue
             if (this.trialSig(c, args)) {
                 successes.push({ sig: c, vars: c.argTypes.reduce((s, a) => s + this.countTypeVars(a), 0) })
             }
-        }
-        for (const [t, old] of saved) {
-            if (old === undefined) this.inferred.delete(t)
-            else this.inferred.set(t, old)
         }
         if (successes.length === 0) return undefined
         successes.sort((a, b) => a.vars - b.vars)
         if (successes.length > 1 && successes[1].vars === successes[0].vars) return undefined
         return { sig: successes[0].sig, verified: true }
     }
-    // 收集实参子树的全部 Term 节点（pickSig 的 inferred 快照/回滚用）
-    private collectArgTerms(args: Term[]): Term[] {
-        const out: Term[] = []
-        const walk = (t: Term) => {
-            out.push(t)
-            for (const a of t.args ?? []) walk(a)
-        }
-        for (const a of args) walk(a)
-        return out
-    }
     // pickSig 的廉价预检：只对「变量/状态变量且类型已知」的实参做 unify 试探
     // （inferTerm 对这类实参的失败条件与此相同）；字面量实参在 inferTerm 里
     // 不与形参类型合一、复合项类型未知，都跳过不判。全部在草稿 subst 上进行，
     // 不提交任何绑定；任一已知实参合一失败 → 该候选不可能成功。
     private precheckSig(sig: FuncInfo, args: Term[]): boolean {
-        const s = this.freshenSig(sig)
-        const scratch = new Map(this.subst)
-        let ti = 0
-        for (const arg of args) {
-            const param = s.argTypes[ti]
-            if (param !== undefined
-                && (isVariable(arg) || ['!/1', '!./1', '!:/1'].includes(arg.nameArity))) {
-                const known = this.quickArgType(arg)
-                // 与 tryUnify 一致做 ground 同义词展开：known 可能是 state（io 展开后），
-                // param 是声明里的 io，不展开会 unify(state, io) 误失败
-                if (known && known.kind !== 'var'
-                    && !unify(this.resolveGroundSynonym(known), this.resolveGroundSynonym(param), scratch)) return false
+        const inst = this.instantiateSignature(sig)
+        const mark = this.trail.length
+        try {
+            let ti = 0
+            for (const arg of args) {
+                const param = inst.args[ti]
+                if (param !== undefined
+                    && (isVariable(arg) || ['!/1', '!./1', '!:/1'].includes(arg.nameArity))) {
+                    const known = this.quickArgType(arg)
+                    // 与 tryUnify 一致做 ground 同义词展开：known 可能是 state（io 展开后），
+                    // param 是声明里的 io，不展开会 unify(state, io) 误失败
+                    if (this.isKnownType(known)
+                        && !this.unifyTypes(this.resolveGroundSynonym(known!), this.resolveGroundSynonym(param))) return false
+                }
+                ti += this.argWidth(arg)
             }
-            ti += this.argWidth(arg)
+            return true
+        } finally {
+            undo(this.trail, mark)
         }
-        return true
     }
-    // 候选签名试解：克隆 subst/varTypes/varMode 后完整推一遍实参，
-    // 提交性合一（unifyFailed 计数）全过才算可行；状态用后恢复，
+    // 候选签名试解：varTypes/varMode 换克隆（丢弃试解新增的键），变量绑定走
+    // 共享 trail 的 mark/undo（试解期间对既有逻辑变量的绑定整体还原）；
     // 由胜出候选在正式路径重跑一次提交结果。
     // 注意 inferTerm 只对「变量实参」做 expected 合一：字面量直接返回固定类型、
     // 复合项/functor 的结果类型不与形参强制合一——所以这里逐个实参补一次
     // 「推出类型 vs 形参类型」的合一，否则 uint8.+ 对 `int_expr + 1` 也"成功"，
     // 所有重载并列 → 判歧义 → hover 回退 funcMap 的任意签名
     private trialSig(sig: FuncInfo, args: Term[]): boolean {
-        const sSubst = this.subst, sVarTypes = this.varTypes, sVarMode = this.varMode, sFail = this.unifyFailed
-        this.subst = new Map(sSubst)
+        const sVarTypes = this.varTypes, sVarMode = this.varMode, sFail = this.unifyFailed
+        const sPending = this.pendingInferred
         this.varTypes = new Map(sVarTypes)
         this.varMode = new Map(sVarMode)
+        this.pendingInferred = new Map(sPending)
         this.unifyFailed = 0
+        const mark = this.trail.length
         this.inTrialDepth++
         try {
-            const s = this.freshenSig(sig)
-            const argTypes = s.argTypes.map(a => applySubst(a, this.subst))
+            const inst = this.instantiateSignature(sig)
             let ti = 0
             for (const arg of args) {
                 // 形参类型先展开同义词：inferTerm 内部对变量实参的合一与
                 // 下面的返回类型检查必须用同一展开结果，否则 assoc_list 这类
                 // 同义词形参会被误判不合一
-                const expected = argTypes[ti] && this.resolveSynonym(argTypes[ti])
-                this.markVarMode(arg, s.argModes?.[ti] ?? 'in')
+                const param = inst.args[ti]
+                const expected = param !== undefined ? this.resolveSynonym(param) : undefined
+                this.markVarMode(arg, inst.sig.argModes?.[ti] ?? 'in')
                 const t = this.inferTerm(arg, expected)
                 ti += this.argWidth(arg)
                 if (expected && !this.tryUnify(t, expected)) return false
             }
             return this.unifyFailed === 0
         } finally {
-            this.subst = sSubst
+            undo(this.trail, mark)
             this.varTypes = sVarTypes
             this.varMode = sVarMode
+            this.pendingInferred = sPending
             this.unifyFailed = sFail
             this.inTrialDepth--
         }
@@ -2512,49 +2607,11 @@ export class Visitor {
         if (cands.length === 0) return undefined
         const argTerms = args ?? (typeof termOrName === 'string' ? [] : termOrName.args ?? [])
         const picked = this.pickSig(cands, argTerms)
-        return picked ? this.freshenSig(picked.sig) : undefined
+        return picked?.sig ?? undefined
     }
-    // 声明/构造子类型的实例化：把签名里所有具名类型变量（T/K/V...）重命名为
-    // 子句内唯一名（`T#3`）。每次使用（每次调用、每个构造子）都是独立实例——
-    // 否则不同实例共享 subst 里的同名绑定互相污染：先 `t1:int` 绑定类型参数 T
-    // 后，`t2:string` 的 T 已被污染成 int 而被误拒；`q(X), q(Y)` 两次调用被
-    // 强制同型（Mercury 语义里每次调用独立实例化）。`#n` 后缀由
-    // merTypeToString 剥掉，hover 仍显示 T；?N 推断变量原样保留。
-    private freshenType(t: MerType, map: Map<string, MerType>): MerType {
-        if (t.kind === 'var') {
-            // ?N 推断变量与 T#n 已实例化变量原样保留（# 在源码类型变量名中不可能出现）
-            if (/^\?\d+$/.test(t.name) || t.name.includes('#')) return t
-            let v = map.get(t.name)
-            if (!v) {
-                v = { kind: 'var', name: `${t.name}#${this.varCounter++}` }
-                map.set(t.name, v)
-            }
-            return v
-        }
-        if (t.kind === 'ctor') {
-            return { kind: 'ctor', ctor: t.ctor, args: t.args.map(a => this.freshenType(a, map)) }
-        }
-        return {
-            kind: 'ho', pf: t.pf,
-            args: t.args.map(a => this.freshenType(a, map)),
-            result: t.result ? this.freshenType(t.result, map) : undefined,
-        }
-    }
-    private freshenSig(sig: FuncInfo): FuncInfo {
-        const map = new Map<string, MerType>()
-        return {
-            ...sig,
-            argTypes: sig.argTypes.map(a => this.freshenType(a, map)),
-            resultType: sig.resultType ? this.freshenType(sig.resultType, map) : undefined,
-        }
-    }
-    private freshenCons(ci: ConsInfo): { argTypes: MerType[]; resultType: MerType } {
-        const map = new Map<string, MerType>()
-        return {
-            argTypes: ci.argTypes.map(a => this.freshenType(a, map)),
-            resultType: this.freshenType(ci.resultType, map),
-        }
-    }
+    // 声明里的签名是纯 MerType 模板（只读）；每个使用点经 instantiateSignature
+    // 实例化成活逻辑项（见 LType 基础设施段）
+
     // 头位置签名候选：与 callCandidates 同一套 scope 规则（自限定硬作用域 /
     // 外部限定目标模块 / 本模块优先回退导出索引），返回 func+pred 全部候选，
     // 由 headSig 的 pickSig 按实参类型消歧——不在此层做单值取舍
