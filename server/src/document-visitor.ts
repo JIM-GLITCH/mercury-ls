@@ -132,10 +132,22 @@ export class Visitor {
     // 推断开关：批量索引阶段可关闭子句级类型推断（inferred 仅供打开中文档的
     // hover/definition/linker 消歧消费，未打开文档跳过可显著降低全库 analyzing 耗时）
     private inferEnabled = true
+    // visit() 前置声明收集已处理的 :-/1 声明项（Clause 对象引用去重）
+    private declsSeen = new Set<Clause>()
     async visit(doc: MercuryDocument, cancelToken: CancellationToken, infer = true) {
         this.errors = []
         this.inferEnabled = infer
         let rootNode = doc.parseResult.value
+        // 前置声明收集：实现段里穿插的 :- func/pred/type/import 声明对全模块
+        // 前向可见（如 diet.m 的 myadd 声明在 join 子句之后）——先把全部
+        // :-/1 声明项过一遍 visitDecl，再统一 visitClause 做索引+推断
+        for (const clause of rootNode.args) {
+            if (clause.term?.nameArity === ':-/1') {
+                this.declsSeen.add(clause)
+                this.currentClause = clause
+                this.visitDecl(clause.term.args[0])
+            }
+        }
         for (const clause of rootNode.args) {
             await interruptAndCheck(cancelToken)
             this.visitClause(clause)
@@ -163,8 +175,12 @@ export class Visitor {
         let topTerm = clause.term
         switch (topTerm.nameArity) {
             case ":-/1":
-                // declaration : ':-'(Decl)
-                this.visitDecl(topTerm.args[0])
+                // declaration : ':-'(Decl)——visit() 前置已收集过则跳过，
+                // 防止 sigAlts/modeSigs/imports 重复登记
+                if (!this.declsSeen.has(clause)) {
+                    this.declsSeen.add(clause)
+                    this.visitDecl(topTerm.args[0])
+                }
                 break
             // rule : ':-'(RuleHead,RuleBody)
             case ":-/2":
@@ -2084,6 +2100,11 @@ export class Visitor {
     ): void {
         if (seen.has(term)) return
         seen.add(term)
+        // 已消解的项不再重复登记：外层重试的嵌套推断可能带着更少的信息
+        // 重走到同一项（allowFreeze 不向嵌套 inferTerm 传递），重复挂起会
+        // 在 ambiguousTerms 留下永远等不到新信息的陈旧歧义
+        const done = this.pendingInferred.get(term)
+        if (done?.category ?? done?.sig) return
         this.ambiguousTerms.set(term, statsOf ?? (() => ({ successes: 0, unknownInfo: true })))
         let lastScore = -1
         let finished = false
@@ -2458,7 +2479,15 @@ export class Visitor {
         // 提交：实参类型与被选中项形参类型合一（cons/func 同规则；
         // 无候选时 instArgTypes 为空、跳过——等价旧 fresh 变量 expected）
         this.alignArgs(term.args, argTypes, instArgTypes)
-        this.pendingInferred.set(term, { ltype: resultType, category, sig: chosenFunc })
+        // 重试可能在信息更少时重跑本函数：无候选命中的结果不得覆盖
+        // 已有消解（category/sig），否则 freeze goal 的失败重试会把
+        // 先前提交的正确签名抹掉
+        const prev = this.pendingInferred.get(term)
+        this.pendingInferred.set(term, {
+            ltype: resultType,
+            category: category ?? prev?.category,
+            sig: chosenFunc ?? prev?.sig,
+        })
         // freeze：信息不足导致的消歧失败（如 stream/4 双构造子、重载 func 实参未知），
         // 把重试 goal 挂到消歧依赖的活逻辑变量上——等结果类型被后续 goal 绑定
         //（或实参类型有新进展）时由 wakeGoals 同步唤醒，等价于 Mercury freeze/2。
