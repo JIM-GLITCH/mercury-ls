@@ -123,9 +123,12 @@ export class Visitor {
     private frozenCallTerms = new Set<Term>()
     private frozenHeadTerms = new Set<Term>()
     // 本子句登记的全部重试 goal（solvePending 统一跑到不动点）与
-    // 仍未消歧的项（遍历+求解后仍不确定的统一报错）
-    private pendingRetries: Array<() => boolean> = []
-    private ambiguousTerms = new Set<Term>()
+    // 仍未消歧的项（遍历+求解后仍不确定的统一报错）。Map 值是分类提供者：
+    // 返回最近一次 pickSig 的统计——unknownInfo（实参全未知的多候选）
+    // 或并列成功才算真歧义；合一全灭多为类型错误或引擎缺口（typeclass
+    // 约束类型合一不了），不报错保持静默 unknown
+    private pendingRetries: Array<(force?: boolean) => boolean> = []
+    private ambiguousTerms = new Map<Term, () => { successes: number; unknownInfo: boolean }>()
     // 推断开关：批量索引阶段可关闭子句级类型推断（inferred 仅供打开中文档的
     // hover/definition/linker 消歧消费，未打开文档跳过可显著降低全库 analyzing 耗时）
     private inferEnabled = true
@@ -1681,7 +1684,7 @@ export class Visitor {
         this.frozenCallTerms = new Set()
         this.frozenHeadTerms = new Set()
         this.pendingRetries = []
-        this.ambiguousTerms = new Set()
+        this.ambiguousTerms = new Map()
         this.pendingInferred = new Map()
         try {
             if (top.nameArity === ':-/2') {
@@ -1918,16 +1921,21 @@ export class Visitor {
             // 进展分：返回类型落地权重最高；实参已知类型数次之
             return { expT, score: (expT ? 1 << 20 : 0) + knownArgs }
         }
+        let lastStats = { successes: 0, unknownInfo: true }
         this.freezeDisambig(head, this.frozenHeadTerms, rt ? [...argTypes, rt] : argTypes,
             () => progress().score,
             () => {
                 const { expT, score } = progress()
-                if (score === 0) return false
+                if (score === 0) { lastStats = { successes: 0, unknownInfo: true }; return false }
                 // 重跑头推断：实参/返回类型已有真实绑定，headSig 能选出签名
                 this.inferHead(head)
                 const argTypesNow = args.map(a => this.inferTerm(a))
-                return !!this.pickSig(cands, args, argTypesNow, expT)
-            })
+                const st = { successes: 0, unknownInfo: false }
+                const p = this.pickSig(cands, args, argTypesNow, expT, st)
+                lastStats = st
+                return !!p
+            },
+            () => lastStats)
     }
     // 目标遍历（goal 位置：调用 p(args) / 统一 X = rhs）
     private inferGoal(term: Term) {
@@ -2072,18 +2080,21 @@ export class Visitor {
         watches: (LType | undefined)[],
         scoreOf: () => number,
         solve: () => boolean,
+        statsOf?: () => { successes: number; unknownInfo: boolean },
     ): void {
         if (seen.has(term)) return
         seen.add(term)
-        this.ambiguousTerms.add(term)
+        this.ambiguousTerms.set(term, statsOf ?? (() => ({ successes: 0, unknownInfo: true })))
         let lastScore = -1
         let finished = false
-        const goal = (): boolean => {
+        const goal = (force = false): boolean => {
             // LS 容错：恒返回 true（不视合一失败回滚外层绑定）
             if (finished) return true
             try {
                 const score = scoreOf()
-                if (score !== lastScore) {
+                // force：求解收尾时无条件重试一次——项可能已被其它推断路径
+                // 消解但 score 未变导致 goal 被节流跳过，歧义登记成陈旧残留
+                if (force || score !== lastScore) {
                     lastScore = score
                     if (solve()) {
                         finished = true
@@ -2104,10 +2115,16 @@ export class Visitor {
     // goal 位置调用的延迟消歧：watch 各实参类型链尾变量，绑定进展后重试 pickSig
     private freezeCall(term: Term, argTypes: LType[], cands: FuncInfo[]) {
         const knownArgs = () => argTypes.reduce((n, t) => n + (this.isKnownType(t) ? 1 : 0), 0)
+        let lastStats = { successes: 0, unknownInfo: true }
         this.freezeDisambig(term, this.frozenCallTerms, argTypes, knownArgs,
             () => {
-                if (knownArgs() === 0) return false
-                const p = this.pickSig(cands, term.args, argTypes)
+                // 兜底 inferFunctor 可能已消解（如 func/pred 同名时按 func 提交）
+                const done = this.pendingInferred.get(term)
+                if (done?.sig ?? done?.category) { lastStats = { successes: 1, unknownInfo: false }; return true }
+                if (knownArgs() === 0) { lastStats = { successes: 0, unknownInfo: true }; return false }
+                const st = { successes: 0, unknownInfo: false }
+                const p = this.pickSig(cands, term.args, argTypes, undefined, st)
+                lastStats = st
                 if (!p) return false
                 const inst = this.instantiateSignature(p.sig)
                 this.alignArgs(term.args, argTypes, inst.args, inst.sig.argModes)
@@ -2117,7 +2134,8 @@ export class Visitor {
                     sig: p.sig,
                 })
                 return true
-            })
+            },
+            () => lastStats)
     }
     // 求解 pass：子句推断遍历完后，主动把本子句登记的全部重试 goal
     // 跑到不动点（freeze goal 平时只在变量绑定时触发，这里兜底一轮）；
@@ -2131,8 +2149,15 @@ export class Visitor {
             }
             if (this.ambiguousTerms.size === sizeBefore && this.pendingRetries.length === retriesBefore) break
         }
-        for (const t of this.ambiguousTerms) {
-            this.addError(`cannot resolve unique signature for ${t.name}/${t.semanticArity ?? t.arity}`, t)
+        // 收尾强制重试一轮：score 节流可能跳过了「已被其它路径消解」的项
+        for (const retry of [...this.pendingRetries]) {
+            try { retry(true) } catch { /* 同上 */ }
+        }
+        for (const [t, statsOf] of this.ambiguousTerms) {
+            const st = statsOf()
+            if (st.unknownInfo || st.successes >= 2) {
+                this.addError(`cannot resolve unique signature for ${t.name}/${t.semanticArity ?? t.arity}`, t)
+            }
         }
         this.ambiguousTerms.clear()
         this.pendingRetries = []
@@ -2432,15 +2457,22 @@ export class Visitor {
                 // 分数不变说明自上次重试没有新信息，跳过昂贵的重载试解
                 return { expectedT, score: (expectedT ? 1 << 20 : 0) + knownArgs }
             }
+            let lastStats = { successes: 0, unknownInfo: true }
             this.freezeDisambig(term, this.frozenTerms, [resultType, ...argTypes],
                 () => progress().score,
                 () => {
                     const { expectedT, score } = progress()
-                    if (score === 0) return false
+                    if (score === 0) { lastStats = { successes: 0, unknownInfo: true }; return false }
                     this.inferFunctor(term, expectedT, false)
                     const after = this.pendingInferred.get(term)
-                    return !!(after?.category ?? after?.sig)
-                })
+                    if (after?.category ?? after?.sig) return true
+                    // 未消解：探测 pickSig 统计失败原因（供 solvePending 分类）
+                    const st = { successes: 0, unknownInfo: false }
+                    this.pickSig(funcCands, term.args, argTypes, expectedT, st)
+                    lastStats = st
+                    return false
+                },
+                () => lastStats)
         }
         return resultType
     }
@@ -2552,12 +2584,15 @@ export class Visitor {
     // 返回 verified=true 表示该签名合一判定唯一胜出（实参类型确实支持它）；
     // verified=false 仅出现在「单候选 + 实参类型全未知」的弱返回——调用方在
     // func/构造子歧义场景应据此保持无类别，而不是直接采信
-    private pickSig(cands: FuncInfo[], args: Term[], argTypes: LType[], expected?: LType): { sig: FuncInfo; verified: boolean } | undefined {
+    private pickSig(cands: FuncInfo[], args: Term[], argTypes: LType[], expected?: LType,
+        stats?: { successes: number; unknownInfo: boolean }): { sig: FuncInfo; verified: boolean } | undefined {
+        if (stats) { stats.successes = 0; stats.unknownInfo = false }
         if (cands.length === 0) return undefined
         // 没有任何实参带已知类型时，所有候选都会"成功"，合一判定无意义 →
         // 直接歧义；仅单候选时弱返回，多候选判歧义
         const hasKnown = argTypes.some(t => this.isKnownType(t))
         if (!hasKnown) {
+            if (stats) stats.unknownInfo = cands.length > 1
             return cands.length === 1 ? { sig: cands[0], verified: false } : undefined
         }
         const successes: { sig: FuncInfo; vars: number }[] = []
@@ -2580,10 +2615,42 @@ export class Visitor {
             undo(this.trail, mark)
             if (ok) successes.push({ sig: c, vars: c.argTypes.reduce((s, a) => s + this.countTypeVars(a), 0) })
         }
+        if (stats) stats.successes = successes.length
         if (successes.length === 0) return undefined
         successes.sort((a, b) => a.vars - b.vars)
-        if (successes.length > 1 && successes[1].vars === successes[0].vars) return undefined
+        const tied = successes.filter(s => s.vars === successes[0].vars)
+        if (tied.length > 1) {
+            // 同形签名（跨模块重复声明同一多态类型）消歧结果等价 → 取首个；
+            // 形状不同才是真歧义
+            const first = tied[0].sig
+            if (!tied.every(s => this.sameSigShape(s.sig, first))) return undefined
+        }
         return { sig: successes[0].sig, verified: true }
+    }
+    // 两条签名形状是否 alpha-等价（构造子名/元数/module 一致，var 位置按结构对齐）
+    private sameSigShape(a: FuncInfo, b: FuncInfo): boolean {
+        if (a.argTypes.length !== b.argTypes.length) return false
+        for (let i = 0; i < a.argTypes.length; i++) {
+            if (!this.sameTypeShape(a.argTypes[i], b.argTypes[i])) return false
+        }
+        if ((a.resultType === undefined) !== (b.resultType === undefined)) return false
+        return a.resultType === undefined || this.sameTypeShape(a.resultType, b.resultType!)
+    }
+    private sameTypeShape(a: MerType, b: MerType): boolean {
+        if (a.kind === 'var' || b.kind === 'var') return a.kind === 'var' && b.kind === 'var'
+        if (a.kind === 'ctor' && b.kind === 'ctor') {
+            return a.ctor.name === b.ctor.name && a.ctor.arity === b.ctor.arity
+                && a.ctor.module === b.ctor.module
+                && a.args.length === b.args.length
+                && a.args.every((x, i) => this.sameTypeShape(x, b.args[i]))
+        }
+        if (a.kind === 'ho' && b.kind === 'ho') {
+            return a.pf === b.pf && a.args.length === b.args.length
+                && a.args.every((x, i) => this.sameTypeShape(x, b.args[i]))
+                && ((a.result === undefined) === (b.result === undefined))
+                && (a.result === undefined || this.sameTypeShape(a.result, b.result!))
+        }
+        return false
     }
     // 是否存在同名同元数的跨模块类型构造子（导出索引内）；
     // 用于无类型上下文时判断 func/构造子是否歧义
@@ -2660,6 +2727,12 @@ export class Visitor {
         const cands = this.signatureCandidates(termOrName)
         if (cands.length === 0) return undefined
         const argTerms = args ?? (typeof termOrName === 'string' ? [] : termOrName.args ?? [])
+        // 单候选直接返回：定义点只有一个声明可匹配，不存在消歧——实参类型
+        // 与形参合一失败属于类型错误（LS 静默容忍），不能让它把唯一签名
+        // "证伪"成歧义（如 diet.m 的 singleton(interval(T))：头实参先被
+        // 返回项 node/4 的 diet_element(T) 参数绑住，与 interval 构造子名
+        // 不匹配会误判）
+        if (cands.length === 1) return cands[0]
         // argTypes 由调用方 bottom-up 预推断传入；缺省退回全新变量（弱返回口径）
         const types = argTypes ?? argTerms.map(() => this.freshLogical() as LType)
         const picked = this.pickSig(cands, argTerms, types, expected)
