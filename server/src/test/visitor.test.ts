@@ -267,6 +267,20 @@ describe('visitor: type declarations', () => {
     assertNoWhereMislabeled(defs)
   })
 
+  it('records named ctor args `name :: type` argTypes as the declared type, not the field name', async () => {
+    const v = await visitMercury('  :- type node(T) ---> node(key :: T, left :: node(T), right :: node(T)).')
+    const types = (v as any).types as Map<string, any>
+    const ti = types.get('node')?.find((x: any) => x.ctor.arity === 1)
+    const cons = ti.constructors.find((c: any) => c.ctor === 'node')
+    expect(cons.argTypes.length).toBe(3)
+    expect(cons.argTypes[0].kind).toBe('var')
+    for (const i of [1, 2]) {
+      expect(cons.argTypes[i].kind).toBe('ctor')
+      expect(cons.argTypes[i].ctor.name).toBe('node')
+      expect(cons.argTypes[i].ctor.arity).toBe(1)
+    }
+  })
+
   it('indexes DU with where attribute block `type T ---> ... where [...].`', async () => {
     const defs = definitionsOf(
       await visitMercury(':- type t_duw ---> c1 ; c2(int) where [ ground(c1) ].'),

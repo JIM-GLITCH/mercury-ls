@@ -1034,12 +1034,16 @@ export class Visitor {
             }
             const ci: ConsInfo = {
                 ctor: term.name, arity: term.arity,
-                argTypes: term.args.map(a => this.toMerType(a)),
+                // 构造子参数是 `名称 :: 类型`（如 node 的 left :: diet(T)），
+                // ::/2 的左侧是参数名不是类型——termToMerType 的 :: 处理面向
+                // 签名里的 `类型 :: inst`，这里必须取 args[1]
+                argTypes: term.args.map(a => this.toMerType(nameArity(a, '::/2') ? a.args[1] : a)),
                 resultType, typeCtor: this.currentType.ctor,
             }
             this.currentType.constructors.push(ci)
         }
-        // 构造子参数是类型引用位置（类型变量除外）
+        // 构造子参数是类型引用位置（类型变量除外）；::/2 走 visitTypeRef
+        // 的 fieldname 分支（左侧标 fieldname、右侧递归类型）
         for (const arg of term.args ?? []) {
             if (!isVariable(arg)) this.visitTypeRef(arg)
         }
@@ -2615,7 +2619,7 @@ export class Visitor {
             // 形参先展开同义词（assoc_list → list(pair(K,V))）：实参侧的
             // 活逻辑项经 env 直接代入，不展开会 unify(list, assoc_list) 误失败；
             // 实参侧可能的无参同义词（state/io）由 tryUnify 的 ground 展开兜底
-            this.tryUnify(argTypes[i], this.resolveSynonym(param))
+            this.tryUnify(this.resolveSynonym(argTypes[i]), this.resolveSynonym(param))
         }
         if (modes) {
             for (let i = 0; i < args.length; i++) {
@@ -2699,7 +2703,7 @@ export class Visitor {
                 const param = inst.args[ti]
                 ti += this.argWidth(args[i])
                 if (param === undefined) continue
-                if (!this.tryUnify(argTypes[i], this.resolveSynonym(param))) { ok = false; break }
+                if (!this.tryUnify(this.resolveSynonym(argTypes[i]), this.resolveSynonym(param))) { ok = false; break }
             }
             // 结果类型约束：expected 为具体类型时，候选结果必须与之合一——
             // 否则全多态签名（结果含独立类型变量）会与具体签名并列胜出判歧义
