@@ -1,6 +1,6 @@
 import { Hover, HoverParams, MarkupContent } from 'vscode-languageserver'
 import { semanticArityOf } from './utils'
-import { search, termRange } from './term'
+import { moduleQualifiedName, search, termRange } from './term'
 import { URI } from 'vscode-uri'
 import { merTypeToString, uniqSig, keyOf, type FuncInfo, type MerType } from './document-type'
 
@@ -115,13 +115,27 @@ export async function HoverProvider(services: MercuryServices, params:HoverParam
                 const lines = [term.semanticType === 'func'
                     ? `type ${sigName}(${args}) = ${fi.resultType ? merTypeToString(fi.resultType) : '?'}`
                     : `type ${sigName}(${args})`]
-                const modeLines = doc.visitResult?.modeSigs.get(keyOf(term.name, term.semanticArity)) ?? []
+                const localMod = doc.visitResult?.module ? moduleQualifiedName(doc.visitResult.module) : undefined
+                const isLocalSig = !fi.module || fi.module === localMod
+                const modeLines = isLocalSig
+                    ? doc.visitResult?.modeSigs.get(keyOf(term.name, term.semanticArity)) ?? []
+                    : []
                 if (modeLines.length > 0) {
                     for (const ml of modeLines) {
                         lines.push(`mode ${ml}`)
                     }
+                } else if (fi.modes?.length) {
+                    // 外部签名（或本地无 modeSigs 展示串）：从结构化 modes 逐条渲染，
+                    // 与 modeSigs 的「每个 mode 声明一行」格式对齐（含 is det）
+                    for (const m of fi.modes) {
+                        const argModes = m.argModeRefs.map(r => r.name).join(', ')
+                        const det = m.det ? ` is ${m.det}` : ''
+                        lines.push(term.semanticType === 'func'
+                            ? `mode ${sigName}(${argModes}) = (${m.resultModeRef ? m.resultModeRef.name : 'out'})${det}`
+                            : `mode ${sigName}(${argModes})${det}`)
+                    }
                 } else if (fi.argModeRefs) {
-                    // 跨模块签名无 modeSigs 展示串：从结构化 argModeRefs 渲染一行
+                    // 兜底：从结构化 argModeRefs 渲染一行
                     //（未注解参数在 record 时已默认填充 in/out）
                     const refName = (r: { kind: string; name: string }) => r.name
                     const argModes = fi.argModeRefs.map(refName).join(', ')
