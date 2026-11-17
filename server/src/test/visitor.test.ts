@@ -1100,6 +1100,22 @@ describe('goto definition / find references for insts (providers)', () => {
     expect(p.resultType).toBeUndefined()
   })
 
+  it('infers partial application of pred/func as higher-order value', async () => {
+    const v = await visitSource(
+      ':- module m.\n' +
+      ':- interface.\n' +
+      ':- pred p(int, string).\n' +
+      ':- func h(int, int) = int.\n' +
+      ':- end_module m.\n' +
+      ':- implementation.\n' +
+      'go(X, Y) :- X = p(0), Y = h(1).\n')
+    const inferred = (v as any).inferred as Map<any, any>
+    const byName = (n: string) => [...inferred.entries()].find(([t]) => t.nameArity === n + '/1')?.[1]
+    expect(merTypeToString(byName('p').type)).toBe('pred(string)')
+    expect(byName('p').sig?.name).toBe('p')
+    expect(merTypeToString(byName('h').type)).toBe('func(int) = int')
+    expect(byName('h').sig?.name).toBe('h')
+  })
   it('infers functor category from variable types (pair -/2 as constructor)', async () => {
     const doc = await linkSource(
       ':- module m.\n' +

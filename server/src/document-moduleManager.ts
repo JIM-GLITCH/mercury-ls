@@ -206,6 +206,10 @@ export class ExportManager {
     lookupSigAlts(name: string, sem: number, alt: number): FuncInfo[] {
         return [...this.lookupFuncAlts(name, sem, alt), ...this.lookupPredAlts(name, sem, alt)]
     }
+    // 部分应用候选：同名全部元数声明（调用方按 arity>provided 过滤）
+    lookupSigAltsByName(name: string): FuncInfo[] {
+        return this.sigAltsMap.get(name) ?? []
+    }
     allTypeInfos(): Iterable<TypeInfo> {
         return [...this.typeIndex.values()].flat()
     }

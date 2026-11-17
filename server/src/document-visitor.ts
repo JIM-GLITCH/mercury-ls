@@ -2042,7 +2042,7 @@ export class Visitor {
     private inferCall(term: Term) {
         const argTypes = term.args.map(a => this.inferTerm(a))
         const callCands = this.callCandidates(term)
-        const picked = this.pickSig(callCands, term.args, argTypes, undefined, undefined, true)
+        const picked = this.pickSig(callCands, term.args, argTypes, undefined, undefined, false)
         if (!picked) {
             // 高阶变量调用：形如 (P, V0, V) 的应用节点（(f, a1, a2, ...) 中 f 是持有谓词/函数值的变量），
             // 解析树里表现为 nameArity = "(/N)" 且 args[0] 是变量。
@@ -2099,7 +2099,7 @@ export class Visitor {
         seen: Set<Term>,
         watches: (LType | undefined)[],
         scoreOf: () => number,
-        solve: () => boolean,
+        solve: (force?: boolean) => boolean,
         statsOf?: () => { successes: number; unknownInfo: boolean },
     ): void {
         if (seen.has(term)) return
@@ -2121,7 +2121,7 @@ export class Visitor {
                 // 消解但 score 未变导致 goal 被节流跳过，歧义登记成陈旧残留
                 if (force || score !== lastScore) {
                     lastScore = score
-                    if (solve()) {
+                    if (solve(force)) {
                         finished = true
                         this.ambiguousTerms.delete(term)
                         seen.delete(term)
@@ -2142,13 +2142,14 @@ export class Visitor {
         const knownArgs = () => argTypes.reduce((n, t) => n + (this.isKnownType(t) ? 1 : 0), 0)
         let lastStats = { successes: 0, unknownInfo: true }
         this.freezeDisambig(term, this.frozenCallTerms, argTypes, knownArgs,
-            () => {
+            (force = false) => {
                 // 兜底 inferFunctor 可能已消解（如 func/pred 同名时按 func 提交）
                 const done = this.pendingInferred.get(term)
                 if (done?.sig ?? done?.category) { lastStats = { successes: 1, unknownInfo: false }; return true }
-                if (knownArgs() === 0) { lastStats = { successes: 0, unknownInfo: true }; return false }
+                // force 收尾轮允许全未知实参走 preferGeneral 兜底（最通用候选）
+                if (!force && knownArgs() === 0) { lastStats = { successes: 0, unknownInfo: true }; return false }
                 const st = { successes: 0, unknownInfo: false }
-                const p = this.pickSig(cands, term.args, argTypes, undefined, st, true)
+                const p = this.pickSig(cands, term.args, argTypes, undefined, st, force)
                 lastStats = st
                 if (!p) return false
                 const inst = this.instantiateSignature(p.sig)
@@ -2477,6 +2478,14 @@ export class Visitor {
             // 其余（多构造子无 func、func+构造子但参数元数不符）无法消歧 → 留无类别
         }
 
+        // 部分应用（digraph.dfs_2(G) 这类不足全元数的 pred/func 值）：
+        // 构造子与全元数 func 候选都落空时，剩余形参+结果组成高阶类型
+        let partialSig: FuncInfo | undefined
+        if (!chosenCI && !chosenFunc && funcCands.length === 0 && constrs.length === 0) {
+            const pa = this.tryPartialApp(term, argTypes, expected)
+            if (pa) { instResultType = pa.ho; instArgTypes = pa.args; partialSig = pa.sig }
+        }
+
         const resultType = instResultType ?? this.freshLogical() as LType
         const category = chosenCI ? 'constructor' as const : chosenFunc ? 'func' as const : undefined
 
@@ -2490,7 +2499,7 @@ export class Visitor {
         this.pendingInferred.set(term, {
             ltype: resultType,
             category: category ?? prev?.category,
-            sig: chosenFunc ?? prev?.sig,
+            sig: chosenFunc ?? partialSig ?? prev?.sig,
         })
         // freeze：信息不足导致的消歧失败（如 stream/4 双构造子、重载 func 实参未知），
         // 把重试 goal 挂到消歧依赖的活逻辑变量上——等结果类型被后续 goal 绑定
@@ -2799,6 +2808,74 @@ export class Visitor {
         const vis = this.visibleModules()
         const global = this.exportManager.lookupSigAlts(name, sem, alt).filter(f => this.inModuleScope(f, vis))
         return this.mergeSigCandidates(local, global)
+    }
+    // 部分应用候选：同名声明中语义元数大于已提供参数宽度的项
+    //（digraph.dfs_2(G) 把 pred 当值传递）。作用域规则与 callCandidates 一致
+    private partialAppCandidates(term: Term, provided: number): FuncInfo[] {
+        const name = term.name
+        const byName = (map: Map<string, FuncInfo[]>) =>
+            (map.get(name) ?? []).filter(f => f.arity > provided)
+        const scope = this.qualifiedSigScope(term)
+        if (scope !== undefined) {
+            const map = scope === 'self' ? this.sigAlts : scope
+            return map ? byName(map) : []
+        }
+        const local = byName(this.sigAlts)
+        const vis = this.visibleModules()
+        const global = this.exportManager.lookupSigAltsByName(name)
+            .filter(f => f.arity > provided && this.inModuleScope(f, vis))
+        return this.mergeSigCandidates(local, global)
+    }
+    // 部分应用消歧：实参只对齐前缀形参（逐候选 trail 试探），剩余形参+结果
+    // 组成高阶值类型；expected 为 ho 时按整体合一过滤。唯一胜出或单候选
+    // 弱返回才提交，返回 { ho, sig, args } 供 alignArgs/登记使用
+    private tryPartialApp(term: Term, argTypes: LType[], expected?: LType):
+        { ho: LType; sig: FuncInfo; args: LType[] } | undefined {
+        const provided = term.args.reduce((s, a) => s + this.argWidth(a), 0)
+        const cands = this.partialAppCandidates(term, provided)
+        if (!cands.length) return undefined
+        const expNode = expected ? this.concreteNode(expected) : undefined
+        const expHo = expNode && expNode.kind === 'ho' ? expected : undefined
+        const hasKnown = argTypes.some(t => this.isKnownType(t))
+        const successes: FuncInfo[] = []
+        for (const c of cands) {
+            const inst = this.instantiateSignature(c)
+            const mark = this.trail.length
+            let ok = true, ti = 0
+            for (let i = 0; i < term.args.length; i++) {
+                const param = inst.args[ti]
+                ti += this.argWidth(term.args[i])
+                if (param === undefined) continue
+                if (!this.tryUnify(argTypes[i], this.resolveSynonym(param))) { ok = false; break }
+            }
+            if (ok && expHo) {
+                const ho: LType = {
+                    kind: 'ho', pf: c.kind, args: inst.args.slice(ti),
+                    result: c.kind === 'func' ? inst.result ?? this.freshLogical() : this.freshLogical(),
+                } as LType
+                ok = this.tryUnify(ho, expHo)
+            }
+            undo(this.trail, mark)
+            if (ok) successes.push(c)
+        }
+        let win: FuncInfo | undefined
+        if (successes.length === 1) win = successes[0]
+        else if (successes.length === 0 && cands.length === 1 && !hasKnown) win = cands[0]
+        if (!win) return undefined
+        // 提交：重新实例化，前缀实参合一 + 剩余形参组成 ho 类型
+        const inst = this.instantiateSignature(win)
+        let ti = 0
+        for (let i = 0; i < term.args.length; i++) {
+            const param = inst.args[ti]
+            ti += this.argWidth(term.args[i])
+            if (param === undefined) continue
+            this.tryUnify(argTypes[i], this.resolveSynonym(param))
+        }
+        const ho: LType = {
+            kind: 'ho', pf: win.kind, args: inst.args.slice(ti),
+            result: win.kind === 'func' ? inst.result ?? this.freshLogical() : this.freshLogical(),
+        } as LType
+        return { ho, sig: win, args: inst.args }
     }
     // 数据位置 functor 的函数候选（构造子另行收集；pred 不进入项位置）。
     // 同 callCandidates：本地 ∪ 导出索引，类型消歧决定胜者
