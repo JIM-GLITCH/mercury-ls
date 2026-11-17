@@ -480,3 +480,29 @@ describe('field access expressions Data ^ Spec', () => {
     expect(errs.filter(m => m.includes('cannot resolve unique signature'))).toEqual([])
   })
 })
+
+describe('auto field access functions from named ctor fields', () => {
+  it('W ^ inner ^ status chains through generated fieldname/1 funcs', async () => {
+    const doc = await mk(
+      `:- module rw.
+      :- interface.
+      :- type inner_t.
+      :- type wrap_t.
+      :- end_module rw.
+      :- implementation.
+      :- type inner_t ---> inner_t(status :: res_t).
+      :- type res_t ---> ok ; error(string).
+      :- type wrap_t ---> wrap_t(inner :: inner_t).
+      f(W) = W ^ inner ^ status.
+      g(W) = (if W ^ inner ^ status = ok then 1 else 0).
+      :- end_module rw.`,
+      'rw',
+    )
+    const inf = doc.visitResult!.inferred
+    const byName = (n: string) => [...inf.entries()].find(([t]) => t.name === n)?.[1] as any
+    expect(byName('inner')?.sig?.name).toBe('inner')
+    expect(byName('status')?.sig?.name).toBe('status')
+    const errs = (doc.visitResult!.errors ?? []).map(d => d.message)
+    expect(errs.filter(m => m.includes('cannot resolve unique signature'))).toEqual([])
+  })
+})

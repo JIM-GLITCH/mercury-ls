@@ -1051,6 +1051,19 @@ export class Visitor {
                 resultType, typeCtor: this.currentType.ctor,
             }
             this.currentType.constructors.push(ci)
+            // 命名字段（field :: Type）自动生成字段访问函数：
+            // fieldname/1(RecordValue) = FieldType（Mercury field access
+            // functions；0 参 spec 的 Term ^ field ≡ field(Term)）
+            term.args.forEach((a, i) => {
+                if (!nameArity(a, '::/2') || isVariable(a.args[0])) return
+                const fname = a.args[0].name
+                const [rt, ft] = this.shareTypeParams([resultType, ci.argTypes[i]])
+                this.pushAlt(this.sigAlts, fname, {
+                    kind: 'func', name: fname, arity: 1,
+                    module: this.localModuleName(),
+                    argTypes: [rt], resultType: ft,
+                })
+            })
         }
         // 构造子参数是类型引用位置（类型变量除外）；::/2 走 visitTypeRef
         // 的 fieldname 分支（左侧标 fieldname、右侧递归类型）
@@ -1494,7 +1507,7 @@ export class Visitor {
         this.visitTypeParam(selfTerm)
         this.visitTypeParams(head)
         if (ret) this.visitFuncReturn(ret)
-        this.recordFuncInfo(head, ret, determinism, [selfTerm, ...(head.args ?? [])])
+        this.recordFuncInfo(head, ret, determinism, [...(head.args ?? []), selfTerm])
     }
 
     visitPredDecl(term: Term, determinism?: string) {
@@ -1928,7 +1941,7 @@ export class Visitor {
         if (call.nameArity !== '^/2') return undefined
         const spec = call.args[1]
         if (!spec || isVariable(spec)) return undefined
-        return { spec, args: [call.args[0], ...(spec.args ?? [])] }
+        return { spec, args: [...(spec.args ?? []), call.args[0]] }
     }
     // 字段访问表达式推断：spec 项已带 semanticArity = spec 元数 + 1
     //（visitFieldSpecifier 设置），funcCandidates(spec) 直接命中字段
