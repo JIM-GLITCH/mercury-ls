@@ -435,3 +435,26 @@ describe('func/pred same-name heads', () => {
     expect(errs.filter(m => m.includes('cannot resolve unique signature'))).toEqual([])
   })
 })
+
+describe('submodule implicit parent visibility', () => {
+  it('p.sub sees parent p exports without import_module', async () => {
+    await mk(
+      `:- module p.
+      :- interface.
+      :- type pest_t ---> pest.
+      :- end_module p.`,
+      'p',
+    )
+    const doc = await mk(
+      `:- module p.sub.
+      :- interface.
+      :- end_module p.sub.
+      :- implementation.
+      f(X) = g(pest, X).
+      :- end_module p.sub.`,
+      'psub',
+    )
+    const errs = (doc.visitResult!.errors ?? []).map(d => d.message)
+    expect(errs.filter(m => m.includes('cannot resolve unique signature'))).toEqual([])
+  })
+})

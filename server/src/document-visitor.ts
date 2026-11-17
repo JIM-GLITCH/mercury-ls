@@ -2966,6 +2966,20 @@ export class Visitor {
     private visibleModules(): Set<string> {
         const s = new Set(this.imports)
         s.add('builtin')
+        // Mercury 可见性规则：子模块（含间接子模块）隐式继承祖先模块的
+        // 声明与祖先 import 的模块接口——本模块 a.b.c 的祖先 a.b、a 各自
+        // 本身及其 imports 对本模块可见（如 bit_buffer.read 直接用
+        // bit_buffer 的 error_stream/error_state 构造子，无需 import）
+        const self = this.localModuleName()
+        if (self) {
+            const parts = self.split('.')
+            for (let i = parts.length - 1; i >= 1; i--) {
+                const anc = parts.slice(0, i).join('.')
+                s.add(anc)
+                const ancImports = this.moduleManager.get(anc)?.visitResult?.imports
+                if (ancImports) for (const m of ancImports) s.add(m)
+            }
+        }
         return s
     }
     private inModuleScope(fi: FuncInfo, vis: Set<string>): boolean {
