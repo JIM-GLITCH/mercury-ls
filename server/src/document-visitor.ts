@@ -1906,39 +1906,28 @@ export class Visitor {
         const isFuncFact = head.nameArity === '=/2'
         const nameTerm = isFuncFact ? head.args[0] : head
         const args = nameTerm.args ?? []
-        if (this.frozenHeadTerms.has(head) || args.length === 0) return
+        if (this.frozenHeadTerms.has(head)) return
         const cands = this.signatureCandidates(nameTerm)
         if (cands.length < 2) return
         const argTypes = args.map(a => this.inferTerm(a))
         const rt = isFuncFact ? this.inferTerm(head.args[1]) : undefined
-        this.frozenHeadTerms.add(head)
-        this.ambiguousTerms.add(head)
-        let lastScore = -1
-        const goal = (): boolean => {
-            try {
-                const rn = rt ? this.concreteNode(rt) : undefined
-                const expT = rn?.kind === 'ctor' ? this.resolveSynonym(rt!) : undefined
-                const knownArgs = argTypes.reduce((n, t) => n + (this.isKnownType(t) ? 1 : 0), 0)
-                const score = (expT ? 1 << 20 : 0) + knownArgs
-                if (score === lastScore) return true
-                lastScore = score
-                if (!expT && knownArgs === 0) return true
+        const progress = () => {
+            const rn = rt ? this.concreteNode(rt) : undefined
+            const expT = rn?.kind === 'ctor' ? this.resolveSynonym(rt!) : undefined
+            const knownArgs = argTypes.reduce((n, t) => n + (this.isKnownType(t) ? 1 : 0), 0)
+            // 进展分：返回类型落地权重最高；实参已知类型数次之
+            return { expT, score: (expT ? 1 << 20 : 0) + knownArgs }
+        }
+        this.freezeDisambig(head, this.frozenHeadTerms, rt ? [...argTypes, rt] : argTypes,
+            () => progress().score,
+            () => {
+                const { expT, score } = progress()
+                if (score === 0) return false
                 // 重跑头推断：实参/返回类型已有真实绑定，headSig 能选出签名
                 this.inferHead(head)
                 const argTypesNow = args.map(a => this.inferTerm(a))
-                const p = this.pickSig(cands, args, argTypesNow, expT)
-                if (p) {
-                    this.ambiguousTerms.delete(head)
-                    this.frozenHeadTerms.delete(head)
-                }
-            } catch { /* LS 容错：goal 内部异常不影响合一主流程 */ }
-            return true
-        }
-        for (const t of rt ? [...argTypes, rt] : argTypes) {
-            const d = derefTerm(t)
-            if (isUnboundLogicalVar(d as object)) freeze(d as LogicVar, goal, this.trail)
-        }
-        this.pendingRetries.push(goal)
+                return !!this.pickSig(cands, args, argTypesNow, expT)
+            })
     }
     // 目标遍历（goal 位置：调用 p(args) / 统一 X = rhs）
     private inferGoal(term: Term) {
@@ -2073,21 +2062,53 @@ export class Visitor {
         const resultType = inst.result ?? this.freshLogical() as LType
         this.pendingInferred.set(term, { ltype: resultType, sig: sig0 })
     }
-    // goal 位置调用的延迟消歧：与 inferFunctor 的 freeze 同一模式——
-    // watch 各实参类型链尾变量，绑定进展后重试 pickSig，成功则提交签名
-    private freezeCall(term: Term, argTypes: LType[], cands: FuncInfo[]) {
-        if (this.frozenCallTerms.has(term)) return
-        this.frozenCallTerms.add(term)
+    // 通用延迟消歧登记：watch 各类型项的链尾自由变量，绑定进展（score 变化）
+    // 后调 solve 重试；solve 返回 true 表示已消歧提交。seen 去重、
+    // ambiguousTerms 登记/摘除、pendingRetries 求解队列统一在这里处理，
+    // 各消歧点（数据位置 functor / goal 调用 / 头签名）只提供 score/solve
+    private freezeDisambig(
+        term: Term,
+        seen: Set<Term>,
+        watches: (LType | undefined)[],
+        scoreOf: () => number,
+        solve: () => boolean,
+    ): void {
+        if (seen.has(term)) return
+        seen.add(term)
         this.ambiguousTerms.add(term)
         let lastScore = -1
+        let finished = false
         const goal = (): boolean => {
+            // LS 容错：恒返回 true（不视合一失败回滚外层绑定）
+            if (finished) return true
             try {
-                const knownArgs = argTypes.reduce((n, t) => n + (this.isKnownType(t) ? 1 : 0), 0)
-                if (knownArgs === lastScore) return true
-                lastScore = knownArgs
-                if (knownArgs === 0) return true
+                const score = scoreOf()
+                if (score !== lastScore) {
+                    lastScore = score
+                    if (solve()) {
+                        finished = true
+                        this.ambiguousTerms.delete(term)
+                        seen.delete(term)
+                    }
+                }
+            } catch { /* goal 内部异常视为放弃本轮（不影响合一主流程） */ }
+            return true
+        }
+        for (const t of watches) {
+            if (t === undefined) continue
+            const d = derefTerm(t)
+            if (isUnboundLogicalVar(d as object)) freeze(d as LogicVar, goal, this.trail)
+        }
+        this.pendingRetries.push(goal)
+    }
+    // goal 位置调用的延迟消歧：watch 各实参类型链尾变量，绑定进展后重试 pickSig
+    private freezeCall(term: Term, argTypes: LType[], cands: FuncInfo[]) {
+        const knownArgs = () => argTypes.reduce((n, t) => n + (this.isKnownType(t) ? 1 : 0), 0)
+        this.freezeDisambig(term, this.frozenCallTerms, argTypes, knownArgs,
+            () => {
+                if (knownArgs() === 0) return false
                 const p = this.pickSig(cands, term.args, argTypes)
-                if (!p) return true
+                if (!p) return false
                 const inst = this.instantiateSignature(p.sig)
                 this.alignArgs(term.args, argTypes, inst.args, inst.sig.argModes)
                 const prev = this.pendingInferred.get(term)
@@ -2095,16 +2116,8 @@ export class Visitor {
                     ltype: prev?.ltype ?? inst.result ?? this.freshLogical() as LType,
                     sig: p.sig,
                 })
-                this.ambiguousTerms.delete(term)
-                this.frozenCallTerms.delete(term)
-            } catch { /* LS 容错 */ }
-            return true
-        }
-        for (const t of argTypes) {
-            const d = derefTerm(t)
-            if (isUnboundLogicalVar(d as object)) freeze(d as LogicVar, goal, this.trail)
-        }
-        this.pendingRetries.push(goal)
+                return true
+            })
     }
     // 求解 pass：子句推断遍历完后，主动把本子句登记的全部重试 goal
     // 跑到不动点（freeze goal 平时只在变量绑定时触发，这里兜底一轮）；
@@ -2409,49 +2422,25 @@ export class Visitor {
         if (allowFreeze && !this.frozenTerms.has(term)
             && !chosenCI && !chosenFunc
             && (constrs.length > 0 || funcCands.length > 0 || this.hasCrossConstrs(name, arity))) {
-            this.frozenTerms.add(term)
-            this.ambiguousTerms.add(term)
-            let lastScore = -1
-            let done = false
             // watch：结果类型变量 + 每个实参推断类型的链尾自由变量——
             // 实参是活逻辑项，其内部变量的进展会传导到 argTypes[i] 的形态
-            const watchVars = new Set<LogicVar>()
-            const addWatch = (t: LType | undefined) => {
-                if (t === undefined) return
-                const d = derefTerm(t)
-                if (isUnboundLogicalVar(d as object)) watchVars.add(d as LogicVar)
+            const progress = () => {
+                const rn = this.concreteNode(resultType)
+                const expectedT = rn?.kind === 'ctor' ? this.resolveSynonym(resultType) : undefined
+                const knownArgs = argTypes.reduce((n, t) => n + (this.isKnownType(t) ? 1 : 0), 0)
+                // 进展分：结果类型落地权重最高；实参已知类型数次之。
+                // 分数不变说明自上次重试没有新信息，跳过昂贵的重载试解
+                return { expectedT, score: (expectedT ? 1 << 20 : 0) + knownArgs }
             }
-            addWatch(resultType)
-            for (const t of argTypes) addWatch(t)
-            const goal = (): boolean => {
-                // LS 容错：恒返回 true（不视合一失败回滚外层绑定）
-                if (done) return true
-                try {
-                    const rn = this.concreteNode(resultType)
-                    const expectedT = rn?.kind === 'ctor' ? this.resolveSynonym(resultType) : undefined
-                    const knownArgs = argTypes.reduce((n, t) => n + (this.isKnownType(t) ? 1 : 0), 0)
-                    // 进展分：结果类型落地权重最高；实参已知类型数次之。
-                    // 分数不变说明自上次重试没有新信息，跳过昂贵的重载试解
-                    const score = (expectedT ? 1 << 20 : 0) + knownArgs
-                    if (score !== lastScore) {
-                        lastScore = score
-                        if (expectedT || knownArgs > 0) {
-                            this.inferFunctor(term, expectedT, false)
-                            const after = this.pendingInferred.get(term)
-                            if (after?.category ?? after?.sig) {
-                                done = true
-                                this.frozenTerms.delete(term)
-                                this.ambiguousTerms.delete(term)
-                            }
-                        }
-                    }
-                } catch {
-                    // goal 内部异常视为放弃本轮（不影响合一主流程）
-                }
-                return true
-            }
-            for (const v of watchVars) freeze(v, goal, this.trail)
-            this.pendingRetries.push(goal)
+            this.freezeDisambig(term, this.frozenTerms, [resultType, ...argTypes],
+                () => progress().score,
+                () => {
+                    const { expectedT, score } = progress()
+                    if (score === 0) return false
+                    this.inferFunctor(term, expectedT, false)
+                    const after = this.pendingInferred.get(term)
+                    return !!(after?.category ?? after?.sig)
+                })
         }
         return resultType
     }
