@@ -415,3 +415,23 @@ describe('field access function heads (Data ^ Spec)', () => {
     expect(errs.filter(m => m.includes('cannot resolve unique signature'))).toEqual([])
   })
 })
+
+describe('func/pred same-name heads', () => {
+  it('func fact and pred clause with same name/arity do not collide', async () => {
+    const doc = await mk(
+      `:- module bp.
+      :- interface.
+      :- type bp_t.
+      :- func intersect(bp_t, bp_t) = bp_t.
+      :- pred intersect(bp_t, bp_t).
+      :- end_module bp.
+      :- implementation.
+      intersect(A, B) = C :- true.
+      intersect(A, B) :- true.
+      :- end_module bp.`,
+      'bp',
+    )
+    const errs = (doc.visitResult!.errors ?? []).map(d => d.message)
+    expect(errs.filter(m => m.includes('cannot resolve unique signature'))).toEqual([])
+  })
+})

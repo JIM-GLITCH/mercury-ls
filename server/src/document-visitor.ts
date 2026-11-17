@@ -1943,7 +1943,7 @@ export class Visitor {
             const argTypes = cargs.map(a => this.inferTerm(a))
             const rt = this.inferTerm(head.args[1])
             const expT = this.concreteNode(rt)?.kind === 'ctor' ? this.resolveSynonym(rt) : undefined
-            const sig = this.headSig(caret ? caret.spec : call, cargs, argTypes, expT)
+            const sig = this.headSig(caret ? caret.spec : call, cargs, argTypes, expT, 'func')
             if (sig) {
                 const inst = this.instantiateSignature(sig)
                 this.inferSignatureArgs(cargs, inst)
@@ -1957,7 +1957,7 @@ export class Visitor {
             return
         }
         const argTypes = head.args.map(a => this.inferTerm(a))
-        const sig = this.headSig(head, head.args, argTypes)
+        const sig = this.headSig(head, head.args, argTypes, undefined, 'pred')
         if (!sig) {
             this.maybeFreezeHeadSig(head)
             return
@@ -1974,7 +1974,7 @@ export class Visitor {
         const nameTerm = caret ? caret.spec : rawName
         const args = caret ? caret.args : (nameTerm.args ?? [])
         if (this.frozenHeadTerms.has(head)) return
-        const cands = this.signatureCandidates(nameTerm)
+        const cands = this.signatureCandidates(nameTerm, undefined, isFuncFact ? 'func' : 'pred')
         if (cands.length < 2) return
         const argTypes = args.map(a => this.inferTerm(a))
         const rt = isFuncFact ? this.inferTerm(head.args[1]) : undefined
@@ -2982,8 +2982,8 @@ export class Visitor {
     }
     // 头位置签名：收集候选后按头实参已知类型消歧（pickSig 试解，与调用点同一
     // 套机制）；唯一/弱单候选返回实例化签名，歧义 → undefined（不猜）
-    private headSig(termOrName: Term | string, args?: Term[], argTypes?: LType[], expected?: LType): FuncInfo | undefined {
-        const cands = this.signatureCandidates(termOrName)
+    private headSig(termOrName: Term | string, args?: Term[], argTypes?: LType[], expected?: LType, kind?: 'func' | 'pred'): FuncInfo | undefined {
+        const cands = this.signatureCandidates(termOrName, undefined, kind)
         if (cands.length === 0) return undefined
         const argTerms = args ?? (typeof termOrName === 'string' ? [] : termOrName.args ?? [])
         // 单候选直接返回：定义点只有一个声明可匹配，不存在消歧——实参类型
@@ -3003,15 +3003,17 @@ export class Visitor {
     // 头位置签名候选：与 callCandidates 同一套 scope 规则（自限定硬作用域 /
     // 外部限定目标模块 / 本模块优先回退导出索引），返回 func+pred 全部候选，
     // 由 headSig 的 pickSig 按实参类型消歧——不在此层做单值取舍
-    private signatureCandidates(termOrName: Term | string, arity?: number): FuncInfo[] {
+    private signatureCandidates(termOrName: Term | string, arity?: number, kind?: 'func' | 'pred'): FuncInfo[] {
         const name = typeof termOrName === 'string' ? termOrName : termOrName.name
         const a = typeof termOrName === 'string' ? arity! : termOrName.semanticArity
         // 状态变量 !X 在语义元数上按两个参数（!.X / !:X）计，但声明处常按单个逻辑参数计（如
         // `:- pred p(list(T)::out)` 配 `p(!List)`）。两种元数都查一次，兼容这种写法。
         const aAlt = typeof termOrName === 'string' ? a : termOrName.arity
+        // kind 限定时只查对应类别：函数事实头 =/2 只能定义 func，
+        // 普通子句头只能定义 pred——同名 func/pred 双声明不应互相判歧义
+        const kinds = kind ? [kind] : (['func', 'pred'] as const)
         const both = (map: Map<string, FuncInfo[]>) => [
-            ...sigCandidates(map, name, a, aAlt, 'func'),
-            ...sigCandidates(map, name, a, aAlt, 'pred'),
+            ...kinds.flatMap(k => sigCandidates(map, name, a, aAlt, k)),
         ]
         if (typeof termOrName !== 'string' && termOrName.qualified) {
             const scope = this.qualifiedSigScope(termOrName)
