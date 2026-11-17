@@ -1108,7 +1108,7 @@ export class Visitor {
                 this.pushAlt(this.sigAlts, fname, {
                     kind: 'func', name: fname, arity: 1,
                     module: this.localModuleName(),
-                    argTypes: [rt], resultType: ft,
+                    argTypes: [rt], resultType: ft, fieldFunc: true,
                 })
             })
         }
@@ -2057,7 +2057,11 @@ export class Visitor {
                 const done = this.pendingInferred.get(spec)
                 if (done?.sig) { lastStats = { successes: 1, unknownInfo: false }; return true }
                 const st2 = { successes: 0, unknownInfo: false }
-                const p = this.pickSig(cands, args, argTypes, expectedT, st2, force)
+                // expectedT 是入口快照——结果类型后续绑定要重算，否则重试永远
+                // 拿不到 expected（inferFunctor 的 freeze goal 同款修正）
+                const rn2 = this.concreteNode(resultType)
+                const expT2 = rn2?.kind === 'ctor' ? this.resolveSynonym(resultType) : expectedT
+                const p = this.pickSig(cands, args, argTypes, expT2, st2, force)
                 lastStats = st2
                 if (!p) return false
                 commit(p.sig)
@@ -2067,6 +2071,108 @@ export class Visitor {
         this.pendingInferred.set(term, { ltype: resultType })
         this.pendingInferred.set(spec, { ltype: resultType })
         return resultType
+    }
+    // 字段更新表达式 `Data ^ Spec(Args) := Value`（DCG 形式 `^ Spec(Args) := Value`
+    // 的数据项是隐式状态变量）：等价于字段更新函数 `'Spec :='(SpecArgs..., Data,
+    // Value)` 的调用。不能把内层 ^/2 当字段选择推断——spec 的 semanticArity 是
+    // 选择元数（elem(V) → elem/2），会拿 map.elem/assoc_list.elem 这类选择函数
+    // 误判歧义（robdd.m `M ^ elem(V) := Vs`）；更新函数是独立的 'elem :='/3
+    // 签名族，实参表是 [SpecArgs..., Data, Value]
+    private inferFieldUpdate(term: Term, expected?: LType): LType | undefined {
+        const lhs = term.args[0]
+        const valueTerm = term.args[1]
+        let spec: Term | undefined
+        let dataTerm: Term | undefined
+        if (lhs?.nameArity === '^/2') {
+            const caret = this.caretFuncParts(lhs)
+            if (!caret) return undefined
+            spec = caret.spec
+            dataTerm = lhs.args[0]
+        } else if (lhs?.nameArity === '^/1') {
+            // DCG 隐式状态：^/1 的唯一参数是字段说明符，数据项是子句状态变量。
+            // 伪造一个共享名的变量项占位（同一子句内多个 ^ 更新指向同一状态）
+            spec = lhs.args[0]
+            dataTerm = { syntaxType: 'variable', name: '_dcg_state', nameArity: '_dcg_state/0', args: [] } as unknown as Term
+        }
+        if (!spec || isVariable(spec) || !dataTerm || !valueTerm) return undefined
+        const specArity = spec.args?.length ?? 0
+        const updArity = specArity + 2
+        const callTerm = {
+            ...spec,
+            name: spec.name + ' :=',
+            nameArity: `${spec.name} :=/${updArity}`,
+            semanticArity: updArity,
+            arity: updArity,
+            args: [...(spec.args ?? []), dataTerm, valueTerm],
+        } as Term
+        // callTerm 是普通对象——range 是 TermImpl 原型上的 getter，spread 拷不
+        // 走；挂上原型让 freeze 歧义错误能定位到真实源码位置
+        Object.setPrototypeOf(callTerm, Object.getPrototypeOf(term))
+        // 选择函数存在性约束：字段更新函数的 data 参数类型头必须有同名字段选择
+        // 函数以该类型为 data——robdd.m 里本模块 'elem :=' 与 map.'elem :='
+        // 同名同元数，DCG 隐式状态类型未知时靠这条规则剔除 imp_res（无 elem
+        // 字段）候选，只留 map
+        const selCands = this.funcCandidates(spec)
+        const dataHeads = new Set<string>()
+        for (const sel of selCands) {
+            const d = sel.argTypes[sel.argTypes.length - 1]
+            if (d?.kind === 'ctor') dataHeads.add((d.ctor.module ? d.ctor.module + '.' : '') + d.ctor.name)
+        }
+        const candFilter = dataHeads.size === 0 ? undefined : (cs: FuncInfo[]) => {
+            const kept = cs.filter(c => {
+                const d = c.argTypes[specArity]
+                if (d?.kind !== 'ctor') return true
+                return dataHeads.has((d.ctor.module ? d.ctor.module + '.' : '') + d.ctor.name)
+            })
+            return kept.length > 0 ? kept : cs
+        }
+        const rt = this.inferFunctor(callTerm, expected, true, candFilter)
+        const ent = this.pendingInferred.get(callTerm)
+        this.pendingInferred.set(term, { ltype: rt, sig: ent?.sig, category: ent?.category })
+        this.pendingInferred.set(spec, { ltype: rt, sig: ent?.sig })
+        return rt
+    }
+    // 项位置条件表达式推断：收集所有值分支项与条件项，值分支类型合一为表达式类型。
+    // 形状：else(if(then(C,T)),E)——then/2 是 [条件, 值]；;/2 两侧允许是普通项
+    //（分支表达式）或嵌套条件；else/2 的 if 侧必须是条件结构否则放弃
+    private inferConditional(term: Term, expected?: LType): LType | undefined {
+        const values: Term[] = []
+        const conds: Term[] = []
+        const nodes: Term[] = []
+        const collect = (t: Term, allowPlain: boolean): boolean => {
+            switch (t.nameArity) {
+                case 'else/2':
+                    nodes.push(t)
+                    return collect(t.args[0], false) && (values.push(t.args[1]), true)
+                case 'if/1':
+                    nodes.push(t)
+                    return collect(t.args[0], false)
+                case 'then/2':
+                case '->/2':
+                    nodes.push(t)
+                    conds.push(t.args[0])
+                    values.push(t.args[1])
+                    return true
+                case ';/2':
+                    nodes.push(t)
+                    return collect(t.args[0], true) && collect(t.args[1], true)
+                default:
+                    if (!allowPlain) return false
+                    values.push(t)
+                    return true
+            }
+        }
+        if (!collect(term, false) || values.length === 0) return undefined
+        for (const c of conds) this.inferGoal(c)
+        const result = this.freshLogical() as LType
+        for (const v of values) {
+            const vt = this.inferTerm(v, result)
+            this.unifyTypes(result, vt)
+        }
+        if (expected) this.tryUnify(result, expected)
+        for (const n of nodes) this.pendingInferred.set(n, { ltype: result })
+        this.pendingInferred.set(term, { ltype: result })
+        return result
     }
     private inferHead(head: Term) {
         // 带体的函数子句 `f(A1..An) = R :- Body`：头是 =(f(A1..An), R)，
@@ -2474,6 +2580,21 @@ export class Visitor {
             const t = this.inferFieldAccess(term, expected)
             if (t) return t
         }
+        // 字段更新表达式 Data ^ Spec := Value / DCG ^ Spec := Value：
+        // 按字段更新函数 'Spec :=' 推断，不能落 inferFunctor 当普通 functor
+        // 项位置条件表达式 ( if C then T else E ) / ;/2 、->/2 组合：
+        // AST 为 else(if(then(C,T)),E)。分支值类型必须互相合一并作为表达式
+        // 类型——否则 else 分支的 init/map.foldl 累加器拿不到 expected 永远
+        // 歧义（robdd.m get/2）。条件含绑定的 goal（map.search 绑 Vs），
+        // 按 inferGoal 推断；值分支按 inferTerm 推断
+        if (['else/2', ';/2', '->/2', 'if/1', 'then/2'].includes(term.nameArity)) {
+            const t = this.inferConditional(term, expected)
+            if (t) return t
+        }
+        if (term.nameArity === ':=/2') {
+            const t = this.inferFieldUpdate(term, expected)
+            if (t) return t
+        }
         // 一般 functor（atom 或复合项）：构造子 或 数据位置函数调用
         return this.inferFunctor(term, expected)
     }
@@ -2558,7 +2679,7 @@ export class Visitor {
     }
     // 数据位置 functor：用 expected 类型与签名消歧 构造子/函数；重载且类型无法唯一确定时保持无类别
     // allowFreeze=false 用于 frozen 重试：重试仍失败时不再重复挂起（goal 自己控制重试节奏）
-    private inferFunctor(term: Term, expected?: LType, allowFreeze = true): LType {
+    private inferFunctor(term: Term, expected?: LType, allowFreeze = true, candFilter?: (c: FuncInfo[]) => FuncInfo[]): LType {
         const name = term.name
         const arity = term.arity
         // 幂等：已推断过的项直接复用 ltype——inferHead 的预推断+正式推断、
@@ -2622,7 +2743,7 @@ export class Visitor {
         // 函数签名候选：限定名只看目标模块；否则本模块声明优先（遮蔽导入），
         // 本模块没有时回退全局导出索引。hasOwnFunc 区分候选是否来自本模块，
         // 供无类型上下文时的保守消歧规则使用
-        const funcCands = this.funcCandidates(term)
+        const funcCands = candFilter ? candFilter(this.funcCandidates(term)) : this.funcCandidates(term)
         // 自限定名（array.m 里的 array.f）等价于无限定：候选来自本模块，
         // 不触发"限定名直取目标模块"的 qualPick 捷径，走常规消歧规则
         const selfQ = this.isSelfQualified(term.qualified)
@@ -2695,7 +2816,14 @@ export class Visitor {
             } else if (!hasOwnFunc && constrs.length === 1) {
                 chosenCI = constrs[0]
                 useCI(constrs[0])
-            } else if (hasOwnFunc && constrs.length >= 1 && f && f.sig.argTypes.length === arity) {
+            } else if (hasOwnFunc && constrs.length >= 1 && f && f.sig.argTypes.length === arity
+                && (f.verified || !f.sig.fieldFunc)) {
+                // 字段访问函数未获实参类型验证时不得压过同名构造子：
+                // `imps :: imp_map(T)` 生成的 imps/1 与 imp_res_2 的构造子
+                // imps/1 同名，实参全未知时盲选 func 会把变量绑成记录类型
+                //（robdd.m IRMap 误绑 imp_vars → map.foldl/init 连锁歧义）。
+                // 留给 freeze：父项 alignArgs 会把形参类型经 resultType
+                // 绑回来，重试时 expected 命中构造子
                 chosenFunc = f.sig
                 useFunc(f.sig)
             } else if (!hasOwnFunc && constrs.length === 0 && f

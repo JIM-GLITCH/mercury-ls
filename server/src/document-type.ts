@@ -61,6 +61,10 @@ export interface FuncInfo {
     // 实例化时给对应逻辑变量打属性，pickSig 据此过滤候选（刚性变量不吃具体
     // 构造子参数；具体实参的类型头必须是该类已知实例）
     typeVarClasses?: Record<string, string[]>
+    // 命名字段（field :: Type）自动生成的字段访问函数。func/构造子分属
+    // 不同命名空间：无类型证据时不允许它压过同名构造子（robdd.m 的
+    // imps/1 同时是 imp_vars 的字段函数与 imp_res_2 的构造子）
+    fieldFunc?: boolean
 }
 
 // mode 项 → 字符串：原子（in/out/ground...）或复合（in(i_node)）；>>/2 用中缀形式

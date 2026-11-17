@@ -575,3 +575,31 @@ describe('typeclass-constrained signature vars (<= decl)', () => {
     expect(errs.filter(m => m.includes('cannot resolve unique signature'))).toEqual([])
   })
 })
+
+describe('field-func vs constructor namespace', () => {
+  it('ctor wins over auto field func in ctor-arg position without type evidence', async () => {
+    // `imps :: int` 生成字段函数 imps/1: rec(T)->int；imp_res_2 也有构造子
+    // imps/1——`some_vars(imps(X))` 里 imps(X) 必须是构造子（robdd.m IRMap
+    // 误绑 imp_vars 的真实场景）
+    const doc = await mk(
+      ':- module m.\n' +
+      ':- interface.\n' +
+      ':- type rec(T) ---> rec(imps :: int, tag :: int).\n' +
+      ':- type inner(T) ---> imps(list(T)).\n' +
+      ':- type ent(T) ---> some_vars(T).\n' +
+      ':- type res(T) == ent(inner(T)).\n' +
+      ':- func f(res(T)) = T.\n' +
+      ':- end_module m.\n' +
+      ':- implementation.\n' +
+      'f(some_vars(imps(X))) = X.\n' +
+      ':- end_module m.\n',
+      'm',
+    )
+    const errs = (doc.visitResult!.errors ?? []).map(d => d.message)
+    expect(errs.filter(m => m.includes('cannot resolve unique signature'))).toEqual([])
+    const inf = doc.visitResult!.inferred
+    const impsTerm = [...inf.entries()].find(([t]) => t.nameArity === 'imps/1')
+    expect(impsTerm).toBeDefined()
+    expect(impsTerm![1]?.category).toBe('constructor')
+  })
+})
