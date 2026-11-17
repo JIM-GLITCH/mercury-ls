@@ -2192,7 +2192,8 @@ export class Visitor {
             // 多候选消歧失败：挂 freeze 等实参类型进展后重试 pickSig；
             // 随后仍走 inferFunctor 兜底拿结果类型变量
             if (callCands.length > 0) this.freezeCall(term, argTypes, callCands)
-            // 非 pred/func（未知标识符）：兜底当数据 functor，安全不抛
+            // 非 pred/func（未知标识符）：兜底当数据 functor，安全不抛；
+            // 已挂 freezeCall 的项在 inferFunctor 内会跳过 func 重猜（见 pickFunc）
             this.inferFunctor(term)
             return
         }
@@ -2548,7 +2549,14 @@ export class Visitor {
         let fComputed = false
         let fCache: { sig: FuncInfo; verified: boolean } | undefined
         const pickFunc = () => {
-            if (!fComputed) { fCache = this.pickSig(funcCands, term.args, argTypes, expectedT); fComputed = true }
+            if (!fComputed) {
+                // goal 调用消歧挂起中的项不按 func 重猜：func 候选可能与
+                // callCandidates 的 pred 候选 arity 巧合（map.set/3 撞上
+                // pred set/4 的语义元数 4），提交会把实参绑成错误类型；
+                // 交给 freezeCall 的 pickSig 用 func+pred 全候选重试
+                fCache = this.frozenCallTerms.has(term) ? undefined : this.pickSig(funcCands, term.args, argTypes, expectedT)
+                fComputed = true
+            }
             return fCache
         }
 
@@ -2793,6 +2801,14 @@ export class Visitor {
         stats?: { successes: number; unknownInfo: boolean }, preferGeneral = false): { sig: FuncInfo; verified: boolean } | undefined {
         if (stats) { stats.successes = 0; stats.unknownInfo = false }
         if (cands.length === 0) return undefined
+        // func 候选的形参数必须等于调用的语义参数宽度：func 没有 pred 式的
+        // ::in/::out 状态参数欠计问题，宽度不等说明 arity 巧合撞上（如
+        // map.set/3 的 func 形参 (map,K,V) 撞上 pred set/4 的语义元数 4），
+        // 留着只会让试解把首参误绑到 map(K,V) 产出循环类型。仅当过滤后仍有
+        // 候选时才生效——独候选 func 的 !X 实参宽度口径沿用旧行为
+        const width = args.reduce((s, a) => s + this.argWidth(a), 0)
+        const widthOk = cands.filter(c => c.kind !== 'func' || c.argTypes.length === width)
+        if (widthOk.length > 0 && widthOk.length < cands.length) cands = widthOk
         // 没有任何实参带已知类型时，所有候选都会"成功"，合一判定无意义 →
         // 直接歧义；仅单候选时弱返回，多候选判歧义（preferGeneral 时例外，见下）
         const hasKnown = argTypes.some(t => this.isKnownType(t))
@@ -2929,9 +2945,17 @@ export class Visitor {
         if (this.isSelfQualified(term.qualified)) return 'self'
         return this.qualifiedModuleDoc(term.qualified)?.visitResult?.sigAlts
     }
+    // 限定名 M.f 的目标模块文档缺失（未加载/未 visit）时是真·未知模块：
+    // 不能回退无限定候选——否则 set_tree234.insert 会错配到 map.insert，
+    // 实参类型被错误签名污染成循环类型，连锁产出假歧义
+    private qualifiedModuleMissing(term: Term): boolean {
+        if (!term.qualified || this.isSelfQualified(term.qualified)) return false
+        return !this.qualifiedModuleDoc(term.qualified)?.visitResult?.sigAlts
+    }
     // goal 位置调用的签名候选：限定名只看目标模块；否则本模块声明优先（遮蔽导入），
     // 本模块没有时回退全局导出索引（偏宽，由 pickSig 的实参类型消歧兜底）
     private callCandidates(term: Term): FuncInfo[] {
+        if (this.qualifiedModuleMissing(term)) return []
         const name = term.name, sem = term.semanticArity, alt = term.arity
         const both = (map: Map<string, FuncInfo[]>) => [
             ...sigCandidates(map, name, sem, alt, 'func'),
@@ -2954,6 +2978,7 @@ export class Visitor {
     // 部分应用候选：同名声明中语义元数大于已提供参数宽度的项
     //（digraph.dfs_2(G) 把 pred 当值传递）。作用域规则与 callCandidates 一致
     private partialAppCandidates(term: Term, provided: number): FuncInfo[] {
+        if (this.qualifiedModuleMissing(term)) return []
         const name = term.name
         const byName = (map: Map<string, FuncInfo[]>) =>
             (map.get(name) ?? []).filter(f => f.arity > provided)
@@ -3022,6 +3047,7 @@ export class Visitor {
     // 数据位置 functor 的函数候选（构造子另行收集；pred 不进入项位置）。
     // 同 callCandidates：本地 ∪ 导出索引，类型消歧决定胜者
     private funcCandidates(term: Term): FuncInfo[] {
+        if (this.qualifiedModuleMissing(term)) return []
         const name = term.name, sem = term.semanticArity, alt = term.arity
         const scope = this.qualifiedSigScope(term)
         if (scope !== undefined) {
