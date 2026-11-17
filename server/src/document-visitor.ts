@@ -2698,7 +2698,9 @@ export class Visitor {
         //（string.m 里 list(int) 实参的 `++` 要能选中 list.++ 而非本模块
         // 的 string.++）
         const local = both(this.sigAlts)
-        return this.mergeSigCandidates(local, this.exportManager.lookupSigAlts(name, sem, alt))
+        const vis = this.visibleModules()
+        const global = this.exportManager.lookupSigAlts(name, sem, alt).filter(f => this.inModuleScope(f, vis))
+        return this.mergeSigCandidates(local, global)
     }
     // 数据位置 functor 的函数候选（构造子另行收集；pred 不进入项位置）。
     // 同 callCandidates：本地 ∪ 导出索引，类型消歧决定胜者
@@ -2710,7 +2712,21 @@ export class Visitor {
             return map ? sigCandidates(map, name, sem, alt, 'func') : []
         }
         const own = sigCandidates(this.sigAlts, name, sem, alt, 'func')
-        return this.mergeSigCandidates(own, this.exportManager.lookupFuncAlts(name, sem, alt))
+        const vis = this.visibleModules()
+        const global = this.exportManager.lookupFuncAlts(name, sem, alt).filter(f => this.inModuleScope(f, vis))
+        return this.mergeSigCandidates(own, global)
+    }
+    // 当前文档可见的外部模块：import_module 声明 + 隐式 builtin。
+    // Mercury 无限定名解析只看本模块 ∪ import 的模块（builtin 隐式导入），
+    // 不做全局可见——否则 diet.m 未 import bag/cord，singleton/1、empty/0
+    // 这类同名符号会被无关模块的声明污染成假歧义
+    private visibleModules(): Set<string> {
+        const s = new Set(this.imports)
+        s.add('builtin')
+        return s
+    }
+    private inModuleScope(fi: FuncInfo, vis: Set<string>): boolean {
+        return fi.module === undefined || vis.has(fi.module)
     }
     // 本地候选 ∪ 全局候选：同一声明可能两边都出现（本模块导出符号也进
     // 导出索引），按 完整签名+模块 去重；不同模块的同签名声明保留
