@@ -395,3 +395,23 @@ describe('integer literal suffix typing', () => {
     expect(merTypeToString(lit?.ltype ?? lit?.type)).toContain('uint')
   })
 })
+
+describe('field access function heads (Data ^ Spec)', () => {
+  it('AL ^ elem(K) = V resolves to elem/2 declared via SelfType ^ elem(K)', async () => {
+    const doc = await mk(
+      `:- module al.
+      :- interface.
+      :- type al_t(K, V).
+      :- func al_t(K, V) ^ elem(K) = V is semidet.
+      :- func al_t(K, V) ^ det_elem(K) = V is det.
+      :- end_module al.
+      :- implementation.
+      AL ^ elem(K) = V.
+      AL ^ det_elem(K) = V.
+      :- end_module al.`,
+      'al',
+    )
+    const errs = (doc.visitResult!.errors ?? []).map(d => d.message)
+    expect(errs.filter(m => m.includes('cannot resolve unique signature'))).toEqual([])
+  })
+})

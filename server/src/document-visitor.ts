@@ -681,6 +681,16 @@ export class Visitor {
         this.currentClause.callee = head
     }
     visitFuncDef(func: Term) {
+        // 字段访问函数定义 AL ^ elem(K) = V：等价于 elem(AL, K) = V，
+        // 规格项 elem 的语义元数 = 1 + 自身元数（self 占首参）
+        if (func.nameArity === '^/2') {
+            const spec = func.args[1]
+            const head = this.visitQualifiedTerm(spec) ?? spec
+            head.semanticArity = head.arity + 1
+            label(head, 'func')
+            this.addDefinition(head)
+            return head
+        }
         // 限定定义头 `m.f(X) = ...` 是 ./2 节点：必须解包后再索引，
         // 否则 definition 以 '.' 为键、callee 也拿不到 functor 项
         const head = this.visitQualifiedTerm(func) ?? func
@@ -1453,6 +1463,12 @@ export class Visitor {
             this.visitFuncDecl(term.args[0], detOf(term.args[1]))
         } else if (nameArity(term, "=/2")) {
             let [func, ret] = term.args
+            if (func.nameArity === '^/2') {
+                // SelfType ^ FieldSpec(Args) = Ret：字段访问函数声明，
+                // 等价于普通函数 FieldFunc(SelfType, Args...) = Ret
+                this.visitFieldFuncDecl(func, ret, determinism)
+                return
+            }
             const head = this.visitQualifiedTerm(func)
             this.visitFuncDeclFunc(head)
             this.visitTypeParams(head)
@@ -1464,6 +1480,21 @@ export class Visitor {
             this.visitTypeParams(head)
             this.recordFuncInfo(head, undefined, determinism)
         }
+    }
+
+    // SelfType ^ FieldSpec(Args) = Ret：字段访问函数声明。
+    // AL ^ elem(K) 等价于 elem(AL, K)——函数名取 FieldSpec，self 类型占首参。
+    private visitFieldFuncDecl(caret: Term, ret: Term | undefined, determinism?: string) {
+        const selfTerm = caret.args[0]
+        const spec = caret.args[1]
+        const head = this.visitQualifiedTerm(spec) ?? spec
+        head.semanticArity = head.arity + 1
+        label(head, 'func')
+        this.addDeclaration(head)
+        this.visitTypeParam(selfTerm)
+        this.visitTypeParams(head)
+        if (ret) this.visitFuncReturn(ret)
+        this.recordFuncInfo(head, ret, determinism, [selfTerm, ...(head.args ?? [])])
     }
 
     visitPredDecl(term: Term, determinism?: string) {
@@ -1512,21 +1543,22 @@ export class Visitor {
         return types.map(norm)
     }
 
-    private recordFuncInfo(func: Term, ret: Term | undefined, determinism?: string) {
-        const argRefs = func.args.map(a => this.argModeRefOf(a))
+    private recordFuncInfo(func: Term, ret: Term | undefined, determinism?: string, argTerms?: Term[]) {
+        const fargs = argTerms ?? func.args
+        const argRefs = fargs.map(a => this.argModeRefOf(a))
         const retRef = ret ? this.retModeRefOf(ret) : undefined
         const info: FuncInfo = {
             kind: 'func',
             name: func.name, arity: func.semanticArity, module: this.localModuleName(),
-            argTypes: this.shareTypeParams(func.args.map(a => this.toMerType(a))),
-            argModes: argModesOf(func.args),
+            argTypes: this.shareTypeParams(fargs.map(a => this.toMerType(a))),
+            argModes: argModesOf(fargs),
             resultType: ret ? this.shareTypeParams([this.toMerType(ret)])[0] : undefined,
             resultMode: ret ? modeOfArg(ret) : undefined,
             argModeRefs: argRefs,
             resultModeRef: retRef,
-            hasExplicitModes: this.hasExplicitModes(func.args, ret),
+            hasExplicitModes: this.hasExplicitModes(fargs, ret),
             // :: 注解的声明本身定义一条过程 mode；后续 :- mode f(...) 声明追加
-            modes: this.hasExplicitModes(func.args, ret)
+            modes: this.hasExplicitModes(fargs, ret)
                 ? [{ argModeRefs: argRefs, resultModeRef: retRef, det: determinism }]
                 : [],
         }
@@ -1889,19 +1921,29 @@ export class Visitor {
         }
     }
     // 头签名 → 头参数类型/mode（状态变量 !X / !.X / !:X 视为同一变量 X）
+    // Data ^ FieldSpec(Args)（字段访问函数应用/定义）：等价于
+    // FieldFunc(Data, Args...)。返回规格项（其 name/qualified 即函数名）
+    // 与展平后的实参表；规格项是变量等无法解构时返回 undefined
+    private caretFuncParts(call: Term): { spec: Term; args: Term[] } | undefined {
+        if (call.nameArity !== '^/2') return undefined
+        const spec = call.args[1]
+        if (!spec || isVariable(spec)) return undefined
+        return { spec, args: [call.args[0], ...(spec.args ?? [])] }
+    }
     private inferHead(head: Term) {
         // 带体的函数子句 `f(A1..An) = R :- Body`：头是 =(f(A1..An), R)，
         // 参数按签名推断，结果变量 R 按返回类型推断
         if (head.nameArity === '=/2') {
             const call = head.args[0]
-            const cargs = call.args ?? []
+            const caret = this.caretFuncParts(call)
+            const cargs = caret ? caret.args : (call.args ?? [])
             // bottom-up 预推断头实参与返回项：此刻拿到的就是真实推断类型，
             // 头签名消歧（headSig→pickSig）直接用它们；选中签名后
             // inferSignatureArgs 会带 expected 重推一次补 mode/形参合一
             const argTypes = cargs.map(a => this.inferTerm(a))
             const rt = this.inferTerm(head.args[1])
             const expT = this.concreteNode(rt)?.kind === 'ctor' ? this.resolveSynonym(rt) : undefined
-            const sig = this.headSig(call, cargs, argTypes, expT)
+            const sig = this.headSig(caret ? caret.spec : call, cargs, argTypes, expT)
             if (sig) {
                 const inst = this.instantiateSignature(sig)
                 this.inferSignatureArgs(cargs, inst)
@@ -1927,8 +1969,10 @@ export class Visitor {
     // 绑定后重跑 inferHead 即可用真实实参类型选出签名（等价 freeze/2）
     private maybeFreezeHeadSig(head: Term) {
         const isFuncFact = head.nameArity === '=/2'
-        const nameTerm = isFuncFact ? head.args[0] : head
-        const args = nameTerm.args ?? []
+        const rawName = isFuncFact ? head.args[0] : head
+        const caret = this.caretFuncParts(rawName)
+        const nameTerm = caret ? caret.spec : rawName
+        const args = caret ? caret.args : (nameTerm.args ?? [])
         if (this.frozenHeadTerms.has(head)) return
         const cands = this.signatureCandidates(nameTerm)
         if (cands.length < 2) return
