@@ -123,6 +123,57 @@ export class Visitor {
         sig?: FuncInfo
         mode?: string
     }>()
+    // ===== 推断状态事务日志 =====
+    // pendingInferred/ambiguousTerms/frozen* 的变更随 trail mark 记录：
+    // undoTrail 回滚变量绑定时同步还原——freeze goal 在 pickSig 试解等
+    // 可回滚区域里提交的 sig/消歧状态不成为孤儿（uint16.m
+    // unchecked_left_shift/2：<< 的 sig 在候选试解中提交、X/Y 绑定被
+    // undo，签名留下而实参类型丢失）。日志 mark 单调不减（undoTrail
+    // 会截断到 mark），回滚从尾部弹出即可
+    private infLog: { mark: number; undo: () => void }[] = []
+    private logUndo(fn: () => void) {
+        this.infLog.push({ mark: this.trail.length, undo: fn })
+    }
+    private undoTrail(mark: number) {
+        undo(this.trail, mark)
+        for (let i = this.infLog.length - 1; i >= 0; i--) {
+            const e = this.infLog[i]
+            if (e.mark <= mark) break
+            e.undo()
+            this.infLog.length = i
+        }
+    }
+    private setPI(term: Term, info: { ltype: LType; category?: 'constructor' | 'func'; sig?: FuncInfo; mode?: string }) {
+        const m = this.pendingInferred
+        const had = m.has(term)
+        const prev = m.get(term)
+        this.logUndo(() => { if (had) { m.set(term, prev!) } else { m.delete(term) } })
+        m.set(term, info)
+    }
+    private ambSet(term: Term, stats: () => { successes: number; unknownInfo: boolean }) {
+        const m = this.ambiguousTerms
+        const had = m.has(term)
+        const prev = m.get(term)
+        this.logUndo(() => { if (had) { m.set(term, prev!) } else { m.delete(term) } })
+        m.set(term, stats)
+    }
+    private ambDelete(term: Term) {
+        const m = this.ambiguousTerms
+        if (!m.has(term)) return
+        const prev = m.get(term)!
+        this.logUndo(() => m.set(term, prev))
+        m.delete(term)
+    }
+    private setAdd(set: Set<Term>, term: Term) {
+        if (set.has(term)) return
+        this.logUndo(() => set.delete(term))
+        set.add(term)
+    }
+    private setDelete(set: Set<Term>, term: Term) {
+        if (!set.has(term)) return
+        this.logUndo(() => set.add(term))
+        set.delete(term)
+    }
     // 同一 Term 只挂一次冻结（frozen goal 重试/嵌套推断会重复走到，
     // 无去重会无限堆积）
     private frozenTerms = new Set<Term>()
@@ -1814,6 +1865,7 @@ export class Visitor {
         this.pendingRetries = []
         this.ambiguousTerms = new Map()
         this.pendingInferred = new Map()
+        this.infLog = []
         try {
             if (top.nameArity === ':-/2') {
                 this.inferHead(top.args[0])
@@ -1932,7 +1984,7 @@ export class Visitor {
     private unifyTypes(a: LType, b: LType): boolean {
         const mark = this.trail.length
         const ok = this.unifyTypesGo(a, b)
-        if (!ok) undo(this.trail, mark)
+        if (!ok) this.undoTrail(mark)
         return ok
     }
     private unifyTypesGo(a: LType, b: LType): boolean {
@@ -2036,13 +2088,13 @@ export class Visitor {
             const inst = this.instantiateSignature(sig)
             this.alignArgs(args, argTypes, inst.args, inst.sig.argModes)
             const rt = inst.result ?? resultType
-            this.pendingInferred.set(term, { ltype: rt })
-            this.pendingInferred.set(spec, { ltype: rt, sig })
+            this.setPI(term, { ltype: rt })
+            this.setPI(spec, { ltype: rt, sig })
             return rt
         }
         if (!cands.length) {
-            this.pendingInferred.set(term, { ltype: resultType })
-            this.pendingInferred.set(spec, { ltype: resultType })
+            this.setPI(term, { ltype: resultType })
+            this.setPI(spec, { ltype: resultType })
             return resultType
         }
         const st = { successes: 0, unknownInfo: false }
@@ -2068,8 +2120,8 @@ export class Visitor {
                 return true
             },
             () => lastStats)
-        this.pendingInferred.set(term, { ltype: resultType })
-        this.pendingInferred.set(spec, { ltype: resultType })
+        this.setPI(term, { ltype: resultType })
+        this.setPI(spec, { ltype: resultType })
         return resultType
     }
     // 字段更新表达式 `Data ^ Spec(Args) := Value`（DCG 形式 `^ Spec(Args) := Value`
@@ -2128,8 +2180,8 @@ export class Visitor {
         }
         const rt = this.inferFunctor(callTerm, expected, true, candFilter)
         const ent = this.pendingInferred.get(callTerm)
-        this.pendingInferred.set(term, { ltype: rt, sig: ent?.sig, category: ent?.category })
-        this.pendingInferred.set(spec, { ltype: rt, sig: ent?.sig })
+        this.setPI(term, { ltype: rt, sig: ent?.sig, category: ent?.category })
+        this.setPI(spec, { ltype: rt, sig: ent?.sig })
         return rt
     }
     // 项位置条件表达式推断：收集所有值分支项与条件项，值分支类型合一为表达式类型。
@@ -2170,8 +2222,8 @@ export class Visitor {
             this.unifyTypes(result, vt)
         }
         if (expected) this.tryUnify(result, expected)
-        for (const n of nodes) this.pendingInferred.set(n, { ltype: result })
-        this.pendingInferred.set(term, { ltype: result })
+        for (const n of nodes) this.setPI(n, { ltype: result })
+        this.setPI(term, { ltype: result })
         return result
     }
     private inferHead(head: Term) {
@@ -2378,7 +2430,7 @@ export class Visitor {
         const inst = this.instantiateSignature(sig0)
         this.alignArgs(term.args, argTypes, inst.args, inst.sig.argModes)
         const resultType = inst.result ?? this.freshLogical() as LType
-        this.pendingInferred.set(term, { ltype: resultType, sig: sig0 })
+        this.setPI(term, { ltype: resultType, sig: sig0 })
     }
     // 通用延迟消歧登记：watch 各类型项的链尾自由变量，绑定进展（score 变化）
     // 后调 solve 重试；solve 返回 true 表示已消歧提交。seen 去重、
@@ -2393,18 +2445,23 @@ export class Visitor {
         statsOf?: () => { successes: number; unknownInfo: boolean },
     ): void {
         if (seen.has(term)) return
-        seen.add(term)
+        this.setAdd(seen, term)
         // 已消解的项不再重复登记：外层重试的嵌套推断可能带着更少的信息
         // 重走到同一项（allowFreeze 不向嵌套 inferTerm 传递），重复挂起会
         // 在 ambiguousTerms 留下永远等不到新信息的陈旧歧义
         const done = this.pendingInferred.get(term)
         if (done?.category ?? done?.sig) return
-        this.ambiguousTerms.set(term, statsOf ?? (() => ({ successes: 0, unknownInfo: true })))
+        this.ambSet(term, statsOf ?? (() => ({ successes: 0, unknownInfo: true })))
         let lastScore = -1
-        let finished = false
+        let running = false
         const goal = (force = false): boolean => {
-            // LS 容错：恒返回 true（不视合一失败回滚外层绑定）
-            if (finished) return true
+            // LS 容错：恒返回 true（不视合一失败回滚外层绑定）。
+            // 「已消歧」用 ambiguousTerms 成员资格判断而非 finished 标志：
+            // goal 在可回滚区域（pickSig 试解）里提交的消歧会随 undoTrail
+            // 还原，成员资格恢复后 goal 自动重新武装——finished 会让它
+            // 永远跳过重试（uint16.m << 签名在试解中提交、绑定被回滚）
+            if (running || !this.ambiguousTerms.has(term)) return true
+            running = true
             try {
                 const score = scoreOf()
                 // force：求解收尾时无条件重试一次——项可能已被其它推断路径
@@ -2412,12 +2469,12 @@ export class Visitor {
                 if (force || score !== lastScore) {
                     lastScore = score
                     if (solve(force)) {
-                        finished = true
-                        this.ambiguousTerms.delete(term)
-                        seen.delete(term)
+                        this.ambDelete(term)
+                        this.setDelete(seen, term)
                     }
                 }
             } catch { /* goal 内部异常视为放弃本轮（不影响合一主流程） */ }
+            finally { running = false }
             return true
         }
         for (const t of watches) {
@@ -2446,7 +2503,7 @@ export class Visitor {
                 const inst = this.instantiateSignature(p.sig)
                 this.alignArgs(term.args, argTypes, inst.args, inst.sig.argModes)
                 const prev = this.pendingInferred.get(term)
-                this.pendingInferred.set(term, {
+                this.setPI(term, {
                     ltype: prev?.ltype ?? inst.result ?? this.freshLogical() as LType,
                     sig: p.sig,
                 })
@@ -2519,8 +2576,8 @@ export class Visitor {
         const occurrences = varMap?.get(key) ?? []
         const mode = this.varMode.get(key)
         const info = { ltype: t, mode }
-        this.pendingInferred.set(term, info)
-        for (const occ of occurrences) this.pendingInferred.set(occ, info)
+        this.setPI(term, info)
+        for (const occ of occurrences) this.setPI(occ, info)
     }
     // 项/变量 → 类型（数据位置）；状态变量映射到底层变量名
     private inferTerm(term: Term, expected?: LType): LType {
@@ -2546,11 +2603,11 @@ export class Visitor {
                 i: 'int', i8: 'int8', i16: 'int16', i32: 'int32', i64: 'int64',
             }
             const t = lit(intTypes[suffix ?? ''] ?? 'int')
-            this.pendingInferred.set(term, { ltype: t })
+            this.setPI(term, { ltype: t })
             return t
         }
-        if (st === 'float') { const t = lit('float'); this.pendingInferred.set(term, { ltype: t }); return t }
-        if (st === 'string') { const t = lit('string'); this.pendingInferred.set(term, { ltype: t }); return t }
+        if (st === 'float') { const t = lit('float'); this.setPI(term, { ltype: t }); return t }
+        if (st === 'string') { const t = lit('string'); this.setPI(term, { ltype: t }); return t }
         // 列表语法：[]/0 与 [|]/2 恒为 list 构造子，交由 inferList（含同义词展开与构造子标注）
         if (term.nameArity === '[|]/2' || term.nameArity === '[]/0') {
             return this.inferList(term, expected)
@@ -2561,7 +2618,7 @@ export class Visitor {
             // 否则 ./2 会被当名为 `.` 的普通 functor 查不到而落 unknown
             const target = this.unwrapQualifiedInfer(term)
             const t = this.inferTerm(target, expected)
-            this.pendingInferred.set(term, { ltype: t })
+            this.setPI(term, { ltype: t })
             return t
         }
         // 显式类型限定 Term : Type / with_type(Term, Type)：类型部分是类型
@@ -2571,7 +2628,7 @@ export class Visitor {
             const lt = this.inferTerm(term.args[0], expected)
             const tt = this.instantiate(this.toMerType(term.args[1]))
             this.tryUnify(lt, tt)
-            this.pendingInferred.set(term, { ltype: lt })
+            this.setPI(term, { ltype: lt })
             return lt
         }
         // 字段访问表达式 Data ^ Spec(Args)：等价于字段访问函数
@@ -2623,12 +2680,12 @@ export class Visitor {
         const walk = (t: Term) => {
             if (t.nameArity === '[]/0') {
                 // 空表也是 list 的构造子
-                this.pendingInferred.set(t, { ltype: listType(), category: 'constructor' })
+                this.setPI(t, { ltype: listType(), category: 'constructor' })
                 return
             }
             if (t.nameArity === '[|]/2') {
                 // [|]/2 恒为 list 的 cons 构造子（Mer 无法重定义）
-                this.pendingInferred.set(t, { ltype: listType(), category: 'constructor' })
+                this.setPI(t, { ltype: listType(), category: 'constructor' })
                 this.inferTerm(t.args[0], elemType)
                 walk(t.args[1])
                 return
@@ -2640,7 +2697,7 @@ export class Visitor {
         // 整表项（[|]/2 或 []/0）同样标为 list 构造子
         const category = (term.nameArity === '[|]/2' || term.nameArity === '[]/0') ? 'constructor' : undefined
         const result = listType()
-        this.pendingInferred.set(term, { ltype: result, category })
+        this.setPI(term, { ltype: result, category })
         return result
     }
     // 展开类型同义词（equivalence type，type T == U）：把 T(A,..) 还原为 U（实参
@@ -2867,7 +2924,7 @@ export class Visitor {
         // 已有消解（category/sig），否则 freeze goal 的失败重试会把
         // 先前提交的正确签名抹掉
         const prev = this.pendingInferred.get(term)
-        this.pendingInferred.set(term, {
+        this.setPI(term, {
             ltype: resultType,
             category: category ?? prev?.category,
             sig: chosenFunc ?? partialSig ?? prev?.sig,
@@ -2955,13 +3012,13 @@ export class Visitor {
                 if (!this.unifyTypes(argTypes[i], ea[i])) { ok = false; break }
             }
             if (ok && er && !this.unifyTypes(resultType, er)) ok = false
-            if (!ok) undo(this.trail, mark)
+            if (!ok) this.undoTrail(mark)
         }
         // ho 恒带 result（pred 也占位自由变量），保证与其他 ho 逻辑项形状一致
         const hoType = { kind: 'ho', pf, args: argTypes, result: resultType } as LType
         if (resultTerm) this.inferTerm(resultTerm, resultType)
         if (bodyTerm) this.inferGoal(bodyTerm)
-        this.pendingInferred.set(term, { ltype: hoType })
+        this.setPI(term, { ltype: hoType })
         return hoType
     }
     private hoHeadVar(argTerm: Term): Term {
@@ -3124,7 +3181,7 @@ export class Visitor {
                     if (inst.result === undefined) continue
                     const mark = this.trail.length
                     const ok = this.tryUnify(inst.result, expected)
-                    undo(this.trail, mark)
+                    this.undoTrail(mark)
                     if (ok) byResult.push(c)
                 }
                 if (byResult.length === 1) return { sig: byResult[0], verified: false }
@@ -3178,7 +3235,7 @@ export class Visitor {
             if (ok && expected !== undefined && inst.result !== undefined
                 && !this.tryUnify(inst.result, expected)) ok = false
             // 试探绑定一律 undo：胜者由 alignArgs 在正式路径重新合一提交
-            undo(this.trail, mark)
+            this.undoTrail(mark)
             if (ok) successes.push({ sig: c, vars: c.argTypes.reduce((s, a) => s + this.countTypeVars(a), 0) })
         }
         if (stats) stats.successes = successes.length
@@ -3323,7 +3380,7 @@ export class Visitor {
                 } as LType
                 ok = this.tryUnify(ho, expHo)
             }
-            undo(this.trail, mark)
+            this.undoTrail(mark)
             if (ok) successes.push(c)
         }
         let win: FuncInfo | undefined
