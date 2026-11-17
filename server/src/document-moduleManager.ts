@@ -2,7 +2,7 @@ import { MercuryDocument } from './document-manager'
 // import { moduleMap } from './globalSpace'
 import { MultiMap } from './multimap'
 import { Term, moduleQualifiedName } from './term'
-import { FuncInfo, TypeCtor, TypeInfo, keyOf, keyOfTypeCtor, sigCandidates } from './document-type'
+import { ConsInfo, FuncInfo, TypeCtor, TypeInfo, keyOf, keyOfTypeCtor, sigCandidates } from './document-type'
 
 // 限定名工具统一收敛在 term.ts（对 './2' 原始链与 .qualified 规范化形态都正确）；
 // 此处 re-export 保持既有 import 路径不变
@@ -62,10 +62,12 @@ export class ExportManager {
     // 同名的全部签名声明（func/pred 同命名空间；key 为裸 name，元数在
     // FuncInfo.arity 上过滤，查询走 sigCandidates 的 sem→alt 遮蔽语义）
     private sigAltsMap = new Map<string, FuncInfo[]>()
-    private byDocTypes = new Map<MercuryDocument, { typeKeys: string[]; typeInfos: TypeInfo[]; consKeys: string[] }>()
+    private byDocTypes = new Map<MercuryDocument, { typeKeys: string[]; typeInfos: TypeInfo[]; consKeys: string[]; consInfos: ConsInfo[] }>()
     private byDocAlts = new Map<MercuryDocument, { key: string; fi: FuncInfo }[]>()
     // 构造子名/元数 → 出现次数：hasCtor 查询 O(1)，避免每个歧义 functor 全扫 typeIndex
     private ctorIndex = new Map<string, number>()
+    // 构造子裸名 → ConsInfo（导出索引；消费方按所在类型模块做 import 可见性过滤）
+    private consIndex = new Map<string, ConsInfo[]>()
     set(doc: MercuryDocument) {
         this.delete(doc)
         const vr = doc.visitResult
@@ -78,6 +80,7 @@ export class ExportManager {
         const typeKeys: string[] = []
         const typeInfos: TypeInfo[] = []
         const consKeys: string[] = []
+        const consInfos: ConsInfo[] = []
         for (const arr of vr.types.values()) for (const ti of arr) {
             const k = keyOfTypeCtor(ti.ctor)
             this.typeDocMap.set(k, doc)
@@ -90,6 +93,10 @@ export class ExportManager {
                 const ck = keyOf(ci.ctor, ci.arity)
                 this.ctorIndex.set(ck, (this.ctorIndex.get(ck) ?? 0) + 1)
                 consKeys.push(ck)
+                consInfos.push(ci)
+                const ca = this.consIndex.get(ci.ctor)
+                if (ca) ca.push(ci)
+                else this.consIndex.set(ci.ctor, [ci])
             }
         }
         const altEntries: { key: string; fi: FuncInfo }[] = []
@@ -99,7 +106,7 @@ export class ExportManager {
                 altEntries.push({ key: fi.name, fi })
             }
         }
-        this.byDocTypes.set(doc, { typeKeys, typeInfos, consKeys })
+        this.byDocTypes.set(doc, { typeKeys, typeInfos, consKeys, consInfos })
         this.byDocAlts.set(doc, altEntries)
     }
     delete(doc: MercuryDocument) {
@@ -125,6 +132,14 @@ export class ExportManager {
                 const n = (this.ctorIndex.get(k) ?? 1) - 1
                 if (n <= 0) this.ctorIndex.delete(k)
                 else this.ctorIndex.set(k, n)
+            }
+            for (const ci of oldT.consInfos) {
+                const arr = this.consIndex.get(ci.ctor)
+                if (arr) {
+                    const i = arr.indexOf(ci)
+                    if (i >= 0) arr.splice(i, 1)
+                    if (arr.length === 0) this.consIndex.delete(ci.ctor)
+                }
             }
             this.byDocTypes.delete(doc)
         }
@@ -193,6 +208,10 @@ export class ExportManager {
     }
     allTypeInfos(): Iterable<TypeInfo> {
         return [...this.typeIndex.values()].flat()
+    }
+    // 构造子裸名 → 全部 ConsInfo（含未限定来源模块；调用方按 import 可见性过滤）
+    lookupCons(name: string): ConsInfo[] {
+        return this.consIndex.get(name) ?? []
     }
     // 导出索引里是否存在同名同元数的类型构造子（跨模块歧义检测用，O(1)）
     hasCtor(name: string, arity: number): boolean {

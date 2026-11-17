@@ -2334,16 +2334,37 @@ export class Visitor {
         //（如 pprint 的 T1++T2 = doc）实参合一虽过，结果类型不匹配即淘汰
         const expectedT = expCtor ? this.resolveSynonym(expected!) : undefined
         const constrs: ConsInfo[] = []
-        for (const ci of this.consByName(name)) {
-            if (ci.arity === arity) constrs.push(ci)
+        const seenCons = new Set<string>()
+        const pushCons = (ci: ConsInfo) => {
+            // 同一构造子声明可能经本模块 types 与导出索引各出现一次：
+            // 按 构造子名+所属类型键 去重
+            const k = ci.ctor + '|' + keyOfTypeCtor(ci.typeCtor)
+            if (seenCons.has(k)) return
+            seenCons.add(k)
+            constrs.push(ci)
         }
-        // 跨模块：类型上下文明确时，纳入导入模块里同名同元数的类型构造子。
-        // 导出索引按类型构造子键定位，直接查目标类型即可（原全表扫是 O(类型数)）
+        for (const ci of this.consByName(name)) {
+            if (ci.arity === arity) pushCons(ci)
+        }
+        // 跨模块构造子：import 可见模块的同名同元数构造子始终是候选
+        //（与 func 候选同一套 import 作用域规则）——否则 yes/no、empty 这类
+        // 只在导入模块里声明的构造子在 expected 未知时根本不参与消歧，
+        // 只能靠 hasCrossConstrs 保守挂起成假歧义
+        const vis = this.visibleModules()
+        for (const ci of this.exportManager.lookupCons(name)) {
+            if (ci.arity !== arity) continue
+            const m = ci.typeCtor.module
+            if (m !== undefined && !vis.has(m)) continue
+            pushCons(ci)
+        }
+        // 跨模块：类型上下文明确时，补充 expected 类型所属模块的同名构造子
+        //（该模块未必被 import——经类型同义词/限定类型可达；与上面 import
+        // 可见集取并集，pushCons 去重）
         if (expCtor) {
             const ti = this.exportManager.lookupType(expCtor)
             if (ti) {
                 for (const ci of ti.constructors) {
-                    if (ci.ctor === name && ci.arity === arity) constrs.push(ci)
+                    if (ci.ctor === name && ci.arity === arity) pushCons(ci)
                 }
             }
         }
