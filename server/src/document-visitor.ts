@@ -2567,9 +2567,10 @@ export class Visitor {
             if (cands.length) return cands
             // 外部限定未命中 → 继续走无限定兜底（与旧 signatureOf 语义一致）
         }
-        // 与 callCandidates 同规则：本地 ∪ 导出索引（本地不硬遮蔽导入）
-        const local = both(this.sigAlts)
-        return this.mergeSigCandidates(local, this.exportManager.lookupSigAlts(name, a, aAlt))
+        // 头位置子句定义的一定是本模块声明（import 的谓词/函数不能被定义），
+        // 所以无限定名只看本模块 sigAlts——否则 string.m 里 `S1 ++ S2 = ...`
+        // 这种 ++ 实现子句会把本地 string.++ 和 list.++ 一起拉进候选判歧义
+        return both(this.sigAlts)
     }
     private varKey(term: Term): string {
         if (['!/1', '!./1', '!:/1'].includes(term.nameArity)) {
