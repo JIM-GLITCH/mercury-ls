@@ -318,4 +318,43 @@ describe('frozen delayed disambiguation', () => {
       expect(i?.category).toBeUndefined()
     }
   })
+
+describe('func-fact rhs disambiguation via declared result type', () => {
+  it('insert(init, X) picks local-module sigs when result type is declared', async () => {
+    await mk(
+      ':- module sb.\n' +
+      ':- interface.\n' +
+      ':- type sb_t.\n' +
+      ':- func init = sb_t.\n' +
+      ':- func insert(sb_t, T) = sb_t.\n' +
+      ':- end_module sb.\n',
+      'sb',
+    )
+    await mk(
+      ':- module ot.\n' +
+      ':- interface.\n' +
+      ':- type ot_t.\n' +
+      ':- func init = ot_t.\n' +
+      ':- func insert(ot_t, T) = ot_t.\n' +
+      ':- end_module ot.\n',
+      'ot',
+    )
+    const docM = await mk(
+      ':- module m.\n' +
+      ':- interface.\n' +
+      ':- import_module sb.\n' +
+      ':- import_module ot.\n' +
+      ':- func make(T) = sb.sb_t.\n' +
+      ':- end_module m.\n' +
+      ':- implementation.\n' +
+      'make(X) = insert(init, X).\n' +
+      ':- end_module m.\n',
+      'm',
+    )
+    const inf = docM.visitResult!.inferred
+    const byNa = (na: string) => [...inf.entries()].find(([t]) => t.nameArity === na)?.[1] as any
+    expect(byNa('insert/2')?.sig?.module).toBe('sb')
+    expect(byNa('init/0')?.sig?.module).toBe('sb')
+  })
+})
 })

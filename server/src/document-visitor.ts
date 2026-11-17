@@ -2350,6 +2350,20 @@ export class Visitor {
     private inferFunctor(term: Term, expected?: LType, allowFreeze = true): LType {
         const name = term.name
         const arity = term.arity
+        // 幂等：已推断过的项直接复用 ltype——inferHead 的预推断+正式推断、
+        // freeze 重试里的嵌套 inferTerm 都会重复走到同一项；重算会换新鲜
+        // 变量，freeze 盯的是旧变量，后续绑定落不到它身上成孤儿歧义。
+        // allowFreeze=false 的是消歧重试本身，必须放行重算
+        if (allowFreeze) {
+            const prev = this.pendingInferred.get(term)
+            if (prev && (prev.sig !== undefined || prev.category !== undefined
+                || this.frozenTerms.has(term))) {
+                // 带 expected 的重推仍要把约束补给已冻结/已消解的项——
+                // 否者 inferHead 第二遍推断拿到的期望类型传不进 freeze 重试
+                if (expected) this.tryUnify(prev.ltype, this.resolveSynonym(expected))
+                return prev.ltype
+            }
+        }
         // bottom-up：先推实参拿真实类型——消歧建立在实测类型上（不再靠
         // quickArgType 猜测）；实参内部消歧不足由各自项的 freeze goal
         // 在绑定后唤醒补齐
@@ -2846,7 +2860,7 @@ export class Visitor {
                 const param = inst.args[ti]
                 ti += this.argWidth(term.args[i])
                 if (param === undefined) continue
-                if (!this.tryUnify(argTypes[i], this.resolveSynonym(param))) { ok = false; break }
+                if (!this.tryUnify(this.resolveSynonym(argTypes[i]), this.resolveSynonym(param))) { ok = false; break }
             }
             if (ok && expHo) {
                 const ho: LType = {
@@ -2869,7 +2883,7 @@ export class Visitor {
             const param = inst.args[ti]
             ti += this.argWidth(term.args[i])
             if (param === undefined) continue
-            this.tryUnify(argTypes[i], this.resolveSynonym(param))
+            this.tryUnify(this.resolveSynonym(argTypes[i]), this.resolveSynonym(param))
         }
         const ho: LType = {
             kind: 'ho', pf: win.kind, args: inst.args.slice(ti),
